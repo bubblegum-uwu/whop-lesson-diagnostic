@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, type Interactions } from "@google/genai";
 import { STRATEGY_EXTRACTION_PROMPT, STRATEGY_RESPONSE_JSON_SCHEMA } from "./schema.js";
 
 /**
@@ -49,32 +49,21 @@ function sleep(ms: number): Promise<void> {
 
 /**
  * Extracts the model's final text output from an Interactions API response.
- * Newer SDK builds expose a convenience `output_text` string; the
- * currently-typed shape instead nests text inside `outputs[]` (or, for
- * agentic responses, inside the final `model_output` step of `steps[]`).
- * We try all three so this keeps working across SDK point releases.
+ * `output_text` is the SDK's convenience field and covers the normal case;
+ * an agentic run that produced its answer inside a `model_output` step
+ * without populating `output_text` falls back to that step's text content.
  */
-function extractOutputText(interaction: unknown): string | undefined {
-  const asAny = interaction as {
-    output_text?: string;
-    outputs?: Array<{ type?: string; text?: string }>;
-    steps?: Array<{ type?: string; content?: Array<{ type?: string; text?: string }> }>;
-  };
-
-  if (typeof asAny.output_text === "string" && asAny.output_text.length > 0) {
-    return asAny.output_text;
+export function extractOutputText(interaction: Interactions.Interaction): string | undefined {
+  if (typeof interaction.output_text === "string" && interaction.output_text.length > 0) {
+    return interaction.output_text;
   }
 
-  const fromOutputs = asAny.outputs?.find((o) => o.type === "text" && typeof o.text === "string")
-    ?.text;
-  if (fromOutputs) return fromOutputs;
-
-  const modelOutputStep = asAny.steps
-    ?.filter((s) => s.type === "model_output")
-    .at(-1);
-  const fromStep = modelOutputStep?.content?.find(
-    (c) => c.type === "text" && typeof c.text === "string",
-  )?.text;
+  const modelOutputSteps = (interaction.steps ?? []).filter(
+    (step): step is Interactions.ModelOutputStep => step.type === "model_output",
+  );
+  const fromStep = modelOutputSteps
+    .at(-1)
+    ?.content?.find((c): c is Interactions.TextContent => c.type === "text")?.text;
   if (fromStep) return fromStep;
 
   return undefined;
@@ -126,26 +115,20 @@ export function createGeminiClient(apiKey: string): GeminiClient {
     processingMode: "agentic" | "static",
   ): Promise<string> {
     try {
-      // NOTE: as of the installed @google/genai SDK version, the published
-      // TypeScript types for `interactions.create` have not yet caught up
-      // with the documented `processing` field on video input parts (see
-      // https://ai.google.dev/gemini-api/docs/video-understanding —
-      // "Agentic video understanding"). The REST API and JS runtime accept
-      // it; only the .d.ts is behind. We cast at this one boundary rather
-      // than losing type safety everywhere else.
-      const input = [
-        {
-          type: "video",
-          uri: file.uri,
-          mime_type: file.mimeType,
-          processing: processingMode,
-        },
-        { type: "text", text: STRATEGY_EXTRACTION_PROMPT },
-      ] as unknown as Parameters<typeof ai.interactions.create>[0]["input"];
+      const videoContent: Interactions.VideoContent = {
+        type: "video",
+        uri: file.uri,
+        mime_type: file.mimeType,
+        processing: processingMode,
+      };
+      const textContent: Interactions.TextContent = {
+        type: "text",
+        text: STRATEGY_EXTRACTION_PROMPT,
+      };
 
       const interaction = await ai.interactions.create({
         model,
-        input,
+        input: [videoContent, textContent],
         response_format: {
           type: "text",
           mime_type: "application/json",
