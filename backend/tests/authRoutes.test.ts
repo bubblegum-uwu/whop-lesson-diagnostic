@@ -7,7 +7,7 @@ import {
   createDisconnectHandler,
 } from "../src/http/routes/auth.js";
 import { saveAuthSession, getAuthSession, deleteAuthSession } from "../src/db/authSessionRepo.js";
-import type { WhopOAuthClient } from "../src/whop/oauthClient.js";
+import { WhopIdentityError, type WhopOAuthClient } from "../src/whop/oauthClient.js";
 import { createTestPool } from "./helpers/testDb.js";
 import { makeResponse } from "./helpers/httpMocks.js";
 
@@ -22,41 +22,96 @@ afterAll(async () => {
 });
 
 function makeOAuthClient(overrides: Partial<WhopOAuthClient> = {}): WhopOAuthClient {
-  return { refreshAccessToken: vi.fn(), revokeRefreshToken: vi.fn(async () => undefined), ...overrides };
+  return {
+    refreshAccessToken: vi.fn(),
+    revokeRefreshToken: vi.fn(async () => undefined),
+    verifyAccessToken: vi.fn(async () => ({ sub: "user_verified" })),
+    ...overrides,
+  };
 }
 
 describe("POST /api/auth/session", () => {
-  it("rejects a body missing required fields", async () => {
-    const handler = createEstablishSessionHandler({ pool, oauthClient: makeOAuthClient(), refreshTokenEncryptionKey: KEY });
+  it("rejects a body missing required fields, without calling out to Whop at all", async () => {
+    const oauthClient = makeOAuthClient();
+    const handler = createEstablishSessionHandler({ pool, oauthClient, refreshTokenEncryptionKey: KEY });
     const { res, statusCode, body } = makeResponse();
     await handler({ body: { access_token: "only-this" } } as Request, res);
     expect(statusCode()).toBe(400);
     expect(body()).toMatchObject({ error: { type: "invalid_request" } });
+    expect(oauthClient.verifyAccessToken).not.toHaveBeenCalled();
   });
 
-  it("persists a valid session and extracts the sub claim from id_token", async () => {
-    const handler = createEstablishSessionHandler({ pool, oauthClient: makeOAuthClient(), refreshTokenEncryptionKey: KEY });
-    const idToken = `header.${Buffer.from(JSON.stringify({ sub: "user_42" })).toString("base64url")}.sig`;
+  it("verifies the access token against Whop and persists the verified sub as the operator identity", async () => {
+    const verifyAccessToken = vi.fn(async (token: string) => {
+      expect(token).toBe("a");
+      return { sub: "user_42" };
+    });
+    const handler = createEstablishSessionHandler({ pool, oauthClient: makeOAuthClient({ verifyAccessToken }), refreshTokenEncryptionKey: KEY });
     const { res, statusCode } = makeResponse();
 
-    await handler(
-      { body: { access_token: "a", refresh_token: "r", expires_in: 3600, id_token: idToken } } as Request,
-      res,
-    );
+    await handler({ body: { access_token: "a", refresh_token: "r", expires_in: 3600 } } as Request, res);
 
     expect(statusCode()).toBe(200);
+    expect(verifyAccessToken).toHaveBeenCalledWith("a");
     const session = await getAuthSession(pool, KEY);
     expect(session?.accessToken).toBe("a");
     expect(session?.refreshToken).toBe("r");
     expect(session?.whopUserId).toBe("user_42");
   });
 
-  it("stores a null whopUserId when id_token is absent or unparseable, without failing the request", async () => {
-    const handler = createEstablishSessionHandler({ pool, oauthClient: makeOAuthClient(), refreshTokenEncryptionKey: KEY });
+  it("rejects with 401 when the access token fails Whop verification, and stores nothing", async () => {
+    const verifyAccessToken = vi.fn(async () => {
+      throw new WhopIdentityError("invalid token");
+    });
+    const handler = createEstablishSessionHandler({ pool, oauthClient: makeOAuthClient({ verifyAccessToken }), refreshTokenEncryptionKey: KEY });
+    const { res, statusCode, body } = makeResponse();
+
+    await handler({ body: { access_token: "forged", refresh_token: "r", expires_in: 3600 } } as Request, res);
+
+    expect(statusCode()).toBe(401);
+    expect(body()).toMatchObject({ error: { type: "invalid_token" } });
+    expect(await getAuthSession(pool, KEY)).toBeNull();
+  });
+
+  it("authorization comes solely from the verified sub — a forged claim elsewhere in the body has no effect", async () => {
+    const verifyAccessToken = vi.fn(async () => ({ sub: "user_real" }));
+    const handler = createEstablishSessionHandler({ pool, oauthClient: makeOAuthClient({ verifyAccessToken }), refreshTokenEncryptionKey: KEY });
+    const { res } = makeResponse();
+
+    await handler(
+      // Deliberately including bogus identity-shaped fields the handler must never read.
+      { body: { access_token: "a", refresh_token: "r", expires_in: 3600, whop_user_id: "user_attacker", sub: "user_attacker" } } as Request,
+      res,
+    );
+
+    expect((await getAuthSession(pool, KEY))?.whopUserId).toBe("user_real");
+  });
+
+  it("returns 403 and does not overwrite the singleton session when a different Whop user tries to establish a session", async () => {
+    await saveAuthSession(pool, { whopUserId: "user_original", accessToken: "orig-a", refreshToken: "orig-r", accessTokenExpiresAt: new Date() }, KEY);
+    const verifyAccessToken = vi.fn(async () => ({ sub: "user_intruder" }));
+    const handler = createEstablishSessionHandler({ pool, oauthClient: makeOAuthClient({ verifyAccessToken }), refreshTokenEncryptionKey: KEY });
+    const { res, statusCode, body } = makeResponse();
+
+    await handler({ body: { access_token: "intruder-a", refresh_token: "intruder-r", expires_in: 3600 } } as Request, res);
+
+    expect(statusCode()).toBe(403);
+    expect(body()).toMatchObject({ error: { type: "forbidden_operator" } });
+    const session = await getAuthSession(pool, KEY);
+    expect(session?.whopUserId).toBe("user_original");
+    expect(session?.accessToken).toBe("orig-a");
+  });
+
+  it("allows the SAME operator to re-establish their session (e.g. re-login) without a 403", async () => {
+    await saveAuthSession(pool, { whopUserId: "user_original", accessToken: "old-a", refreshToken: "old-r", accessTokenExpiresAt: new Date() }, KEY);
+    const verifyAccessToken = vi.fn(async () => ({ sub: "user_original" }));
+    const handler = createEstablishSessionHandler({ pool, oauthClient: makeOAuthClient({ verifyAccessToken }), refreshTokenEncryptionKey: KEY });
     const { res, statusCode } = makeResponse();
-    await handler({ body: { access_token: "a", refresh_token: "r", expires_in: 3600, id_token: "garbage" } } as Request, res);
+
+    await handler({ body: { access_token: "new-a", refresh_token: "new-r", expires_in: 3600 } } as Request, res);
+
     expect(statusCode()).toBe(200);
-    expect((await getAuthSession(pool, KEY))?.whopUserId).toBeNull();
+    expect((await getAuthSession(pool, KEY))?.accessToken).toBe("new-a");
   });
 });
 

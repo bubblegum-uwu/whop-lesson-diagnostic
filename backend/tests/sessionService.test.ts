@@ -19,6 +19,7 @@ function makeOAuthClient(overrides: Partial<WhopOAuthClient> = {}): WhopOAuthCli
   return {
     refreshAccessToken: vi.fn(),
     revokeRefreshToken: vi.fn(),
+    verifyAccessToken: vi.fn(),
     ...overrides,
   };
 }
@@ -127,5 +128,49 @@ describe("getValidAccessToken", () => {
     const oauth = makeOAuthClient();
     await expect(getValidAccessToken(pool, oauth, KEY)).rejects.toBeInstanceOf(AuthRequiredError);
     expect(oauth.refreshAccessToken).not.toHaveBeenCalled();
+  });
+
+  it("does not let two concurrent callers both spend the same rotating refresh token", async () => {
+    await saveAuthSession(
+      pool,
+      {
+        whopUserId: "user_1",
+        accessToken: "about-to-expire",
+        refreshToken: "rotating-refresh-1",
+        accessTokenExpiresAt: new Date(Date.now() + 60_000), // under the 5 min margin
+      },
+      KEY,
+    );
+
+    let refreshCallCount = 0;
+    const oauth = makeOAuthClient({
+      refreshAccessToken: vi.fn(async (refreshToken: string) => {
+        refreshCallCount += 1;
+        // Widen the race window so a concurrent second caller genuinely
+        // contends for the advisory lock instead of just running after.
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        return {
+          access_token: `refreshed-from-${refreshToken}-call-${refreshCallCount}`,
+          refresh_token: `rotated-refresh-call-${refreshCallCount}`,
+          expires_in: 3600,
+          token_type: "bearer",
+        };
+      }),
+    });
+
+    const [tokenA, tokenB] = await Promise.all([
+      getValidAccessToken(pool, oauth, KEY),
+      getValidAccessToken(pool, oauth, KEY),
+    ]);
+
+    // Only one of the two concurrent callers actually called Whop's
+    // refresh grant with the (now-rotated) refresh token; the other waited
+    // for the lock and then saw the already-refreshed row.
+    expect(refreshCallCount).toBe(1);
+    expect(tokenA).toBe(tokenB);
+
+    const persisted = await getAuthSession(pool, KEY);
+    expect(persisted?.accessToken).toBe(tokenA);
+    expect(persisted?.refreshToken).toBe("rotated-refresh-call-1");
   });
 });

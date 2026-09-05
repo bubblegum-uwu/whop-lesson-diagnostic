@@ -43,7 +43,7 @@ function makeCourseClient(): WhopCourseClient {
 }
 
 function makeOAuthClient(): WhopOAuthClient {
-  return { refreshAccessToken: vi.fn(), revokeRefreshToken: vi.fn() };
+  return { refreshAccessToken: vi.fn(), revokeRefreshToken: vi.fn(), verifyAccessToken: vi.fn() };
 }
 
 describe("POST /api/course/sync", () => {

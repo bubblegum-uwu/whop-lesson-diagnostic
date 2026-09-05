@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { createWhopOAuthClient, WhopRefreshError } from "../src/whop/oauthClient.js";
+import { createWhopOAuthClient, WhopRefreshError, WhopIdentityError } from "../src/whop/oauthClient.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -62,5 +62,32 @@ describe("createWhopOAuthClient.revokeRefreshToken", () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(500, {})));
     const client = createWhopOAuthClient("app_abc123");
     await expect(client.revokeRefreshToken("tok")).rejects.toBeInstanceOf(WhopRefreshError);
+  });
+});
+
+describe("createWhopOAuthClient.verifyAccessToken", () => {
+  it("GETs the userinfo endpoint with the bearer token and returns the verified sub", async () => {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(url).toBe("https://api.whop.com/oauth/userinfo");
+      expect((init.headers as Record<string, string>).Authorization).toBe("Bearer caller-token");
+      return jsonResponse(200, { sub: "user_verified123", name: "Operator" });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = createWhopOAuthClient("app_abc123");
+    const info = await client.verifyAccessToken("caller-token");
+    expect(info.sub).toBe("user_verified123");
+  });
+
+  it("throws WhopIdentityError on a non-2xx response (invalid/expired token)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(401, { error: "invalid_token" })));
+    const client = createWhopOAuthClient("app_abc123");
+    await expect(client.verifyAccessToken("bad-token")).rejects.toBeInstanceOf(WhopIdentityError);
+  });
+
+  it("throws WhopIdentityError when the response has no sub claim, rather than trusting a partial payload", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { name: "No Sub Here" })));
+    const client = createWhopOAuthClient("app_abc123");
+    await expect(client.verifyAccessToken("tok")).rejects.toBeInstanceOf(WhopIdentityError);
   });
 });

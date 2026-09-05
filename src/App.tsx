@@ -38,7 +38,13 @@ type AppState =
   | { phase: "fatal_error"; message: string };
 
 interface CourseViewState {
-  loading: boolean;
+  // Held only in memory, for the lifetime of this loaded page — never
+  // localStorage/sessionStorage/cookies. Every protected course/auth call
+  // needs it as a bearer header (the backend verifies it against Whop and
+  // checks it's the authorized operator); a page reload clears it, so the
+  // Course view requires signing in again before it can load. That's the
+  // correct cost of not relying on CORS/Origin as a security boundary.
+  accessToken: string | null;
   connecting: boolean;
   syncing: boolean;
   authRequired: boolean;
@@ -50,7 +56,7 @@ interface CourseViewState {
 }
 
 const INITIAL_COURSE_STATE: CourseViewState = {
-  loading: true,
+  accessToken: null,
   connecting: false,
   syncing: false,
   authRequired: false,
@@ -79,16 +85,15 @@ export default function App() {
   });
   const [courseState, setCourseState] = useState<CourseViewState>(INITIAL_COURSE_STATE);
 
-  async function refreshCourseState() {
+  async function refreshCourseState(accessToken: string) {
     if (!backendUrl) return;
     try {
       const [authStatus, courseLessons] = await Promise.all([
-        getAuthStatus(backendUrl),
-        getCourseLessons(backendUrl),
+        getAuthStatus(backendUrl, accessToken),
+        getCourseLessons(backendUrl, accessToken),
       ]);
       setCourseState((prev) => ({
         ...prev,
-        loading: false,
         connected: authStatus.connected,
         authRequired: authStatus.status === "auth_required",
         courseTitle: courseLessons.course?.title ?? null,
@@ -98,7 +103,6 @@ export default function App() {
     } catch (err) {
       setCourseState((prev) => ({
         ...prev,
-        loading: false,
         errorMessage: err instanceof Error ? err.message : "Failed to load course state.",
       }));
     }
@@ -109,10 +113,11 @@ export default function App() {
     const params = new URLSearchParams(search);
     const isCallback = params.has("code") || params.has("error");
 
-    if (!isCallback) {
-      void refreshCourseState();
-      return;
-    }
+    // No prior sign-in from this page load means no access token in hand —
+    // nothing to present to the protected course/auth endpoints yet, so the
+    // Course view simply starts in its "not connected" state (see
+    // INITIAL_COURSE_STATE) until the operator signs in again.
+    if (!isCallback) return;
 
     const config = loadConfig();
     if (!config) {
@@ -151,10 +156,10 @@ export default function App() {
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
           expiresIn: tokens.expires_in,
-          idToken: tokens.id_token,
         });
+        setCourseState((prev) => ({ ...prev, accessToken: tokens.access_token }));
+        await refreshCourseState(tokens.access_token);
       }
-      await refreshCourseState();
     } catch (err) {
       setCourseState((prev) => ({
         ...prev,
@@ -227,9 +232,10 @@ export default function App() {
   }
 
   async function handleCourseSync() {
-    if (!backendUrl) return;
+    if (!backendUrl || !courseState.accessToken) return;
+    const accessToken = courseState.accessToken;
     setCourseState((prev) => ({ ...prev, syncing: true, errorMessage: null }));
-    const outcome = await syncCourse(backendUrl);
+    const outcome = await syncCourse(backendUrl, accessToken);
     if (outcome.kind === "auth_required") {
       setCourseState((prev) => ({ ...prev, syncing: false, authRequired: true, connected: false }));
       return;
@@ -238,15 +244,14 @@ export default function App() {
       setCourseState((prev) => ({ ...prev, syncing: false, errorMessage: outcome.message }));
       return;
     }
-    await refreshCourseState();
+    await refreshCourseState(accessToken);
     setCourseState((prev) => ({ ...prev, syncing: false }));
   }
 
   async function handleCourseDisconnect() {
-    if (!backendUrl) return;
-    await disconnectAuthSession(backendUrl);
+    if (!backendUrl || !courseState.accessToken) return;
+    await disconnectAuthSession(backendUrl, courseState.accessToken);
     setCourseState(INITIAL_COURSE_STATE);
-    await refreshCourseState();
   }
 
   function handleAnalyzeLessonFromTable(sourceUrl: string) {

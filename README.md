@@ -142,6 +142,15 @@ Clicking **Analyze** on a lesson hands off to the single-lesson diagnostic
 flow below, pre-filled with that lesson's URL — this proven flow is
 otherwise completely unchanged.
 
+Every Course-view action (status, sync, disconnect) requires presenting
+your current Whop access token, which the backend independently verifies
+and checks against the one authorized operator — not something CORS or an
+`Origin` header could ever safely gate. Since this token is only ever held
+in memory (never localStorage), **reloading the page shows "Connect Whop"
+again**, even though the backend's own stored session is still valid —
+sign in again to pick the Course view back up. See `backend/README.md`'s
+"Security model" for the full design.
+
 ## 6. How to run this diagnostic
 
 ### Locally

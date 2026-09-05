@@ -1,5 +1,14 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { encryptSecret, decryptSecret } from "../lib/crypto.js";
+
+/**
+ * Every function here accepts either a plain `Pool` or a `PoolClient`
+ * checked out inside a transaction — the latter is what the refresh
+ * single-flight lock in whop/sessionService.ts uses, so its
+ * check-then-maybe-refresh sequence runs on one connection under one
+ * `pg_advisory_xact_lock`.
+ */
+export type Queryable = Pool | PoolClient;
 
 export type AuthSessionStatus = "active" | "auth_required";
 
@@ -22,14 +31,14 @@ export interface SaveAuthSessionInput {
 const SESSION_ID = 1;
 
 export async function saveAuthSession(
-  pool: Pool,
+  db: Queryable,
   input: SaveAuthSessionInput,
   encryptionKey: string,
 ): Promise<void> {
   const encryptedAccessToken = encryptSecret(input.accessToken, encryptionKey);
   const encryptedRefreshToken = encryptSecret(input.refreshToken, encryptionKey);
 
-  await pool.query(
+  await db.query(
     `INSERT INTO auth_sessions (
        id, whop_user_id, encrypted_access_token, encrypted_refresh_token,
        access_token_expires_at, status
@@ -45,8 +54,8 @@ export async function saveAuthSession(
   );
 }
 
-export async function getAuthSession(pool: Pool, encryptionKey: string): Promise<AuthSession | null> {
-  const result = await pool.query(
+export async function getAuthSession(db: Queryable, encryptionKey: string): Promise<AuthSession | null> {
+  const result = await db.query(
     `SELECT whop_user_id, encrypted_access_token, encrypted_refresh_token,
             access_token_expires_at, status
      FROM auth_sessions WHERE id = $1`,
@@ -79,8 +88,8 @@ export interface AuthSessionStatusView {
 }
 
 /** Status-only read — never touches the encrypted columns, so no decryption/key needed. */
-export async function getAuthSessionStatus(pool: Pool): Promise<AuthSessionStatusView | null> {
-  const result = await pool.query(
+export async function getAuthSessionStatus(db: Queryable): Promise<AuthSessionStatusView | null> {
+  const result = await db.query(
     `SELECT whop_user_id, status, access_token_expires_at FROM auth_sessions WHERE id = $1`,
     [SESSION_ID],
   );
@@ -92,8 +101,8 @@ export async function getAuthSessionStatus(pool: Pool): Promise<AuthSessionStatu
 }
 
 /** Marks the session AUTH_REQUIRED — e.g. a refresh attempt itself failed. Never deletes the row. */
-export async function markAuthRequired(pool: Pool): Promise<void> {
-  await pool.query(
+export async function markAuthRequired(db: Queryable): Promise<void> {
+  await db.query(
     `UPDATE auth_sessions SET status = 'auth_required', updated_at = now() WHERE id = $1`,
     [SESSION_ID],
   );
@@ -101,7 +110,7 @@ export async function markAuthRequired(pool: Pool): Promise<void> {
 
 /** Updates just the access token + expiry after a successful refresh, leaving the refresh token as-is unless Whop rotated it. */
 export async function updateAccessToken(
-  pool: Pool,
+  db: Queryable,
   accessToken: string,
   accessTokenExpiresAt: Date,
   encryptionKey: string,
@@ -110,7 +119,7 @@ export async function updateAccessToken(
   const encryptedAccessToken = encryptSecret(accessToken, encryptionKey);
   if (newRefreshToken) {
     const encryptedRefreshToken = encryptSecret(newRefreshToken, encryptionKey);
-    await pool.query(
+    await db.query(
       `UPDATE auth_sessions SET
          encrypted_access_token = $2, encrypted_refresh_token = $3,
          access_token_expires_at = $4, status = 'active', updated_at = now()
@@ -118,7 +127,7 @@ export async function updateAccessToken(
       [SESSION_ID, encryptedAccessToken, encryptedRefreshToken, accessTokenExpiresAt],
     );
   } else {
-    await pool.query(
+    await db.query(
       `UPDATE auth_sessions SET
          encrypted_access_token = $2, access_token_expires_at = $3, status = 'active', updated_at = now()
        WHERE id = $1`,
@@ -128,6 +137,6 @@ export async function updateAccessToken(
 }
 
 /** Explicit disconnect: the caller is responsible for calling Whop's revoke endpoint first. */
-export async function deleteAuthSession(pool: Pool): Promise<void> {
-  await pool.query(`DELETE FROM auth_sessions WHERE id = $1`, [SESSION_ID]);
+export async function deleteAuthSession(db: Queryable): Promise<void> {
+  await db.query(`DELETE FROM auth_sessions WHERE id = $1`, [SESSION_ID]);
 }

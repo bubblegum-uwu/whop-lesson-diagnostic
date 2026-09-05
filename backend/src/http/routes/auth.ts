@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
 import { saveAuthSession, getAuthSession, getAuthSessionStatus, deleteAuthSession } from "../../db/authSessionRepo.js";
-import type { WhopOAuthClient } from "../../whop/oauthClient.js";
+import { WhopIdentityError, type WhopOAuthClient } from "../../whop/oauthClient.js";
 import { globalRedactor } from "../../lib/redact.js";
 import { logger } from "../../lib/logger.js";
 
@@ -15,19 +15,6 @@ interface EstablishSessionBody {
   access_token?: string;
   refresh_token?: string;
   expires_in?: number;
-  id_token?: string;
-}
-
-/** Best-effort, unverified decode of the id_token's `sub` claim — display only, never used for authorization. */
-function extractSubClaim(idToken: string | undefined): string | null {
-  if (!idToken) return null;
-  try {
-    const [, payloadB64] = idToken.split(".");
-    const payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
-    return typeof payload.sub === "string" ? payload.sub : null;
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -36,6 +23,16 @@ function extractSubClaim(idToken: string | undefined): string | null {
  * for server-side storage (§04 of the architecture proposal). The frontend
  * never writes these to localStorage; this is the only place they're
  * persisted, encrypted at rest.
+ *
+ * This is the one route reachable before any operator identity exists —
+ * every other sensitive route requires one already be established. The
+ * identity itself is never taken from a client-supplied claim (there is no
+ * id_token in this request at all): the submitted access_token is verified
+ * against Whop's userinfo endpoint first, and only that verified `sub` is
+ * ever persisted as the operator identity. Once an operator exists, a
+ * session-establishment attempt verified as a *different* Whop user is
+ * rejected outright — the singleton session can never be silently taken
+ * over.
  */
 export function createEstablishSessionHandler(deps: AuthRoutesDeps) {
   return async function establishSessionHandler(req: Request, res: Response): Promise<void> {
@@ -50,10 +47,34 @@ export function createEstablishSessionHandler(deps: AuthRoutesDeps) {
     globalRedactor.register(body.access_token);
     globalRedactor.register(body.refresh_token);
 
+    let verified;
+    try {
+      verified = await deps.oauthClient.verifyAccessToken(body.access_token);
+    } catch (err) {
+      if (err instanceof WhopIdentityError) {
+        res.status(401).json({
+          error: { message: "Could not verify the supplied Whop access token.", type: "invalid_token" },
+        });
+        return;
+      }
+      throw err;
+    }
+
+    const existingOperator = await getAuthSessionStatus(deps.pool);
+    if (existingOperator && existingOperator.whopUserId !== verified.sub) {
+      res.status(403).json({
+        error: {
+          message: "A different Whop account already owns this deployment's operator session.",
+          type: "forbidden_operator",
+        },
+      });
+      return;
+    }
+
     await saveAuthSession(
       deps.pool,
       {
-        whopUserId: extractSubClaim(body.id_token),
+        whopUserId: verified.sub,
         accessToken: body.access_token,
         refreshToken: body.refresh_token,
         accessTokenExpiresAt: new Date(Date.now() + body.expires_in * 1000),

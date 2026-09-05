@@ -15,6 +15,7 @@ import {
 } from "./routes/auth.js";
 import { createCourseSyncHandler } from "./routes/courseSync.js";
 import { createCourseLessonsHandler } from "./routes/courseLessons.js";
+import { requireOperator } from "./middleware/operatorAuth.js";
 import type { AnalyzeLessonDeps } from "../pipeline/analyzeLesson.js";
 
 export function createApp(config: AppConfig): Express {
@@ -42,19 +43,35 @@ export function createApp(config: AppConfig): Express {
     res.status(200).json({ ok: true });
   });
 
-  // Preserved, unmodified: the existing single-lesson analysis flow.
-  app.post("/api/analyze-lesson", createAnalyzeLessonHandler(deps));
+  // Every route below requires the caller to present a bearer token that
+  // verifies (via Whop's userinfo endpoint) as the same Whop account
+  // already established as this deployment's single operator. CORS/Origin
+  // are not, and never were, the security boundary here.
+  const operatorAuth = requireOperator({ pool, oauthClient });
+
+  // Preserved: the existing single-lesson analysis flow, now also gated —
+  // an arbitrary caller with an arbitrary Whop token can no longer spend
+  // this deployment's Gemini quota.
+  app.post("/api/analyze-lesson", operatorAuth, createAnalyzeLessonHandler(deps));
 
   const authDeps = { pool, oauthClient, refreshTokenEncryptionKey: config.refreshTokenEncryptionKey };
+  // Not gated: this is the one route reachable before any operator exists —
+  // it verifies the submitted token itself and enforces single-operator
+  // ownership inline (see http/routes/auth.ts).
   app.post("/api/auth/session", createEstablishSessionHandler(authDeps));
-  app.get("/api/auth/status", createAuthStatusHandler(authDeps));
-  app.post("/api/auth/disconnect", createDisconnectHandler(authDeps));
+  app.get("/api/auth/status", operatorAuth, createAuthStatusHandler(authDeps));
+  app.post("/api/auth/disconnect", operatorAuth, createDisconnectHandler(authDeps));
 
   app.post(
     "/api/course/sync",
+    operatorAuth,
     createCourseSyncHandler({ pool, courseClient, oauthClient, refreshTokenEncryptionKey: config.refreshTokenEncryptionKey, course: config.course }),
   );
-  app.get("/api/course/lessons", createCourseLessonsHandler({ pool, whopCourseId: config.course.courseId }));
+  app.get(
+    "/api/course/lessons",
+    operatorAuth,
+    createCourseLessonsHandler({ pool, whopCourseId: config.course.courseId }),
+  );
 
   return app;
 }

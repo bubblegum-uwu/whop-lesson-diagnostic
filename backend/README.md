@@ -72,6 +72,44 @@ the moment they're known, and every log line goes through it
 (`src/lib/logger.ts`). This is covered by automated tests in
 `tests/redact.test.ts` and `tests/logger.test.ts`.
 
+## Security model
+
+The Cloud Run service is deployed `--allow-unauthenticated` (the browser
+needs to reach it directly), and CORS restricting `ALLOWED_ORIGIN` is a
+browser-enforced convention — a non-browser HTTP client can ignore it
+entirely. So CORS, `Origin`, and `client_id` are never the security
+boundary for anything sensitive; only a verified Whop identity is
+(`src/http/middleware/operatorAuth.ts`):
+
+1. The caller presents their own, currently-held Whop access token as
+   `Authorization: Bearer <token>`.
+2. The backend calls Whop's documented `GET /oauth/userinfo` with that
+   token and reads the verified `sub` claim back — never a client-supplied
+   `id_token` payload, which nothing here trusts for authorization.
+3. That `sub` must equal the `whop_user_id` already persisted in
+   `auth_sessions` (the single operator this deployment belongs to) or the
+   request is rejected: 401 if there's no session yet or the token itself
+   doesn't verify, 403 if it verifies as a genuine but different Whop
+   account.
+
+`requireOperator` gates every sensitive route: `GET/POST /api/auth/{status,disconnect}`,
+`POST /api/course/sync`, `GET /api/course/lessons`, and the existing
+`POST /api/analyze-lesson` (closing off what would otherwise be a public,
+Gemini-cost-bearing endpoint reachable by anyone with any Whop token).
+`POST /api/auth/session` is the one exception — it's how the very first
+operator session gets established — but it runs the same userinfo
+verification inline and enforces the identical single-operator rule:
+establishing a session as a *different* Whop user than the one already on
+file is a 403, not a silent takeover. `GET /healthz` stays public and
+returns only `{ok: true}`.
+
+Refreshing the backend's own stored session (independent of the
+per-request caller-identity check above) is concurrency-safe: the
+check-then-maybe-refresh sequence runs inside one Postgres transaction
+holding `pg_advisory_xact_lock` (`src/whop/sessionService.ts`), so two
+processes (this API today; a PR2 worker later) can never both read the
+same about-to-be-rotated refresh token and both try to spend it.
+
 ## Phase 3: course discovery & persistence (PR1)
 
 ```
@@ -165,8 +203,8 @@ src/
   whop/
     client.ts               Server-side Whop course_lessons GET (Phase 2, unchanged)
     courseClient.ts            GET /courses/{id} + paginated GET /course_lessons
-    oauthClient.ts               Server-side refresh_token grant + revoke
-    sessionService.ts             Refresh-if-needed access-token helper
+    oauthClient.ts               Server-side refresh_token grant + revoke + verifyAccessToken (userinfo)
+    sessionService.ts             Refresh-if-needed access-token helper, advisory-lock single-flight
     lessonUrl.ts                  Builds a lesson's canonical Whop URL
   mux/signedUrl.ts         Signed Mux HLS URL construction
   ffmpeg/remux.ts          Stream-copy remux, sanitized errors
@@ -180,8 +218,10 @@ src/
   http/
     app.ts                   Express app wiring
     sse.ts                    Server-Sent-Events helpers
+    middleware/
+      operatorAuth.ts          requireOperator — verified-identity gate on every sensitive route
     routes/
-      analyzeLesson.ts         POST /api/analyze-lesson handler (unchanged)
+      analyzeLesson.ts         POST /api/analyze-lesson handler (gated; pipeline itself unchanged)
       auth.ts                    /api/auth/{session,status,disconnect}
       courseSync.ts               POST /api/course/sync
       courseLessons.ts             GET /api/course/lessons
@@ -271,15 +311,33 @@ Covers (see `tests/`):
   a lesson the course tree doesn't mention
 - Auth/course HTTP routes: 401 `auth_required`, never returns a token value,
   disconnect always clears the local session even if Whop's revoke fails
+- `requireOperator` (unit + real-HTTP end-to-end): unauthenticated calls to
+  every protected route are rejected, a verified-but-different Whop user
+  gets 403 on every one without reaching its handler, a matching operator
+  reaches the real handler, a session-establishment attempt from a
+  different Whop user never overwrites the singleton, and no error
+  response ever contains the caller's raw bearer token
+- Refresh-token concurrency: two simultaneous `getValidAccessToken` calls
+  against the same near-expired session result in exactly one call to
+  Whop's refresh grant — the second waits for the advisory lock and reuses
+  the already-rotated token instead of racing for it
+
+A GitHub Actions workflow (`.github/workflows/pr-checks.yml`) runs the full
+backend suite above (migrations, typecheck, test, build) against a
+Postgres 16 service container, plus the frontend suite, on every pull
+request — no production secrets involved, and it never deploys anything
+(deploys stay in `deploy.yml`, triggered only by pushes to `main`).
 
 ## Known limitations (acceptable for this PoC)
 
 - `MAX_VIDEO_BYTES` is read but not yet enforced mid-download; ffmpeg is
   trusted to fail naturally on absurd inputs. For a single known ~26-minute
   lesson this is an acceptable simplification.
-- No rate limiting / no shared secret beyond "the caller must present a
-  Whop token that Whop itself validates." Fine for a single-user PoC;
-  revisit before wider use.
+- No rate limiting on any route. Every sensitive route does now require a
+  Whop token independently verified against Whop's userinfo endpoint and
+  matched to the persisted operator (see "Security model" below) — but
+  nothing stops the one legitimate operator from calling `/api/analyze-lesson`
+  in a tight loop. Fine for a single-operator PoC; revisit before wider use.
 - Stage progress is delivered via a single long-lived SSE response, not a
   separate job-status endpoint. Good enough for one lesson; would need a
   job queue for concurrent multi-lesson use (explicitly out of scope now).
@@ -293,11 +351,11 @@ Covers (see `tests/`):
   call from this development environment. Run `POST /api/course/sync` once
   against the real course early and confirm chapter titles/orders look
   right before relying on it further.
-- The `/api/course/sync` and `/api/course/lessons` routes currently have no
-  caller-auth check of their own beyond CORS — they rely on the backend's
-  own stored Whop session, the same trust boundary as the rest of this
-  single-operator service. Revisit if this ever serves more than one
-  operator.
+- Every protected route resolves identity by calling Whop's userinfo
+  endpoint on every request — correct and simple, but it's an extra network
+  round-trip per request. Fine at this traffic level; would be worth caching
+  briefly (with a short TTL, not indefinitely) if this ever serves real
+  concurrent load.
 
 ---
 
