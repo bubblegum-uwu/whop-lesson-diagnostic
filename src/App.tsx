@@ -3,6 +3,7 @@ import { ConfigForm } from "./components/ConfigForm";
 import { DiagnosticResult } from "./components/DiagnosticResult";
 import { ErrorResult } from "./components/ErrorResult";
 import { AnalyzeLesson } from "./components/AnalyzeLesson";
+import { CourseTable } from "./components/CourseTable";
 import {
   startWhopOAuth,
   exchangeCodeForTokens,
@@ -14,6 +15,15 @@ import { sanitizeLessonResponse } from "./lib/sanitize";
 import { buildDiagnosticDisplayPayload, type DiagnosticDisplayPayload } from "./lib/diagnosticPayload";
 import { saveConfig, loadConfig, clearConfig } from "./lib/sessionConfig";
 import { getBackendUrl } from "./lib/backendConfig";
+import { getWhopClientId } from "./lib/scarfaceCourseConfig";
+import {
+  establishAuthSession,
+  getAuthStatus,
+  disconnectAuthSession,
+  syncCourse,
+  getCourseLessons,
+  type CourseLessonSummary,
+} from "./lib/courseApi";
 
 type AppState =
   | { phase: "config"; errorMessage: string | null; submitting: boolean }
@@ -27,6 +37,30 @@ type AppState =
   | { phase: "api_error"; outcome: Exclude<LessonFetchOutcome, { kind: "success" }> }
   | { phase: "fatal_error"; message: string };
 
+interface CourseViewState {
+  loading: boolean;
+  connecting: boolean;
+  syncing: boolean;
+  authRequired: boolean;
+  connected: boolean;
+  courseTitle: string | null;
+  lastSyncedAt: string | null;
+  lessons: CourseLessonSummary[];
+  errorMessage: string | null;
+}
+
+const INITIAL_COURSE_STATE: CourseViewState = {
+  loading: true,
+  connecting: false,
+  syncing: false,
+  authRequired: false,
+  connected: false,
+  courseTitle: null,
+  lastSyncedAt: null,
+  lessons: [],
+  errorMessage: null,
+};
+
 function getRedirectUri(): string {
   // Must exactly match a redirect URI registered in the Whop Dashboard.
   const base = import.meta.env.BASE_URL; // e.g. "/" locally, "/repo-name/" on GH Pages
@@ -35,24 +69,57 @@ function getRedirectUri(): string {
 
 export default function App() {
   const redirectUri = useMemo(getRedirectUri, []);
+  const clientId = useMemo(getWhopClientId, []);
+  const backendUrl = useMemo(getBackendUrl, []);
+
   const [state, setState] = useState<AppState>({
     phase: "config",
     errorMessage: null,
     submitting: false,
   });
+  const [courseState, setCourseState] = useState<CourseViewState>(INITIAL_COURSE_STATE);
+
+  async function refreshCourseState() {
+    if (!backendUrl) return;
+    try {
+      const [authStatus, courseLessons] = await Promise.all([
+        getAuthStatus(backendUrl),
+        getCourseLessons(backendUrl),
+      ]);
+      setCourseState((prev) => ({
+        ...prev,
+        loading: false,
+        connected: authStatus.connected,
+        authRequired: authStatus.status === "auth_required",
+        courseTitle: courseLessons.course?.title ?? null,
+        lastSyncedAt: courseLessons.course?.lastSyncedAt ?? null,
+        lessons: courseLessons.lessons,
+      }));
+    } catch (err) {
+      setCourseState((prev) => ({
+        ...prev,
+        loading: false,
+        errorMessage: err instanceof Error ? err.message : "Failed to load course state.",
+      }));
+    }
+  }
 
   useEffect(() => {
     const search = window.location.search;
     const params = new URLSearchParams(search);
     const isCallback = params.has("code") || params.has("error");
-    if (!isCallback) return;
+
+    if (!isCallback) {
+      void refreshCourseState();
+      return;
+    }
 
     const config = loadConfig();
     if (!config) {
       setState({
         phase: "fatal_error",
         message:
-          "Returned from Whop but no diagnostic config (client_id / lesson URL) was found for this session. Please start again.",
+          "Returned from Whop but no pending sign-in was found for this session. Please start again.",
       });
       return;
     }
@@ -60,15 +127,50 @@ export default function App() {
     // Clean the OAuth params out of the visible URL bar right away.
     window.history.replaceState({}, "", redirectUri);
 
-    void runCallbackFlow(config.clientId, config.lessonUrl, search);
+    if (config.flow === "course") {
+      void runCourseCallbackFlow(search);
+    } else {
+      void runDiagnosticCallbackFlow(config.lessonUrl, search);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function runCallbackFlow(clientId: string, lessonUrl: string, search: string) {
+  async function runCourseCallbackFlow(search: string) {
+    setCourseState((prev) => ({ ...prev, connecting: true, errorMessage: null }));
+    try {
+      const callback = parseCallbackParams(search);
+      const tokens = await exchangeCodeForTokens(clientId!, redirectUri, callback);
+
+      if (backendUrl) {
+        if (!tokens.refresh_token) {
+          throw new Error(
+            "Whop did not return a refresh_token — check that this OAuth app is configured to issue one.",
+          );
+        }
+        await establishAuthSession(backendUrl, {
+          accessToken: tokens.access_token,
+          refreshToken: tokens.refresh_token,
+          expiresIn: tokens.expires_in,
+          idToken: tokens.id_token,
+        });
+      }
+      await refreshCourseState();
+    } catch (err) {
+      setCourseState((prev) => ({
+        ...prev,
+        errorMessage: err instanceof Error ? err.message : "Whop sign-in failed.",
+      }));
+    } finally {
+      clearConfig();
+      setCourseState((prev) => ({ ...prev, connecting: false }));
+    }
+  }
+
+  async function runDiagnosticCallbackFlow(lessonUrl: string, search: string) {
     setState({ phase: "exchanging" });
     try {
       const callback = parseCallbackParams(search);
-      const tokens = await exchangeCodeForTokens(clientId, redirectUri, callback);
+      const tokens = await exchangeCodeForTokens(clientId!, redirectUri, callback);
 
       const urlIds = parseWhopLessonUrl(lessonUrl);
 
@@ -95,11 +197,8 @@ export default function App() {
     }
   }
 
-  async function handleSubmit(clientId: string, lessonUrl: string) {
-    if (!clientId) {
-      setState({ phase: "config", errorMessage: "Please enter a client_id.", submitting: false });
-      return;
-    }
+  async function handleSubmit(lessonUrl: string) {
+    if (!clientId) return; // guarded by the "not configured" screen below
     try {
       parseWhopLessonUrl(lessonUrl);
     } catch (err) {
@@ -115,9 +214,43 @@ export default function App() {
     }
 
     setState({ phase: "config", errorMessage: null, submitting: true });
-    saveConfig({ clientId, lessonUrl });
+    saveConfig({ flow: "diagnostic", lessonUrl });
     const authorizeUrl = await startWhopOAuth(clientId, redirectUri);
     window.location.href = authorizeUrl;
+  }
+
+  async function handleCourseSignIn() {
+    if (!clientId) return;
+    saveConfig({ flow: "course" });
+    const authorizeUrl = await startWhopOAuth(clientId, redirectUri);
+    window.location.href = authorizeUrl;
+  }
+
+  async function handleCourseSync() {
+    if (!backendUrl) return;
+    setCourseState((prev) => ({ ...prev, syncing: true, errorMessage: null }));
+    const outcome = await syncCourse(backendUrl);
+    if (outcome.kind === "auth_required") {
+      setCourseState((prev) => ({ ...prev, syncing: false, authRequired: true, connected: false }));
+      return;
+    }
+    if (outcome.kind === "error") {
+      setCourseState((prev) => ({ ...prev, syncing: false, errorMessage: outcome.message }));
+      return;
+    }
+    await refreshCourseState();
+    setCourseState((prev) => ({ ...prev, syncing: false }));
+  }
+
+  async function handleCourseDisconnect() {
+    if (!backendUrl) return;
+    await disconnectAuthSession(backendUrl);
+    setCourseState(INITIAL_COURSE_STATE);
+    await refreshCourseState();
+  }
+
+  function handleAnalyzeLessonFromTable(sourceUrl: string) {
+    void handleSubmit(sourceUrl);
   }
 
   function handleReset() {
@@ -125,8 +258,34 @@ export default function App() {
     setState({ phase: "config", errorMessage: null, submitting: false });
   }
 
+  if (!clientId) {
+    return (
+      <div className="app-shell">
+        <div className="error-panel" role="alert">
+          <h2>Whop OAuth is not configured.</h2>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
+      {backendUrl && (
+        <CourseTable
+          courseTitle={courseState.courseTitle}
+          lessons={courseState.lessons}
+          connected={courseState.connected}
+          syncing={courseState.syncing}
+          authRequired={courseState.authRequired}
+          lastSyncedAt={courseState.lastSyncedAt}
+          onSignIn={handleCourseSignIn}
+          onSync={handleCourseSync}
+          onDisconnect={handleCourseDisconnect}
+          onAnalyzeLesson={handleAnalyzeLessonFromTable}
+        />
+      )}
+      {courseState.errorMessage && <div className="error-box">{courseState.errorMessage}</div>}
+
       {state.phase === "config" && (
         <ConfigForm
           redirectUri={redirectUri}
@@ -142,9 +301,9 @@ export default function App() {
       {state.phase === "result" && (
         <>
           <DiagnosticResult payload={state.payload} />
-          {getBackendUrl() && (
+          {backendUrl && (
             <AnalyzeLesson
-              backendUrl={getBackendUrl()!}
+              backendUrl={backendUrl}
               lessonUrl={state.lessonUrl}
               accessToken={state.accessToken}
             />

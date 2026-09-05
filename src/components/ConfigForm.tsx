@@ -2,9 +2,8 @@ import { useState, type FormEvent } from "react";
 
 export interface ConfigFormProps {
   redirectUri: string;
-  initialClientId?: string;
   initialLessonUrl?: string;
-  onSubmit: (clientId: string, lessonUrl: string) => void;
+  onSubmit: (lessonUrl: string) => void;
   submitting?: boolean;
   errorMessage?: string | null;
 }
@@ -14,18 +13,16 @@ const DEFAULT_LESSON_URL =
 
 export function ConfigForm({
   redirectUri,
-  initialClientId = "",
   initialLessonUrl = DEFAULT_LESSON_URL,
   onSubmit,
   submitting = false,
   errorMessage = null,
 }: ConfigFormProps) {
-  const [clientId, setClientId] = useState(initialClientId);
   const [lessonUrl, setLessonUrl] = useState(initialLessonUrl);
 
   function handleSubmit(e: FormEvent) {
     e.preventDefault();
-    onSubmit(clientId.trim(), lessonUrl.trim());
+    onSubmit(lessonUrl.trim());
   }
 
   return (
@@ -35,22 +32,6 @@ export function ConfigForm({
         A read-only diagnostic for a single Whop course lesson. Uses documented
         Whop OAuth 2.1 + PKCE and the documented course lesson API. No password,
         no client secret, no scraping, no DRM bypass.
-      </p>
-
-      <label htmlFor="clientId">Whop OAuth client_id</label>
-      <input
-        id="clientId"
-        type="text"
-        placeholder="app_xxxxxxxxxxxx"
-        value={clientId}
-        onChange={(e) => setClientId(e.target.value)}
-        required
-        autoComplete="off"
-        spellCheck={false}
-      />
-      <p className="hint">
-        This is a public OAuth client ID, not a secret. Create/find it in your
-        Whop Developer Dashboard.
       </p>
 
       <label htmlFor="lessonUrl">Whop lesson URL</label>

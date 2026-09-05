@@ -8,6 +8,8 @@ const config = loadConfig();
 // Register long-lived secrets with the redactor as early as possible so
 // they're never accidentally logged, even by a stray console.log elsewhere.
 globalRedactor.register(config.geminiApiKey);
+globalRedactor.register(config.db.password);
+globalRedactor.register(config.refreshTokenEncryptionKey);
 
 const app = createApp(config);
 
