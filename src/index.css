@@ -141,3 +141,153 @@ button:disabled {
   overflow-x: auto;
   font-size: 0.85rem;
 }
+
+.analyze-section {
+  margin-top: 1.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #232838;
+}
+
+.stage-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.stage-list li {
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: #131722;
+  color: #6b7180;
+  font-size: 0.9rem;
+}
+
+.stage-list .stage-current {
+  background: #1c2536;
+  color: #7fd0ff;
+  font-weight: 600;
+}
+
+.stage-list .stage-done {
+  color: #7fe0a0;
+}
+
+.strategy-result-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.strategy-result-header h2 {
+  margin: 0;
+}
+
+.no-strategy-box {
+  padding: 1rem;
+  border-radius: 8px;
+  background: #1c1a10;
+  border: 1px solid #4a3f1a;
+  margin-bottom: 1rem;
+}
+
+.strategy-card {
+  padding: 1.25rem;
+  border-radius: 8px;
+  background: #131722;
+  border: 1px solid #232838;
+  margin-bottom: 1.25rem;
+}
+
+.strategy-card h3 {
+  margin-top: 0;
+}
+
+.strategy-meta {
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  color: #a7adba;
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+}
+
+.rule-section {
+  margin-top: 1rem;
+}
+
+.rule-section h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8b91a0;
+}
+
+.rule-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.rule-item {
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  background: #0f131c;
+  border: 1px solid #1e2330;
+}
+
+.rule-header {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 0.3rem;
+  font-size: 0.78rem;
+}
+
+.badge {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+}
+
+.badge-explicit { background: #17331f; color: #7fe0a0; }
+.badge-inferred { background: #332c17; color: #e0c67f; }
+.badge-visual { background: #17232f; color: #7fbfe0; }
+
+.confidence, .timestamp {
+  color: #8b91a0;
+}
+
+.rule-description {
+  margin: 0 0 0.25rem;
+}
+
+.rule-evidence {
+  margin: 0;
+  color: #8b91a0;
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+.rule-empty {
+  color: #6b7180;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.plain-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: #c7cad3;
+  font-size: 0.9rem;
+}

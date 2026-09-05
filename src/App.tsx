@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ConfigForm } from "./components/ConfigForm";
 import { DiagnosticResult } from "./components/DiagnosticResult";
 import { ErrorResult } from "./components/ErrorResult";
+import { AnalyzeLesson } from "./components/AnalyzeLesson";
 import {
   startWhopOAuth,
   exchangeCodeForTokens,
@@ -12,12 +13,17 @@ import { fetchCourseLesson, type LessonFetchOutcome } from "./lib/whopApi";
 import { sanitizeLessonResponse } from "./lib/sanitize";
 import { buildDiagnosticDisplayPayload, type DiagnosticDisplayPayload } from "./lib/diagnosticPayload";
 import { saveConfig, loadConfig, clearConfig } from "./lib/sessionConfig";
+import { getBackendUrl } from "./lib/backendConfig";
 
 type AppState =
   | { phase: "config"; errorMessage: string | null; submitting: boolean }
   | { phase: "exchanging" }
   | { phase: "fetching" }
-  | { phase: "result"; payload: DiagnosticDisplayPayload }
+  // `accessToken` is kept ONLY in this in-memory React state (per PoC spec:
+  // no localStorage/sessionStorage/cookies for the Whop access token). It's
+  // used solely to let the user optionally trigger the Phase 2 backend
+  // analysis, sent as an Authorization header and never rendered or logged.
+  | { phase: "result"; payload: DiagnosticDisplayPayload; lessonUrl: string; accessToken: string }
   | { phase: "api_error"; outcome: Exclude<LessonFetchOutcome, { kind: "success" }> }
   | { phase: "fatal_error"; message: string };
 
@@ -72,11 +78,13 @@ export default function App() {
       if (outcome.kind === "success") {
         const sanitized = sanitizeLessonResponse(outcome.data);
         const payload = buildDiagnosticDisplayPayload(urlIds, sanitized);
-        setState({ phase: "result", payload });
+        setState({ phase: "result", payload, lessonUrl, accessToken: tokens.access_token });
       } else {
         setState({ phase: "api_error", outcome });
       }
-      // `tokens` deliberately falls out of scope here; never stored, never logged.
+      // Beyond being kept in the "result" state above (in-memory only), the
+      // local `tokens` variable is not stored anywhere else — no
+      // localStorage/sessionStorage/cookies, never logged.
     } catch (err) {
       setState({
         phase: "fatal_error",
@@ -134,6 +142,13 @@ export default function App() {
       {state.phase === "result" && (
         <>
           <DiagnosticResult payload={state.payload} />
+          {getBackendUrl() && (
+            <AnalyzeLesson
+              backendUrl={getBackendUrl()!}
+              lessonUrl={state.lessonUrl}
+              accessToken={state.accessToken}
+            />
+          )}
           <button onClick={handleReset}>Start over</button>
         </>
       )}
