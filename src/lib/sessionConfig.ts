@@ -1,16 +1,20 @@
 /**
- * Stores the user-supplied, non-secret diagnostic inputs (client_id and
- * lesson URL) in sessionStorage only, so a page reload during the OAuth
- * redirect round-trip doesn't lose them. Nothing here is a secret:
- * a Whop OAuth client_id is public by design.
+ * Stores which OAuth flow is in flight (course sign-in, or the legacy
+ * single-lesson diagnostic) plus its non-secret inputs in sessionStorage
+ * only, so a page reload during the OAuth redirect round-trip doesn't lose
+ * them. The Whop OAuth client_id itself is no longer user-supplied (it's a
+ * build-time constant — see scarfaceCourseConfig.ts), so it's no longer
+ * stored here at all.
  */
 
 const CONFIG_KEY = "whop_diagnostic_config";
 
-export interface DiagnosticConfig {
-  clientId: string;
-  lessonUrl: string;
-}
+export type DiagnosticConfig =
+  | { flow: "course" }
+  | { flow: "diagnostic"; lessonUrl: string }
+  // One-time setup: discover the operator's own Whop user id (never touches
+  // the backend — see lib/whopIdentify.ts).
+  | { flow: "identify" };
 
 export function saveConfig(config: DiagnosticConfig): void {
   sessionStorage.setItem(CONFIG_KEY, JSON.stringify(config));

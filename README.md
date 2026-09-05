@@ -104,10 +104,10 @@ including the trailing slash.
 2. Create a new app, or select an existing one you control.
 3. Open the app's **OAuth** section and add the redirect URI(s) from step 2
    above (exact match required for each URI you plan to use).
-4. Copy the app's `client_id` (looks like `app_xxxxxxxxxxxx`). You will paste
-   this into the diagnostic app's UI. **Do not** copy or use the
-   `client_secret` anywhere in this app — it's not needed for the PKCE flow
-   and this app never asks for it.
+4. Copy the app's `client_id` (looks like `app_xxxxxxxxxxxx`). As of Phase 3
+   this is set once as a build-time variable (see step 5 below), not pasted
+   into the UI. **Do not** copy or use the `client_secret` anywhere in this
+   app — it's not needed for the PKCE flow and this app never asks for it.
 
 ## 4. How to select `courses:read`
 
@@ -122,14 +122,41 @@ openid profile courses:read
 
 and no other scopes.
 
-## 5. How to enter the public `client_id`
+## 5. How to configure the public `client_id` (Phase 3: no longer typed into the UI)
 
-1. Open the deployed (or local) diagnostic app.
-2. Paste your Whop app's `client_id` into the **"Whop OAuth client_id"**
-   field. This is public and safe to paste directly — it is not a secret.
-3. Confirm or edit the **"Whop lesson URL"** field (pre-filled with the
-   Scarface Trades Mastermind test lesson URL).
-4. Click **"Sign in with Whop"**.
+The Client ID input field is gone — it's public configuration, set once at
+build time, not something to paste in every session:
+
+1. Locally: put `VITE_WHOP_CLIENT_ID=app_xxxxxxxxxxxx` in a `.env.local` file
+   (already gitignored).
+2. Deployed: add it as a GitHub repository **variable** (Settings → Secrets
+   and variables → Actions → Variables — not a secret, since a client_id is
+   public by design), then re-run the Pages deploy workflow.
+
+If it's unset, the app shows **"Whop OAuth is not configured."** instead of
+a sign-in screen — it never prompts you to type one in.
+
+Once configured, the app opens on the **Course** view: sign in with Whop,
+then Sync Course to discover every lesson in Scarface Trades Mastermind.
+Clicking **Analyze** on a lesson hands off to the single-lesson diagnostic
+flow below, pre-filled with that lesson's URL — this proven flow is
+otherwise completely unchanged.
+
+Every Course-view action (status, sync, disconnect) requires presenting
+your current Whop access token, which the backend independently verifies
+and checks against `WHOP_OPERATOR_USER_ID` — a required backend
+configuration value naming the one Whop account allowed to use this
+deployment; not something CORS, an `Origin` header, or the database's own
+contents could ever safely decide. Since this token is only ever held in
+memory (never localStorage), **reloading the page shows "Connect Whop"
+again**, even though the backend's own stored session is still valid —
+sign in again to pick the Course view back up.
+
+Don't know your own Whop user id yet? Expand **"First-time setup: find my
+Whop user ID"** above the Course view — it signs you in and asks Whop
+directly (never this app's backend) who you are, so you can copy the
+result into `WHOP_OPERATOR_USER_ID`. See `backend/README.md`'s "Security
+model" for the full design.
 
 ## 6. How to run this diagnostic
 
@@ -180,22 +207,27 @@ src/
     sanitize.ts             # Allow-list sanitization of the raw API response
     whopApi.ts               # Documented course_lessons GET call + status handling
     diagnosticPayload.ts      # Builds the exact JSON shown in the UI + token-leak guard
-    sessionConfig.ts           # sessionStorage-only, non-secret config (client_id, URL)
+    sessionConfig.ts           # sessionStorage-only, non-secret config (which OAuth flow + lesson URL)
     backendConfig.ts            # Reads VITE_BACKEND_URL (Phase 2, optional)
-    analyzeLessonClient.ts        # SSE client for the Phase 2 backend
-    strategyTypes.ts               # Display types for the Gemini strategy result
-    __tests__/                  # Vitest tests
+    scarfaceCourseConfig.ts       # Phase 3: VITE_WHOP_CLIENT_ID + the one course's fixed IDs
+    courseApi.ts                  # Phase 3: client for /api/auth/* and /api/course/* (bearer-authenticated)
+    whopIdentify.ts                 # Security fix: calls Whop's userinfo directly — never this app's backend
+    analyzeLessonClient.ts            # SSE client for the Phase 2 backend
+    strategyTypes.ts                    # Display types for the Gemini strategy result
+    __tests__/                        # Vitest tests
   oauth/
     pkce.ts                # PKCE verifier/state/nonce generation (sessionStorage only)
     whopOAuth.ts            # Authorize URL + code-for-token exchange (no client_secret)
   components/
-    ConfigForm.tsx         # client_id + lesson URL input
+    ConfigForm.tsx         # Lesson URL input (client_id is build-time config, not typed in)
     DiagnosticResult.tsx    # Sanitized success view
     ErrorResult.tsx          # 401/403/404/other error view
     AnalyzeLesson.tsx         # Phase 2: trigger, live stage progress, results, download
-  App.tsx                 # Orchestrates the OAuth + fetch + display flow
+    CourseTable.tsx            # Phase 3: sign-in, sync, one row per persisted lesson
+    FindWhopUserId.tsx           # One-time setup: discover your own Whop user id for WHOP_OPERATOR_USER_ID
+  App.tsx                 # Orchestrates OAuth (course + diagnostic + identify flows) + display
 .github/workflows/deploy.yml  # CI: test backend, test+build+deploy frontend to Pages
-backend/                  # Phase 2 Cloud Run backend (see backend/README.md)
+backend/                  # Phase 2 Cloud Run backend + Phase 3 course/auth persistence (see backend/README.md)
 ```
 
 ## Documentation this implementation follows
@@ -203,6 +235,8 @@ backend/                  # Phase 2 Cloud Run backend (see backend/README.md)
 - OAuth 2.1 + PKCE guide: https://docs.whop.com/developer/guides/oauth
 - Retrieve course lesson: https://docs.whop.com/api-reference/course-lessons/retrieve-course-lesson
 - Permissions/scopes guide: https://docs.whop.com/developer/guides/permissions
+- Phase 3 course discovery — `GET /courses/{id}` and the paginated
+  `GET /course_lessons?course_id=` — documented in `backend/README.md`
 
 This proof-of-concept intentionally stops at lesson/media discovery. It does
 not attempt playback, downloading, or any DRM circumvention.

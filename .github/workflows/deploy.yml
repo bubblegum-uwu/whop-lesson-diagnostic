@@ -22,6 +22,7 @@ jobs:
     env:
       VITE_BASE_PATH: /whop-lesson-diagnostic/
       VITE_BACKEND_URL: ${{ vars.VITE_BACKEND_URL }}
+      VITE_WHOP_CLIENT_ID: ${{ vars.VITE_WHOP_CLIENT_ID }}
 
     steps:
       - name: Checkout
