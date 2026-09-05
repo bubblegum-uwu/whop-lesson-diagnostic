@@ -181,6 +181,9 @@ src/
     whopApi.ts               # Documented course_lessons GET call + status handling
     diagnosticPayload.ts      # Builds the exact JSON shown in the UI + token-leak guard
     sessionConfig.ts           # sessionStorage-only, non-secret config (client_id, URL)
+    backendConfig.ts            # Reads VITE_BACKEND_URL (Phase 2, optional)
+    analyzeLessonClient.ts        # SSE client for the Phase 2 backend
+    strategyTypes.ts               # Display types for the Gemini strategy result
     __tests__/                  # Vitest tests
   oauth/
     pkce.ts                # PKCE verifier/state/nonce generation (sessionStorage only)
@@ -189,8 +192,10 @@ src/
     ConfigForm.tsx         # client_id + lesson URL input
     DiagnosticResult.tsx    # Sanitized success view
     ErrorResult.tsx          # 401/403/404/other error view
+    AnalyzeLesson.tsx         # Phase 2: trigger, live stage progress, results, download
   App.tsx                 # Orchestrates the OAuth + fetch + display flow
-.github/workflows/deploy.yml  # CI: install → test → build → deploy to Pages
+.github/workflows/deploy.yml  # CI: test backend, test+build+deploy frontend to Pages
+backend/                  # Phase 2 Cloud Run backend (see backend/README.md)
 ```
 
 ## Documentation this implementation follows
@@ -201,3 +206,21 @@ src/
 
 This proof-of-concept intentionally stops at lesson/media discovery. It does
 not attempt playback, downloading, or any DRM circumvention.
+
+## Phase 2: Gemini strategy analysis (optional add-on)
+
+A separate backend (in `backend/`, deployed to Google Cloud Run) can take
+the same authorized lesson and have Gemini analyze the video to reconstruct
+the trading strategy taught in it. See `backend/README.md` for what it does
+and its full deployment guide.
+
+To connect this frontend to a deployed backend, set `VITE_BACKEND_URL` at
+build time (e.g. as a GitHub Actions repository **variable**, not a secret —
+it's just an endpoint URL, not sensitive) to the Cloud Run service URL. If
+unset, the frontend works exactly as in Phase 1 and the "Analyze this lesson
+with Gemini" section simply doesn't render.
+
+The Whop OAuth access token is still never persisted to localStorage,
+sessionStorage, or cookies — it lives only in React state in memory for the
+lifetime of the page, and is sent to the backend solely as an
+`Authorization: Bearer` header on the one analyze-lesson request.
