@@ -47,14 +47,19 @@ export function createApp(config: AppConfig): Express {
   // verifies (via Whop's userinfo endpoint) as the same Whop account
   // already established as this deployment's single operator. CORS/Origin
   // are not, and never were, the security boundary here.
-  const operatorAuth = requireOperator({ pool, oauthClient });
+  const operatorAuth = requireOperator({ pool, oauthClient, whopOperatorUserId: config.whopOperatorUserId });
 
   // Preserved: the existing single-lesson analysis flow, now also gated —
   // an arbitrary caller with an arbitrary Whop token can no longer spend
   // this deployment's Gemini quota.
   app.post("/api/analyze-lesson", operatorAuth, createAnalyzeLessonHandler(deps));
 
-  const authDeps = { pool, oauthClient, refreshTokenEncryptionKey: config.refreshTokenEncryptionKey };
+  const authDeps = {
+    pool,
+    oauthClient,
+    refreshTokenEncryptionKey: config.refreshTokenEncryptionKey,
+    whopOperatorUserId: config.whopOperatorUserId,
+  };
   // Not gated: this is the one route reachable before any operator exists —
   // it verifies the submitted token itself and enforces single-operator
   // ownership inline (see http/routes/auth.ts).

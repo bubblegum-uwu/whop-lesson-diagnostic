@@ -9,6 +9,8 @@ export interface AuthRoutesDeps {
   pool: Pool;
   oauthClient: WhopOAuthClient;
   refreshTokenEncryptionKey: string;
+  /** The one Whop user allowed to become (or remain) this deployment's operator. */
+  whopOperatorUserId: string;
 }
 
 interface EstablishSessionBody {
@@ -24,15 +26,15 @@ interface EstablishSessionBody {
  * never writes these to localStorage; this is the only place they're
  * persisted, encrypted at rest.
  *
- * This is the one route reachable before any operator identity exists —
- * every other sensitive route requires one already be established. The
- * identity itself is never taken from a client-supplied claim (there is no
- * id_token in this request at all): the submitted access_token is verified
- * against Whop's userinfo endpoint first, and only that verified `sub` is
- * ever persisted as the operator identity. Once an operator exists, a
- * session-establishment attempt verified as a *different* Whop user is
- * rejected outright — the singleton session can never be silently taken
- * over.
+ * This is the one route reachable before any operator session exists —
+ * every other sensitive route requires one already be established. But
+ * "reachable before a session exists" does NOT mean "whoever calls this
+ * first becomes the operator": the verified `sub` must equal the deployment's
+ * configured `WHOP_OPERATOR_USER_ID` (config.ts fails startup if that's
+ * unset or malformed) — the database's current contents never decide who is
+ * *allowed* to become the operator, only who currently *is*. There is no
+ * id_token in this request at all; nothing here trusts a client-supplied
+ * identity claim.
  */
 export function createEstablishSessionHandler(deps: AuthRoutesDeps) {
   return async function establishSessionHandler(req: Request, res: Response): Promise<void> {
@@ -60,12 +62,27 @@ export function createEstablishSessionHandler(deps: AuthRoutesDeps) {
       throw err;
     }
 
-    const existingOperator = await getAuthSessionStatus(deps.pool);
-    if (existingOperator && existingOperator.whopUserId !== verified.sub) {
+    if (verified.sub !== deps.whopOperatorUserId) {
       res.status(403).json({
         error: {
-          message: "A different Whop account already owns this deployment's operator session.",
+          message: "This Whop account is not the configured operator for this deployment.",
           type: "forbidden_operator",
+        },
+      });
+      return;
+    }
+
+    // Defense in depth: even though the caller IS the configured operator,
+    // refuse to touch a persisted row that disagrees with configuration
+    // (stale data from before this check existed, manual DB edits, a
+    // restored backup, …) rather than silently overwriting it.
+    const existingOperator = await getAuthSessionStatus(deps.pool);
+    if (existingOperator && existingOperator.whopUserId !== deps.whopOperatorUserId) {
+      logger.error("Stored operator session does not match configured WHOP_OPERATOR_USER_ID", {});
+      res.status(500).json({
+        error: {
+          message: "Stored operator session does not match the configured operator. Refusing to proceed.",
+          type: "operator_configuration_conflict",
         },
       });
       return;

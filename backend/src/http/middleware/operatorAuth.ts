@@ -8,6 +8,8 @@ import { globalRedactor } from "../../lib/redact.js";
 export interface OperatorAuthDeps {
   pool: Pool;
   oauthClient: WhopOAuthClient;
+  /** The one Whop user this deployment is configured for — the root of trust, not the database. */
+  whopOperatorUserId: string;
 }
 
 export interface OperatorAuthedRequest extends Request {
@@ -16,18 +18,22 @@ export interface OperatorAuthedRequest extends Request {
 
 /**
  * Gates every sensitive route behind the verified operator identity — never
- * CORS, Origin, client_id, or an unverified id_token claim, none of which
- * a non-browser caller is required to respect.
+ * CORS, Origin, client_id, or an unverified id_token claim, none of which a
+ * non-browser caller is required to respect, and never "whoever the
+ * database currently says is the operator" on its own.
  *
- * 1. Extract the caller's own bearer token (registered with the redactor
- *    immediately, so it can never leak into a log line even on failure).
- * 2. Reject outright if no operator session has ever been established —
- *    there's nothing to authorize against yet.
- * 3. Verify the token against Whop's userinfo endpoint (the one source of
- *    truth for identity anywhere in this backend).
- * 4. Compare the verified `sub` to the persisted operator. Match → attach
- *    it to the request and continue. Mismatch → 403: a real Whop account,
- *    just not the one this deployment belongs to.
+ * Authorization requires BOTH:
+ *   1. The caller's bearer token verifies (via Whop's userinfo endpoint) as
+ *      `sub === deps.whopOperatorUserId` — the configured operator.
+ *   2. The persisted `auth_sessions.whop_user_id` also equals
+ *      `deps.whopOperatorUserId`.
+ *
+ * (2) exists so a stale or corrupted database row (e.g. from before this
+ * check existed, or manual tampering) can never grant access on its own —
+ * the configuration is the root of trust, the database is merely storage
+ * that must agree with it. A persisted session that disagrees with
+ * configuration fails closed with `operator_configuration_conflict` rather
+ * than being trusted or silently repaired.
  */
 export function requireOperator(deps: OperatorAuthDeps) {
   return async function operatorAuthMiddleware(
@@ -55,6 +61,16 @@ export function requireOperator(deps: OperatorAuthDeps) {
       return;
     }
 
+    if (operator.whopUserId !== deps.whopOperatorUserId) {
+      res.status(500).json({
+        error: {
+          message: "Stored operator session does not match the configured operator.",
+          type: "operator_configuration_conflict",
+        },
+      });
+      return;
+    }
+
     let verified;
     try {
       verified = await deps.oauthClient.verifyAccessToken(token);
@@ -68,7 +84,7 @@ export function requireOperator(deps: OperatorAuthDeps) {
       throw err;
     }
 
-    if (verified.sub !== operator.whopUserId) {
+    if (verified.sub !== deps.whopOperatorUserId) {
       res.status(403).json({
         error: {
           message: "This Whop account is not the authorized operator for this deployment.",

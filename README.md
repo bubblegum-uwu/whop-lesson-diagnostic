@@ -144,12 +144,19 @@ otherwise completely unchanged.
 
 Every Course-view action (status, sync, disconnect) requires presenting
 your current Whop access token, which the backend independently verifies
-and checks against the one authorized operator — not something CORS or an
-`Origin` header could ever safely gate. Since this token is only ever held
-in memory (never localStorage), **reloading the page shows "Connect Whop"
+and checks against `WHOP_OPERATOR_USER_ID` — a required backend
+configuration value naming the one Whop account allowed to use this
+deployment; not something CORS, an `Origin` header, or the database's own
+contents could ever safely decide. Since this token is only ever held in
+memory (never localStorage), **reloading the page shows "Connect Whop"
 again**, even though the backend's own stored session is still valid —
-sign in again to pick the Course view back up. See `backend/README.md`'s
-"Security model" for the full design.
+sign in again to pick the Course view back up.
+
+Don't know your own Whop user id yet? Expand **"First-time setup: find my
+Whop user ID"** above the Course view — it signs you in and asks Whop
+directly (never this app's backend) who you are, so you can copy the
+result into `WHOP_OPERATOR_USER_ID`. See `backend/README.md`'s "Security
+model" for the full design.
 
 ## 6. How to run this diagnostic
 
@@ -203,10 +210,11 @@ src/
     sessionConfig.ts           # sessionStorage-only, non-secret config (which OAuth flow + lesson URL)
     backendConfig.ts            # Reads VITE_BACKEND_URL (Phase 2, optional)
     scarfaceCourseConfig.ts       # Phase 3: VITE_WHOP_CLIENT_ID + the one course's fixed IDs
-    courseApi.ts                  # Phase 3: client for /api/auth/* and /api/course/*
-    analyzeLessonClient.ts          # SSE client for the Phase 2 backend
-    strategyTypes.ts                 # Display types for the Gemini strategy result
-    __tests__/                    # Vitest tests
+    courseApi.ts                  # Phase 3: client for /api/auth/* and /api/course/* (bearer-authenticated)
+    whopIdentify.ts                 # Security fix: calls Whop's userinfo directly — never this app's backend
+    analyzeLessonClient.ts            # SSE client for the Phase 2 backend
+    strategyTypes.ts                    # Display types for the Gemini strategy result
+    __tests__/                        # Vitest tests
   oauth/
     pkce.ts                # PKCE verifier/state/nonce generation (sessionStorage only)
     whopOAuth.ts            # Authorize URL + code-for-token exchange (no client_secret)
@@ -216,7 +224,8 @@ src/
     ErrorResult.tsx          # 401/403/404/other error view
     AnalyzeLesson.tsx         # Phase 2: trigger, live stage progress, results, download
     CourseTable.tsx            # Phase 3: sign-in, sync, one row per persisted lesson
-  App.tsx                 # Orchestrates OAuth (course + diagnostic flows) + display
+    FindWhopUserId.tsx           # One-time setup: discover your own Whop user id for WHOP_OPERATOR_USER_ID
+  App.tsx                 # Orchestrates OAuth (course + diagnostic + identify flows) + display
 .github/workflows/deploy.yml  # CI: test backend, test+build+deploy frontend to Pages
 backend/                  # Phase 2 Cloud Run backend + Phase 3 course/auth persistence (see backend/README.md)
 ```

@@ -4,6 +4,7 @@ import { DiagnosticResult } from "./components/DiagnosticResult";
 import { ErrorResult } from "./components/ErrorResult";
 import { AnalyzeLesson } from "./components/AnalyzeLesson";
 import { CourseTable } from "./components/CourseTable";
+import { FindWhopUserId, type FindWhopUserIdState } from "./components/FindWhopUserId";
 import {
   startWhopOAuth,
   exchangeCodeForTokens,
@@ -16,6 +17,7 @@ import { buildDiagnosticDisplayPayload, type DiagnosticDisplayPayload } from "./
 import { saveConfig, loadConfig, clearConfig } from "./lib/sessionConfig";
 import { getBackendUrl } from "./lib/backendConfig";
 import { getWhopClientId } from "./lib/scarfaceCourseConfig";
+import { fetchWhopUserInfo } from "./lib/whopIdentify";
 import {
   establishAuthSession,
   getAuthStatus,
@@ -84,6 +86,7 @@ export default function App() {
     submitting: false,
   });
   const [courseState, setCourseState] = useState<CourseViewState>(INITIAL_COURSE_STATE);
+  const [identifyState, setIdentifyState] = useState<FindWhopUserIdState>({ phase: "idle" });
 
   async function refreshCourseState(accessToken: string) {
     if (!backendUrl) return;
@@ -134,11 +137,32 @@ export default function App() {
 
     if (config.flow === "course") {
       void runCourseCallbackFlow(search);
+    } else if (config.flow === "identify") {
+      void runIdentifyCallbackFlow(search);
     } else {
       void runDiagnosticCallbackFlow(config.lessonUrl, search);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function runIdentifyCallbackFlow(search: string) {
+    setIdentifyState({ phase: "running" });
+    try {
+      const callback = parseCallbackParams(search);
+      const tokens = await exchangeCodeForTokens(clientId!, redirectUri, callback);
+      // Deliberately never touches this app's backend — Whop tells us
+      // directly who just signed in.
+      const userInfo = await fetchWhopUserInfo(tokens.access_token);
+      setIdentifyState({ phase: "result", sub: userInfo.sub });
+    } catch (err) {
+      setIdentifyState({
+        phase: "error",
+        message: err instanceof Error ? err.message : "Could not determine your Whop user ID.",
+      });
+    } finally {
+      clearConfig();
+    }
+  }
 
   async function runCourseCallbackFlow(search: string) {
     setCourseState((prev) => ({ ...prev, connecting: true, errorMessage: null }));
@@ -231,6 +255,13 @@ export default function App() {
     window.location.href = authorizeUrl;
   }
 
+  async function handleFindUserId() {
+    if (!clientId) return;
+    saveConfig({ flow: "identify" });
+    const authorizeUrl = await startWhopOAuth(clientId, redirectUri);
+    window.location.href = authorizeUrl;
+  }
+
   async function handleCourseSync() {
     if (!backendUrl || !courseState.accessToken) return;
     const accessToken = courseState.accessToken;
@@ -275,6 +306,8 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <FindWhopUserId state={identifyState} onStart={handleFindUserId} />
+
       {backendUrl && (
         <CourseTable
           courseTitle={courseState.courseTitle}

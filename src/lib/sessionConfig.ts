@@ -11,7 +11,10 @@ const CONFIG_KEY = "whop_diagnostic_config";
 
 export type DiagnosticConfig =
   | { flow: "course" }
-  | { flow: "diagnostic"; lessonUrl: string };
+  | { flow: "diagnostic"; lessonUrl: string }
+  // One-time setup: discover the operator's own Whop user id (never touches
+  // the backend — see lib/whopIdentify.ts).
+  | { flow: "identify" };
 
 export function saveConfig(config: DiagnosticConfig): void {
   sessionStorage.setItem(CONFIG_KEY, JSON.stringify(config));

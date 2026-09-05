@@ -78,30 +78,39 @@ The Cloud Run service is deployed `--allow-unauthenticated` (the browser
 needs to reach it directly), and CORS restricting `ALLOWED_ORIGIN` is a
 browser-enforced convention — a non-browser HTTP client can ignore it
 entirely. So CORS, `Origin`, and `client_id` are never the security
-boundary for anything sensitive; only a verified Whop identity is
-(`src/http/middleware/operatorAuth.ts`):
+boundary for anything sensitive; only a verified Whop identity, checked
+against **deployment configuration**, is (`src/http/middleware/operatorAuth.ts`):
 
 1. The caller presents their own, currently-held Whop access token as
    `Authorization: Bearer <token>`.
 2. The backend calls Whop's documented `GET /oauth/userinfo` with that
    token and reads the verified `sub` claim back — never a client-supplied
    `id_token` payload, which nothing here trusts for authorization.
-3. That `sub` must equal the `whop_user_id` already persisted in
-   `auth_sessions` (the single operator this deployment belongs to) or the
-   request is rejected: 401 if there's no session yet or the token itself
-   doesn't verify, 403 if it verifies as a genuine but different Whop
-   account.
+3. That `sub` must equal **`WHOP_OPERATOR_USER_ID`** — a required backend
+   environment variable, not a database value. The persisted
+   `auth_sessions.whop_user_id` is checked too, but only as a second,
+   independent confirmation; it is never the thing that *grants* access.
+   If the two disagree (a stale row from before this check existed, a
+   restored backup, a manual edit), the request fails closed with 500
+   `operator_configuration_conflict` rather than trusting whichever value
+   happens to be in the database.
+
+This closes a trust-on-first-use gap that existed in an earlier version of
+this design: with `WHOP_OPERATOR_USER_ID` pinned in configuration, *no*
+verified Whop identity can ever become the operator merely by being first
+to call an endpoint while `auth_sessions` is empty — the deployment
+configuration decides who is allowed to be the operator; the database only
+ever confirms who currently is.
 
 `requireOperator` gates every sensitive route: `GET/POST /api/auth/{status,disconnect}`,
 `POST /api/course/sync`, `GET /api/course/lessons`, and the existing
 `POST /api/analyze-lesson` (closing off what would otherwise be a public,
 Gemini-cost-bearing endpoint reachable by anyone with any Whop token).
-`POST /api/auth/session` is the one exception — it's how the very first
-operator session gets established — but it runs the same userinfo
-verification inline and enforces the identical single-operator rule:
-establishing a session as a *different* Whop user than the one already on
-file is a 403, not a silent takeover. `GET /healthz` stays public and
-returns only `{ok: true}`.
+`POST /api/auth/session` is the one exception — it's how the operator
+session actually gets established or refreshed — but it runs the same
+userinfo verification and the same `WHOP_OPERATOR_USER_ID` check inline: a
+verified identity that isn't the configured operator is a 403, and nothing
+is persisted. `GET /healthz` stays public and returns only `{ok: true}`.
 
 Refreshing the backend's own stored session (independent of the
 per-request caller-identity check above) is concurrency-safe: the
@@ -109,6 +118,33 @@ check-then-maybe-refresh sequence runs inside one Postgres transaction
 holding `pg_advisory_xact_lock` (`src/whop/sessionService.ts`), so two
 processes (this API today; a PR2 worker later) can never both read the
 same about-to-be-rotated refresh token and both try to spend it.
+
+### Configuring the operator (`WHOP_OPERATOR_USER_ID`)
+
+This deployment has exactly one authorized operator, and you set who that
+is — the application refuses to start without it:
+
+```
+WHOP_OPERATOR_USER_ID=user_xxxxxxxxxxxxx
+```
+
+This is a plain Whop account identifier, **not a secret** — store it as a
+normal Cloud Run environment variable, never in `VITE_*` (it must never
+become a frontend-enforced authorization mechanism) and never in Secret
+Manager (it doesn't need to be; it grants nothing on its own without a
+real, freshly-verified Whop access token to go with it).
+
+**Finding your own value, safely:** you likely don't know your Whop `sub`
+offhand, and there's no safe way to get it that involves pasting a token
+anywhere or logging one. Instead, open the deployed (or local) frontend and
+expand **"First-time setup: find my Whop user ID"** (visible above the
+Course view). Click through Whop's normal sign-in — this reuses the exact
+OAuth flow the app already runs, calls **Whop's own** `/oauth/userinfo`
+endpoint **directly from your browser**, and displays the returned `sub`
+on your screen. It never touches this app's backend (works even before
+`WHOP_OPERATOR_USER_ID` is set or the backend is deployed at all), never
+asks you to paste a token anywhere, and the displayed value is not itself
+a credential — copy it into `WHOP_OPERATOR_USER_ID` yourself.
 
 ## Phase 3: course discovery & persistence (PR1)
 
@@ -246,6 +282,7 @@ Dockerfile                 Node 22 + ffmpeg, multi-stage build
 | `PORT` | No | `8080` | Cloud Run injects this automatically. |
 | `FFMPEG_PATH` | No | `ffmpeg` | Override if ffmpeg isn't on PATH. |
 | `WHOP_CLIENT_ID` | Yes | — | The same public OAuth client_id the frontend uses. Needed server-side now for the refresh-token grant. |
+| `WHOP_OPERATOR_USER_ID` | Yes | — | Not a secret. The Whop user id (`user_...`) of the one operator allowed to use this deployment — the root of trust for `requireOperator`. App refuses to start if missing or malformed. See "Configuring the operator" above for how to safely find your own value. |
 | `WHOP_COURSE_ID` | Yes | — | `cors_4lb7N3oassoZwHJvrufOYy` for Scarface Trades Mastermind. |
 | `WHOP_EXPERIENCE_ID` | Yes | — | `exp_gdmood6JIzSsE7`. |
 | `WHOP_COURSE_SLUG` | Yes | — | `scarface-trades-mastermind`. |
@@ -321,6 +358,15 @@ Covers (see `tests/`):
   against the same near-expired session result in exactly one call to
   Whop's refresh grant — the second waits for the advisory lock and reuses
   the already-rotated token instead of racing for it
+- `WHOP_OPERATOR_USER_ID` pinning: application startup fails outright on a
+  missing or malformed value; an empty database with a verified-but-wrong
+  Whop user is rejected with 403 and nothing persisted (no
+  first-authenticated-user-wins path exists); the configured operator can
+  establish/re-establish a session against an empty database; a persisted
+  session that disagrees with the configured operator fails closed
+  (`operator_configuration_conflict`, 500) rather than being trusted or
+  silently overwritten; `requireOperator` requires the verified caller to
+  match configuration, not merely whatever is in the database
 
 A GitHub Actions workflow (`.github/workflows/pr-checks.yml`) runs the full
 backend suite above (migrations, typecheck, test, build) against a
@@ -476,7 +522,7 @@ gcloud run deploy whop-lesson-gemini-backend \
   --memory=2Gi \
   --cpu=2 \
   --add-cloudsql-instances="$INSTANCE_CONNECTION_NAME" \
-  --set-env-vars ALLOWED_ORIGIN=https://bubblegum-uwu.github.io,GEMINI_MODEL=gemini-3.8-flash,GEMINI_VIDEO_PROCESSING_MODE=agentic,WHOP_CLIENT_ID=YOUR_WHOP_APP_CLIENT_ID,WHOP_COURSE_ID=cors_4lb7N3oassoZwHJvrufOYy,WHOP_EXPERIENCE_ID=exp_gdmood6JIzSsE7,WHOP_COURSE_SLUG=scarface-trades-mastermind,DB_USER=app_user,DB_NAME=whop_lesson_platform,INSTANCE_CONNECTION_NAME="$INSTANCE_CONNECTION_NAME" \
+  --set-env-vars ALLOWED_ORIGIN=https://bubblegum-uwu.github.io,GEMINI_MODEL=gemini-3.8-flash,GEMINI_VIDEO_PROCESSING_MODE=agentic,WHOP_CLIENT_ID=YOUR_WHOP_APP_CLIENT_ID,WHOP_OPERATOR_USER_ID=YOUR_WHOP_USER_ID,WHOP_COURSE_ID=cors_4lb7N3oassoZwHJvrufOYy,WHOP_EXPERIENCE_ID=exp_gdmood6JIzSsE7,WHOP_COURSE_SLUG=scarface-trades-mastermind,DB_USER=app_user,DB_NAME=whop_lesson_platform,INSTANCE_CONNECTION_NAME="$INSTANCE_CONNECTION_NAME" \
   --set-secrets GEMINI_API_KEY=GEMINI_API_KEY:latest,DB_PASSWORD=DB_PASSWORD:latest,REFRESH_TOKEN_ENCRYPTION_KEY=REFRESH_TOKEN_ENCRYPTION_KEY:latest
 ```
 

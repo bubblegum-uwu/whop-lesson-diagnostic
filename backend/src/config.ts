@@ -31,6 +31,14 @@ export interface AppConfig {
   geminiVideoProcessingMode: "agentic" | "static";
   whopApiBase: string;
   whopClientId: string;
+  /**
+   * The ONLY Whop user allowed to become (or remain) this deployment's
+   * operator. The deployment configuration is the root of trust for who
+   * may hold `auth_sessions` — never "whoever authenticates first" and
+   * never the database's own current contents. See requireOperator and
+   * http/routes/auth.ts.
+   */
+  whopOperatorUserId: string;
   nodeEnv: "development" | "production" | "test";
   maxVideoBytes: number;
   ffmpegPath: string;
@@ -48,6 +56,31 @@ function requireEnv(name: string): string {
   return value;
 }
 
+const WHOP_USER_ID_PATTERN = /^user_[A-Za-z0-9]+$/;
+
+/**
+ * Fails application startup outright — never a runtime fallback to
+ * "first authenticated user wins" — if `WHOP_OPERATOR_USER_ID` is missing
+ * or doesn't look like a real Whop user id.
+ */
+function requireWhopOperatorUserId(env: NodeJS.ProcessEnv): string {
+  const value = env.WHOP_OPERATOR_USER_ID;
+  if (!value) {
+    throw new Error(
+      "Missing required environment variable: WHOP_OPERATOR_USER_ID. " +
+        "This must be set to the Whop user id (e.g. \"user_xxxxxxxxxxxxx\") of the " +
+        "one operator allowed to use this deployment — see backend/README.md.",
+    );
+  }
+  if (!WHOP_USER_ID_PATTERN.test(value)) {
+    throw new Error(
+      `WHOP_OPERATOR_USER_ID must look like a Whop user id ("user_" followed by ` +
+        `alphanumeric characters), got: "${value}"`,
+    );
+  }
+  return value;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = (env.NODE_ENV as AppConfig["nodeEnv"]) || "development";
 
@@ -61,6 +94,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       "agentic",
     whopApiBase: env.WHOP_API_BASE || "https://api.whop.com/api/v1",
     whopClientId: env.WHOP_CLIENT_ID || requireEnv("WHOP_CLIENT_ID"),
+    whopOperatorUserId: requireWhopOperatorUserId(env),
     nodeEnv,
     maxVideoBytes: env.MAX_VIDEO_BYTES ? Number(env.MAX_VIDEO_BYTES) : 2 * 1024 * 1024 * 1024,
     ffmpegPath: env.FFMPEG_PATH || "ffmpeg",

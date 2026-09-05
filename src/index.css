@@ -354,3 +354,41 @@ button:disabled {
 .course-table tr:last-child td {
   border-bottom: none;
 }
+
+.setup-disclosure {
+  margin-bottom: 1.5rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #262a33;
+  border-radius: 8px;
+  background: #14161b;
+  font-size: 0.88rem;
+}
+
+.setup-disclosure summary {
+  cursor: pointer;
+  color: #a7adba;
+}
+
+.setup-body {
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  align-items: flex-start;
+}
+
+.setup-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.mono-box {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #1c2028;
+  border: 1px solid #2e3440;
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  color: #7fe0a0;
+}

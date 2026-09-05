@@ -15,6 +15,7 @@ import { makeResponse } from "./helpers/httpMocks.js";
 
 const pool = createTestPool();
 const KEY = randomBytes(32).toString("base64");
+const OPERATOR_ID = "user_operator";
 
 afterEach(async () => {
   await deleteAuthSession(pool);
@@ -34,7 +35,7 @@ function makeOAuthClient(overrides: Partial<WhopOAuthClient> = {}): WhopOAuthCli
 describe("requireOperator middleware", () => {
   it("responds 401 and never calls next() when no Authorization header is present", async () => {
     const oauthClient = makeOAuthClient();
-    const middleware = requireOperator({ pool, oauthClient });
+    const middleware = requireOperator({ pool, oauthClient, whopOperatorUserId: OPERATOR_ID });
     const { res, statusCode, body } = makeResponse();
     const next = vi.fn() as NextFunction;
 
@@ -48,7 +49,7 @@ describe("requireOperator middleware", () => {
 
   it("responds 401 when no operator session has ever been established, without calling Whop", async () => {
     const oauthClient = makeOAuthClient();
-    const middleware = requireOperator({ pool, oauthClient });
+    const middleware = requireOperator({ pool, oauthClient, whopOperatorUserId: OPERATOR_ID });
     const { res, statusCode, body } = makeResponse();
     const next = vi.fn() as NextFunction;
 
@@ -60,14 +61,29 @@ describe("requireOperator middleware", () => {
     expect(oauthClient.verifyAccessToken).not.toHaveBeenCalled();
   });
 
+  it("responds 500 operator_configuration_conflict when the persisted session doesn't match the configured operator, without even calling Whop", async () => {
+    await saveAuthSession(pool, { whopUserId: "user_stale", accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
+    const oauthClient = makeOAuthClient();
+    const middleware = requireOperator({ pool, oauthClient, whopOperatorUserId: OPERATOR_ID });
+    const { res, statusCode, body } = makeResponse();
+    const next = vi.fn() as NextFunction;
+
+    await middleware({ headers: { authorization: "Bearer some-token" } } as Request, res, next);
+
+    expect(statusCode()).toBe(500);
+    expect(body()).toMatchObject({ error: { type: "operator_configuration_conflict" } });
+    expect(next).not.toHaveBeenCalled();
+    expect(oauthClient.verifyAccessToken).not.toHaveBeenCalled();
+  });
+
   it("responds 401 when the presented token fails Whop verification", async () => {
-    await saveAuthSession(pool, { whopUserId: "user_operator", accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
+    await saveAuthSession(pool, { whopUserId: OPERATOR_ID, accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
     const oauthClient = makeOAuthClient({
       verifyAccessToken: vi.fn(async () => {
         throw new WhopIdentityError("expired");
       }),
     });
-    const middleware = requireOperator({ pool, oauthClient });
+    const middleware = requireOperator({ pool, oauthClient, whopOperatorUserId: OPERATOR_ID });
     const { res, statusCode, body } = makeResponse();
     const next = vi.fn() as NextFunction;
 
@@ -78,10 +94,10 @@ describe("requireOperator middleware", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
-  it("responds 403 when the verified caller is a different Whop user than the persisted operator", async () => {
-    await saveAuthSession(pool, { whopUserId: "user_operator", accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
+  it("responds 403 when the verified caller is a different Whop user than the configured operator", async () => {
+    await saveAuthSession(pool, { whopUserId: OPERATOR_ID, accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
     const oauthClient = makeOAuthClient({ verifyAccessToken: vi.fn(async () => ({ sub: "user_intruder" })) });
-    const middleware = requireOperator({ pool, oauthClient });
+    const middleware = requireOperator({ pool, oauthClient, whopOperatorUserId: OPERATOR_ID });
     const { res, statusCode, body } = makeResponse();
     const next = vi.fn() as NextFunction;
 
@@ -92,10 +108,10 @@ describe("requireOperator middleware", () => {
     expect(next).not.toHaveBeenCalled();
   });
 
-  it("calls next() and attaches operatorWhopUserId when the verified caller matches the persisted operator", async () => {
-    await saveAuthSession(pool, { whopUserId: "user_operator", accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
-    const oauthClient = makeOAuthClient({ verifyAccessToken: vi.fn(async () => ({ sub: "user_operator" })) });
-    const middleware = requireOperator({ pool, oauthClient });
+  it("calls next() and attaches operatorWhopUserId when the verified caller matches both the config and the persisted operator", async () => {
+    await saveAuthSession(pool, { whopUserId: OPERATOR_ID, accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
+    const oauthClient = makeOAuthClient({ verifyAccessToken: vi.fn(async () => ({ sub: OPERATOR_ID })) });
+    const middleware = requireOperator({ pool, oauthClient, whopOperatorUserId: OPERATOR_ID });
     const { res, statusCode } = makeResponse();
     const next = vi.fn() as NextFunction;
     const req = { headers: { authorization: "Bearer operator-token" } } as OperatorAuthedRequest;
@@ -104,14 +120,14 @@ describe("requireOperator middleware", () => {
 
     expect(next).toHaveBeenCalledOnce();
     expect(statusCode()).toBe(200); // untouched — the middleware itself never writes a success response
-    expect(req.operatorWhopUserId).toBe("user_operator");
+    expect(req.operatorWhopUserId).toBe(OPERATOR_ID);
   });
 
   it("never includes the caller's raw bearer token in any error response body", async () => {
-    await saveAuthSession(pool, { whopUserId: "user_operator", accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
+    await saveAuthSession(pool, { whopUserId: OPERATOR_ID, accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date() }, KEY);
     const secretToken = "super-secret-caller-bearer-token-value";
     const oauthClient = makeOAuthClient({ verifyAccessToken: vi.fn(async () => ({ sub: "user_someone_else" })) });
-    const middleware = requireOperator({ pool, oauthClient });
+    const middleware = requireOperator({ pool, oauthClient, whopOperatorUserId: OPERATOR_ID });
     const { res, body } = makeResponse();
 
     await middleware({ headers: { authorization: `Bearer ${secretToken}` } } as Request, res, vi.fn() as NextFunction);
@@ -140,8 +156,8 @@ interface TestServer {
 async function startTestApp(oauthClient: WhopOAuthClient): Promise<TestServer> {
   const app = express();
   app.use(express.json());
-  const operatorDeps = { pool, oauthClient };
-  const authDeps = { pool, oauthClient, refreshTokenEncryptionKey: KEY };
+  const operatorDeps = { pool, oauthClient, whopOperatorUserId: OPERATOR_ID };
+  const authDeps = { pool, oauthClient, refreshTokenEncryptionKey: KEY, whopOperatorUserId: OPERATOR_ID };
 
   app.get("/api/auth/status", requireOperator(operatorDeps), createAuthStatusHandler(authDeps));
   app.post("/api/auth/disconnect", requireOperator(operatorDeps), createDisconnectHandler(authDeps));
@@ -201,8 +217,8 @@ describe("protected routes end-to-end", () => {
   });
 
   it("a verified, matching operator reaches the real handler on every protected route", async () => {
-    await saveAuthSession(pool, { whopUserId: "user_operator", accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date(Date.now() + 3600_000) }, KEY);
-    const oauthClient = makeOAuthClient({ verifyAccessToken: vi.fn(async () => ({ sub: "user_operator" })) });
+    await saveAuthSession(pool, { whopUserId: OPERATOR_ID, accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date(Date.now() + 3600_000) }, KEY);
+    const oauthClient = makeOAuthClient({ verifyAccessToken: vi.fn(async () => ({ sub: OPERATOR_ID })) });
     const server = await startTestApp(oauthClient);
     const headers = { Authorization: "Bearer operator-token" };
     try {
@@ -222,7 +238,7 @@ describe("protected routes end-to-end", () => {
   });
 
   it("a verified but different Whop user gets 403 on every protected route, never reaching the handler", async () => {
-    await saveAuthSession(pool, { whopUserId: "user_operator", accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date(Date.now() + 3600_000) }, KEY);
+    await saveAuthSession(pool, { whopUserId: OPERATOR_ID, accessToken: "a", refreshToken: "r", accessTokenExpiresAt: new Date(Date.now() + 3600_000) }, KEY);
     const oauthClient = makeOAuthClient({ verifyAccessToken: vi.fn(async () => ({ sub: "user_intruder" })) });
     const server = await startTestApp(oauthClient);
     const headers = { Authorization: "Bearer intruder-token" };
