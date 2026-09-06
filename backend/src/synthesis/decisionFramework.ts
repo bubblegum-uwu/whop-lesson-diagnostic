@@ -33,6 +33,8 @@ function buildPrompt(canonicalStrategies: CanonicalStrategy[], coreFramework: Co
     prerequisites: s.prerequisites.map((r) => r.description),
     confirmationRules: s.confirmationRules.map((r) => r.description),
     noTradeConditions: s.noTradeConditions.map((r) => r.description),
+    riskManagementRules: s.riskManagementRules.map((r) => r.description),
+    warnings: s.warnings.map((r) => r.description),
   }));
 
   return `You are building a master trade-decision framework for a course that teaches ${canonicalStrategies.length} distinct canonical strategies. Represent the decision process a trader follows: determine HTF context -> identify key levels -> determine market regime -> is a valid setup present -> which canonical strategy applies -> check prerequisites -> check confirmation -> check no-trade conditions -> define entry -> define invalidation/stop -> define target -> manage trade -> exit.

@@ -55,9 +55,9 @@ ${JSON.stringify(coreFramework, null, 2)}
 Produce readable markdown-style prose (not raw JSON dumps) for exactly these sections, using these keys: ${REQUIRED_SECTION_KEYS.join(", ")}.
 - "course_philosophy": the trading principles/mindset evident across the material.
 - "pre_market_preparation" / "higher_timeframe_framework" / "market_context_regime" / "key_levels": draw from the core framework's relevant sections.
-- "setup_selection" / "canonical_strategy_library" / "entry_framework" / "confirmation_framework" / "strategy_variants": summarize the canonical strategies, naming each one and when it applies; canonical_strategy_library should list every canonical strategy with a short description.
-- "risk_management" / "stop_placement" / "target_selection" / "trade_management" / "no_trade_conditions": draw from both the core framework and any strategy-specific rules that matter.
-- "common_mistakes_warnings": drawn from no-trade conditions, invalidation rules, and ambiguities actually present in the material — never invented.
+- "setup_selection" / "canonical_strategy_library" / "entry_framework" / "confirmation_framework" / "strategy_variants": summarize the canonical strategies, naming each one and when it applies; canonical_strategy_library should list every canonical strategy with a short description, including any instructorPreferences worth noting as discretionary color (never stated as a hard requirement).
+- "risk_management" / "stop_placement" / "target_selection" / "trade_management" / "no_trade_conditions": draw from both the core framework and any strategy-specific rules that matter — including each canonical strategy's own riskManagementRules/positionSizingRules/scalingInRules/scalingOutRules/runnerManagementRules where present. Do not duplicate a course-wide (core framework) rule into every individual strategy's section; reference the shared rule once and note only what a given strategy adds or overrides.
+- "common_mistakes_warnings": drawn from no-trade conditions, invalidation rules, each canonical strategy's own "warnings" array, and ambiguities actually present in the material — never invented.
 - "conflicts_and_ambiguities": explicitly surface every CONFLICTING-support rule and notable ambiguity from the material — do not hide disagreements to make the playbook look cleaner.
 - "master_trading_checklist": a concrete, step-by-step checklist a trader could follow, derived from the above.
 

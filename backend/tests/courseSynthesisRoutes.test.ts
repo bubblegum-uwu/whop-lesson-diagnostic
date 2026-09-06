@@ -175,6 +175,58 @@ describe("GET /api/course/synthesis-status", () => {
     expect(result.noStandaloneSetupLessons[0].title).toBe("Sizing & Scaling Trades");
   });
 
+  it("Phase 3.5B: reports a preflight that flags stale (pre-3.5A v1) analyses and lessons never analyzed at all", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    // addAnalyzedLesson always persists promptVersion/extractorVersion "v1" with a random fingerprint — genuinely stale relative to today's version.
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+    // A lesson synced but never analyzed at all.
+    await syncLessons(pool, course.id, [
+      ...(await listLessons(pool, course.id)).map((l) => ({
+        whopLessonId: l.whopLessonId,
+        title: l.title,
+        lessonType: l.lessonType,
+        visibility: l.visibility,
+        chapterWhopId: l.chapterWhopId,
+        chapterTitle: l.chapterTitle,
+        chapterOrder: l.chapterOrder,
+        courseOrder: l.courseOrder,
+        durationSeconds: l.durationSeconds,
+        videoAssetStatus: l.videoAssetStatus,
+        videoAvailable: l.videoAvailable,
+        sourceUrl: l.sourceUrl,
+      })),
+      {
+        whopLessonId: randomId("lesn"),
+        title: "Never Analyzed Lesson",
+        lessonType: "video",
+        visibility: "visible",
+        chapterWhopId: null,
+        chapterTitle: null,
+        chapterOrder: null,
+        courseOrder: 2,
+        durationSeconds: 300,
+        videoAssetStatus: "ready",
+        videoAvailable: true,
+        sourceUrl: "https://whop.com/x/lessons/z/",
+      },
+    ]);
+
+    const handler = createSynthesisStatusHandler(deps(whopCourseId));
+    const { res, body } = makeResponse();
+    await handler({} as Request, res);
+
+    const result = body() as {
+      preflight: { lessonCount: number; currentAnalysisCount: number; staleAnalysisCount: number; missingAnalysisCount: number; missingLessonTitles: string[]; ready: boolean };
+    };
+    expect(result.preflight.lessonCount).toBe(2);
+    expect(result.preflight.currentAnalysisCount).toBe(0);
+    expect(result.preflight.staleAnalysisCount).toBe(1);
+    expect(result.preflight.missingAnalysisCount).toBe(1);
+    expect(result.preflight.missingLessonTitles).toEqual(["Never Analyzed Lesson"]);
+    expect(result.preflight.ready).toBe(false);
+  });
+
   it("flags an existing completed synthesis as OUT OF DATE once the underlying lesson-analysis set changes", async () => {
     const whopCourseId = randomId("cors");
     const course = await makeCourse(whopCourseId);

@@ -11,6 +11,7 @@ import { getCoursePlaybookByRun } from "../../db/coursePlaybooksRepo.js";
 import { computeSourceAnalysisHash } from "../../synthesis/fingerprint.js";
 import { SYNTHESIS_PROMPT_VERSION, SYNTHESIS_SCHEMA_VERSION, SYNTHESIZER_VERSION } from "../../synthesis/version.js";
 import { computeSynthesisProgress, computeHeartbeatTier } from "../../synthesis/progress.js";
+import { computeSynthesisPreflight } from "../../synthesis/preflight.js";
 import type { JobTrigger } from "../../jobs/runJobTrigger.js";
 import { logger } from "../../lib/logger.js";
 
@@ -47,7 +48,16 @@ async function computeCurrentSourceState(deps: CourseSynthesisRouteDeps, courseI
     synthesizerVersion: SYNTHESIZER_VERSION,
   });
 
-  return { lessons, analysisIds, noStandaloneSetupLessons, hash };
+  // Phase 3.5B — reports whether the FULL course is current v2/current
+  // fingerprint before a human decides to run production synthesis (see
+  // synthesis/preflight.ts). Read-only and additive to this response —
+  // does not itself change POST /api/course/synthesize's gating, which
+  // still uses the existing hash/force mechanism; the read-only real-data
+  // diagnostic (scripts/synthesisDiagnostic.ts) is the place that hard
+  // refuses to run against a stale/incomplete dataset.
+  const preflight = computeSynthesisPreflight(lessons, latestByLesson, deps.geminiModel);
+
+  return { lessons, analysisIds, noStandaloneSetupLessons, hash, preflight };
 }
 
 /**
@@ -149,6 +159,7 @@ export function createSynthesisStatusHandler(deps: CourseSynthesisRouteDeps) {
       latestCompletedRun: serializeRun(latestCompletedRun),
       isOutOfDate,
       canSynthesizeNow: analyzed > 0,
+      preflight: currentSource.preflight,
     });
   };
 }
