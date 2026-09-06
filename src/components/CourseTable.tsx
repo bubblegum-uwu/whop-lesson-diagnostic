@@ -487,7 +487,7 @@ export function CourseTable({
 
             <div className="toolbar-primary-actions">
               <button
-                onClick={() => requestBatch(Array.from(selected), false, `${selected.size} selected lesson(s)`)}
+                onClick={() => requestBatch(Array.from(selected), true, `${selected.size} selected lesson(s)`)}
                 disabled={selected.size === 0}
               >
                 Analyze Selected{selected.size > 0 ? ` (${selected.size} selected)` : ""}

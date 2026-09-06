@@ -103,7 +103,7 @@ describe("CourseTable", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /analyze selected/i }));
     fireEvent.click(screen.getByRole("button", { name: /confirm/i }));
-    expect(onEnqueue).toHaveBeenCalledWith([1], false);
+    expect(onEnqueue).toHaveBeenCalledWith([1], true);
   });
 
   it("Select All Unanalyzed only selects NOT_ANALYZED lessons, then queues them", () => {
