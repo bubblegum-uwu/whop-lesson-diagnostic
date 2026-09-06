@@ -159,15 +159,24 @@ result into `WHOP_OPERATOR_USER_ID`. See `backend/README.md`'s "Security
 model" for the full design.
 
 **Phase 3 PR2** turns the Course table into a batch-processing dashboard:
-select any number of lessons (checkboxes, "Select All Unanalyzed", "Select
-Failed"), queue them with **Analyze Selected**/**Analyze All Unanalyzed**,
-and close the browser — a Cloud Run Job keeps working durably in Postgres
-and the table reconstructs live status, progress, and results the moment
-you come back. Per-lesson output includes strategy name(s), rule counts,
-confidence, a deterministic summary, cost, and processing time, with a
-**View Analysis** panel for the full breakdown and a JSON download. See
-`backend/README.md`'s "Phase 3 PR2" section for the underlying
+select any number of lessons (checkboxes, "Select All Unanalyzed"), queue
+them with **Analyze Selected**/**Analyze All Unanalyzed**, and close the
+browser — a Cloud Run Job keeps working durably in Postgres and the table
+reconstructs live status, progress, and results the moment you come back.
+See `backend/README.md`'s "Phase 3 PR2" section for the underlying
 queue/worker architecture.
+
+A follow-up UX pass reworked the table itself into a proper operational
+dashboard for 28+ lessons at once: the main table is summary-only (Lesson,
+Chapter, Duration, Status, Progress, Result, Cost, Actions) with a sticky
+search/filter toolbar and a sticky header, so nothing requires scrolling to
+a distant horizontal scrollbar. Clicking **View** opens the full analysis —
+strategy names, rule counts, confidence, cost, and a collapsed-by-default
+raw-JSON viewer with copy/download — in a right-side drawer instead of
+expanding the table row, so the table's own layout never shifts. Search,
+status/chapter/strategy filters, and page-size (25/50/100) all work over
+the already-loaded lesson list. On narrow screens the table becomes a
+compact card list instead of shrinking a wide table.
 
 ## 6. How to run this diagnostic
 
@@ -234,10 +243,11 @@ src/
     DiagnosticResult.tsx    # Sanitized success view
     ErrorResult.tsx          # 401/403/404/other error view
     AnalyzeLesson.tsx         # Phase 2: single-lesson trigger, live stage progress, results, download
-    CourseTable.tsx            # PR2: batch-processing dashboard — selection, status/progress, actions
+    CourseTable.tsx            # PR2/UX: summary-only table — search/filter/sort, selection, sticky header
     StatusBadge.tsx              # PR2: job status → badge label/class
-    AnalysisDetailPanel.tsx        # PR2: [ View Analysis ] full strategy breakdown + JSON download
-    DashboardSummary.tsx             # PR2: course-level stats/spend tiles
+    RowActionsMenu.tsx             # UX: compact "•••" overflow menu for less-used row actions
+    LessonDetailDrawer.tsx           # UX: [ View ] side drawer — full strategy breakdown + JSON download
+    DashboardSummary.tsx               # PR2: course-level stats/spend tiles
     FindWhopUserId.tsx                 # One-time setup: discover your own Whop user id for WHOP_OPERATOR_USER_ID
   App.tsx                 # Orchestrates OAuth (course + diagnostic + identify flows) + display
 .github/workflows/deploy.yml  # CI: test backend, test+build+deploy frontend to Pages

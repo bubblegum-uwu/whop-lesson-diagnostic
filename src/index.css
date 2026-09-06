@@ -322,39 +322,6 @@ button:disabled {
   text-decoration: underline;
 }
 
-.tablewrap {
-  overflow-x: auto;
-  border: 1px solid #262a33;
-  border-radius: 8px;
-  margin-top: 0.75rem;
-}
-
-.course-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.85rem;
-}
-
-.course-table th,
-.course-table td {
-  padding: 0.55rem 0.75rem;
-  text-align: left;
-  border-bottom: 1px solid #262a33;
-  white-space: nowrap;
-}
-
-.course-table th {
-  background: #171a20;
-  color: #a7adba;
-  font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-
-.course-table tr:last-child td {
-  border-bottom: none;
-}
-
 .setup-disclosure {
   margin-bottom: 1.5rem;
   padding: 0.75rem 1rem;
@@ -393,72 +360,100 @@ button:disabled {
   color: #7fe0a0;
 }
 
-/* ---- PR2: batch processing dashboard ---- */
+/* ---- PR2/UX: batch processing dashboard ---- */
 
 .dashboard-summary {
-  margin-bottom: 1.5rem;
-  padding: 1rem;
+  margin-bottom: 1.25rem;
+  padding: 0.75rem 1rem;
   border: 1px solid #262a33;
   border-radius: 8px;
   background: #14161b;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 1.5rem;
 }
 
 .dashboard-tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
+  grid-template-columns: repeat(auto-fit, minmax(72px, 1fr));
+  gap: 0.5rem 1rem;
+  flex: 1 1 420px;
 }
 
 .dashboard-tile {
   text-align: center;
-  padding: 0.5rem;
-  border-radius: 6px;
-  background: #1a1d24;
 }
 
 .dashboard-tile-value {
-  font-size: 1.3rem;
+  font-size: 1.05rem;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
 .dashboard-tile-label {
-  font-size: 0.72rem;
+  font-size: 0.66rem;
   color: #8b91a0;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  margin-top: 0.15rem;
 }
 
 .dashboard-spend {
   display: flex;
   flex-wrap: wrap;
-  gap: 1.25rem;
-  font-size: 0.85rem;
+  gap: 0.25rem 1.25rem;
+  font-size: 0.8rem;
   color: #c7cad3;
-  border-top: 1px solid #262a33;
-  padding-top: 0.75rem;
+  border-left: 1px solid #262a33;
+  padding-left: 1.25rem;
 }
 
-.batch-toolbar {
+/* Sticky toolbar: stays visible while the lesson list scrolls past it. */
+.course-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: #14161b;
+  border: 1px solid #262a33;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  margin: 0.75rem 0;
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
   align-items: center;
-  gap: 0.75rem;
-  margin: 0.75rem 0;
+  gap: 0.6rem 1rem;
 }
 
-.batch-selection-actions,
-.batch-primary-actions {
+.toolbar-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  flex: 1 1 100%;
+}
+
+.toolbar-search {
+  flex: 1 1 200px;
+  min-width: 140px;
+}
+
+.toolbar-filters select {
+  padding: 0.5rem 0.6rem;
+  border-radius: 6px;
+  border: 1px solid #2b2f3a;
+  background: #171a21;
+  color: inherit;
+  font-size: 0.85rem;
+}
+
+.toolbar-selection-actions,
+.toolbar-primary-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6rem;
   align-items: center;
 }
 
-.batch-primary-actions button {
+.toolbar-primary-actions button {
   margin-top: 0;
 }
 
@@ -489,7 +484,7 @@ button:disabled {
   display: inline-block;
   padding: 0.15rem 0.55rem;
   border-radius: 999px;
-  font-size: 0.72rem;
+  font-size: 0.68rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.02em;
@@ -504,7 +499,23 @@ button:disabled {
 
 .stale-hint {
   color: #e0c67f;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
+}
+
+.progress-cell {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.progress-stage {
+  font-size: 0.82rem;
+}
+
+.progress-detail {
+  font-size: 0.72rem;
+  color: #8b91a0;
+  font-variant-numeric: tabular-nums;
 }
 
 .row-actions {
@@ -516,20 +527,297 @@ button:disabled {
 
 .row-error {
   color: #ff9b9b;
-  font-size: 0.78rem;
-  text-decoration: underline dotted;
   cursor: help;
 }
 
-.detail-row td {
-  background: #0f131a;
-  padding: 1rem;
+/* The overflow "•••" menu — keeps six text links from spreading across every row. */
+.row-menu {
+  position: relative;
+  display: inline-block;
 }
 
-.analysis-detail-panel {
+.row-menu-trigger {
+  margin-top: 0;
+  padding: 0.2rem 0.5rem;
+  background: transparent;
+  border: 1px solid #2b2f3a;
+  border-radius: 6px;
+  color: #a7adba;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.row-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.25rem);
+  z-index: 40;
+  min-width: 150px;
+  background: #1a1d24;
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 0.3rem;
   display: flex;
   flex-direction: column;
+}
+
+.row-menu-item {
+  margin-top: 0;
+  padding: 0.45rem 0.6rem;
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  text-align: left;
+  color: inherit;
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
+.row-menu-item:hover:not(:disabled) {
+  background: #262a33;
+}
+
+/* Lesson column gets the most width and up to two lines before truncating. */
+.col-lesson {
+  min-width: 220px;
+  max-width: 420px;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+th.col-lesson {
+  white-space: nowrap;
+  display: table-cell;
+}
+
+/* Table = summary only. Scrolls its own body; the sticky header/toolbar
+   above stay in place instead of requiring a scroll to the page bottom. */
+.table-scroll-area {
+  max-height: 68vh;
+  overflow: auto;
+  border: 1px solid #262a33;
+  border-radius: 8px;
+  margin-top: 0.5rem;
+}
+
+.course-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.course-table th,
+.course-table td {
+  padding: 0.5rem 0.7rem;
+  text-align: left;
+  border-bottom: 1px solid #262a33;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.course-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: #171a20;
+  color: #a7adba;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.course-table tr:last-child td {
+  border-bottom: none;
+}
+
+.pagination-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
   gap: 0.75rem;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+  color: #a7adba;
+}
+
+.pagination-bar select {
+  padding: 0.3rem 0.5rem;
+  border-radius: 6px;
+  border: 1px solid #2b2f3a;
+  background: #171a21;
+  color: inherit;
+}
+
+.pagination-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.pagination-controls button {
+  margin-top: 0;
+}
+
+/* Desktop table vs. mobile card list: which one renders is decided in JS
+   (see CourseTable's useIsNarrow) so exactly one exists in the DOM at a
+   time — this is layout/spacing only. */
+.lesson-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+
+.lesson-card {
+  border: 1px solid #262a33;
+  border-radius: 8px;
+  padding: 0.75rem;
+  background: #14161b;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.lesson-card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.lesson-card-title {
+  font-weight: 600;
+}
+
+.lesson-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-size: 0.85rem;
+  color: #c7cad3;
+}
+
+.lesson-card-progress {
+  font-size: 0.8rem;
+  color: #8b91a0;
+}
+
+@media (max-width: 720px) {
+  .course-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+/* Keep these columns visible on narrow-but-still-desktop screens; secondary
+   columns (#, chapter, duration, cost) move into the detail drawer instead. */
+@media (max-width: 1000px) {
+  .hide-narrow {
+    display: none;
+  }
+}
+
+/* ---- Lesson detail SIDE DRAWER — replaces the old in-row <tr> expansion.
+   Opening a lesson never changes the table's own dimensions. ---- */
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 6, 9, 0.55);
+  z-index: 90;
+}
+
+.lesson-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(480px, 100vw);
+  background: #14161b;
+  border-left: 1px solid #262a33;
+  z-index: 91;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+}
+
+@media (max-width: 640px) {
+  .lesson-drawer {
+    width: 100vw;
+  }
+}
+
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  border-bottom: 1px solid #262a33;
+}
+
+.drawer-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.drawer-subtitle {
+  margin: 0.2rem 0 0;
+  color: #8b91a0;
+  font-size: 0.82rem;
+}
+
+.drawer-close {
+  margin-top: 0;
+  background: transparent;
+  border: 1px solid #2b2f3a;
+  border-radius: 6px;
+  padding: 0.3rem 0.55rem;
+  color: #a7adba;
+}
+
+.drawer-body {
+  padding: 1rem 1.25rem 1.5rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.drawer-meta-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.35rem 1rem;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.drawer-meta-grid dt {
+  color: #8b91a0;
+}
+
+.drawer-meta-grid dd {
+  margin: 0;
+}
+
+.drawer-rule-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.drawer-summary {
+  color: #c7cad3;
+  font-size: 0.9rem;
+  margin: 0;
+}
+
+.drawer-strategy-names {
+  margin: 0;
 }
 
 .detail-actions {
@@ -538,10 +826,21 @@ button:disabled {
   align-items: center;
 }
 
-/* Keep these columns visible on narrow screens; everything marked
-   hide-narrow collapses so Lesson/Status/Progress/Strategy/Actions still fit. */
-@media (max-width: 900px) {
-  .hide-narrow {
-    display: none;
-  }
+/* Raw JSON: collapsed by default, fixed-height scroll when opened — never
+   allowed to make the page thousands of pixels tall. */
+.raw-json-disclosure summary {
+  cursor: pointer;
+  color: #a7adba;
+  font-weight: 600;
+}
+
+.raw-json-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.json-block-scroll {
+  max-height: 350px;
+  overflow: auto;
 }

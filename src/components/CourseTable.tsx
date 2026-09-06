@@ -1,7 +1,8 @@
-import { Fragment, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PROCESSING_STATUSES, type AnalysisSummary, type CourseLessonSummary, type LessonJobSummary } from "../lib/courseApi";
 import { StatusBadge } from "./StatusBadge";
-import { AnalysisDetailPanel } from "./AnalysisDetailPanel";
+import { LessonDetailDrawer } from "./LessonDetailDrawer";
+import { RowActionsMenu } from "./RowActionsMenu";
 
 export interface CourseTableProps {
   courseTitle: string | null;
@@ -17,9 +18,54 @@ export interface CourseTableProps {
   onEnqueue: (lessonIds: number[], force?: boolean) => void;
   onRetry: (jobId: string) => void;
   onCancel: (jobId: string) => void;
-  /** Fetches the full validated JSON for one lesson's latest analysis, for the expandable detail view. */
+  /** Fetches the full validated JSON for one lesson's latest analysis, for the detail drawer. */
   onLoadAnalysis: (lessonId: number) => Promise<unknown | null>;
 }
+
+const NARROW_BREAKPOINT = 720;
+
+/** Plain window.innerWidth + resize listener — no matchMedia polyfill needed, works the same in jsdom and real browsers. */
+function useIsNarrow(breakpoint: number): boolean {
+  const [isNarrow, setIsNarrow] = useState(() => window.innerWidth < breakpoint);
+  useEffect(() => {
+    function onResize() {
+      setIsNarrow(window.innerWidth < breakpoint);
+    }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [breakpoint]);
+  return isNarrow;
+}
+
+/** The backend reports raw pipeline stage keys (see backend STAGE_LABELS) — display-only friendly text, never sent back anywhere. */
+const STAGE_DISPLAY_LABELS: Record<string, string> = {
+  retrieving_lesson: "Retrieving",
+  resolving_secure_video: "Retrieving",
+  preparing_video: "Preparing",
+  uploading_to_gemini: "Uploading",
+  gemini_processing: "Processing on Gemini",
+  analyzing_lesson: "Analyzing",
+  validating_result: "Validating",
+};
+
+function friendlyStageLabel(currentStage: string | null | undefined, status: string): string {
+  if (currentStage && STAGE_DISPLAY_LABELS[currentStage]) return STAGE_DISPLAY_LABELS[currentStage];
+  return status.charAt(0) + status.slice(1).toLowerCase().replace(/_/g, " ");
+}
+
+const PAGE_SIZES = [25, 50, 100];
+
+const STATUS_FILTER_OPTIONS: { value: string; label: string }[] = [
+  { value: "ALL", label: "All statuses" },
+  { value: "NOT_ANALYZED", label: "Not analyzed" },
+  { value: "QUEUED", label: "Queued" },
+  { value: "PROCESSING", label: "Processing" },
+  { value: "COMPLETED", label: "Completed" },
+  { value: "NO_STRATEGY", label: "No strategy" },
+  { value: "FAILED", label: "Failed" },
+  { value: "AUTH_REQUIRED", label: "Auth required" },
+  { value: "CANCELLED", label: "Cancelled" },
+];
 
 function formatDuration(seconds: number | null): string {
   if (seconds == null) return "—";
@@ -32,21 +78,19 @@ function formatCost(value: number | null | undefined): string {
   return `$${value.toFixed(2)}`;
 }
 
-function formatProcessingTime(seconds: number | null | undefined): string {
-  if (seconds == null) return "—";
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return minutes > 0 ? `${minutes}m ${rest}s` : `${rest}s`;
+function formatClock(totalSeconds: number): string {
+  const m = Math.floor(totalSeconds / 60);
+  const s = Math.max(0, Math.round(totalSeconds % 60));
+  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-function formatConfidence(value: number | null | undefined): string {
-  if (value == null) return "—";
-  return `${Math.round(value * 100)}%`;
-}
-
-function formatDate(value: string | null | undefined): string {
-  if (!value) return "—";
-  return new Date(value).toLocaleString();
+/** "Break & Retest" | "3 strategies" | "No strategy" | "—" — never the long summary (that lives in the drawer). */
+function resultLabel(analysis: CourseLessonSummary["analysis"]): string {
+  if (!analysis) return "—";
+  if (!analysis.strategyFound) return "No strategy";
+  const match = analysis.extractedStrategiesLabel?.match(/\+(\d+) more$/);
+  if (match) return `${1 + Number(match[1])} strategies`;
+  return analysis.extractedStrategiesLabel ?? "Strategy found";
 }
 
 /** A processing job is "stale" if no heartbeat arrived recently — a display hint only, never an auto-fail. */
@@ -60,27 +104,100 @@ function jobOf(lesson: CourseLessonSummary): LessonJobSummary {
   return lesson.job ?? { jobId: null, status: "NOT_ANALYZED" };
 }
 
-function CopyLinkButton({ url }: { url: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      type="button"
-      className="link-button"
-      onClick={async () => {
-        await navigator.clipboard.writeText(url);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-    >
-      {copied ? "Copied" : "Copy Link"}
-    </button>
-  );
+interface StageSince {
+  stage: string;
+  since: number;
+}
+
+/** Renders live "elapsed" / "elapsed / total" text for an in-progress lesson, from already-available data only. */
+function useProgressText() {
+  const sinceMap = useRef(new Map<number, StageSince>());
+  const [, setTick] = useState(0);
+
+  function noteStage(lessonId: number, job: LessonJobSummary) {
+    const stageKey = `${job.status}:${job.currentStage ?? ""}`;
+    const existing = sinceMap.current.get(lessonId);
+    if (!existing || existing.stage !== stageKey) {
+      sinceMap.current.set(lessonId, { stage: stageKey, since: Date.now() });
+    }
+  }
+
+  function progressText(lesson: CourseLessonSummary, job: LessonJobSummary): string {
+    if (!PROCESSING_STATUSES.includes(job.status)) return "—";
+    noteStage(lesson.id, job);
+    const label = friendlyStageLabel(job.currentStage, job.status);
+
+    if (job.stageProgress != null && lesson.durationSeconds) {
+      const elapsed = Math.round((job.stageProgress / 100) * lesson.durationSeconds);
+      return `${label}\n${formatClock(elapsed)} / ${formatClock(lesson.durationSeconds)}`;
+    }
+
+    const since = sinceMap.current.get(lesson.id)?.since;
+    if (since) {
+      const elapsedSeconds = Math.floor((Date.now() - since) / 1000);
+      return `${label}\n${formatClock(elapsedSeconds)} elapsed`;
+    }
+    return label;
+  }
+
+  return { progressText, tickRef: setTick };
 }
 
 interface PendingBatch {
   lessonIds: number[];
   force: boolean;
   label: string;
+}
+
+interface RowActionsProps {
+  lesson: CourseLessonSummary;
+  job: LessonJobSummary;
+  onView: () => void;
+  onAnalyze: () => void;
+  onRetry: () => void;
+  onCancel: () => void;
+  onReanalyze: () => void;
+  onDownload: () => void;
+}
+
+function RowActions({ lesson, job, onView, onAnalyze, onRetry, onCancel, onReanalyze, onDownload }: RowActionsProps) {
+  const hasAnalysis = job.status === "COMPLETED" || job.status === "NO_STRATEGY";
+  const menuItems = [
+    { label: "Open Source", onClick: () => window.open(lesson.sourceUrl, "_blank", "noreferrer") },
+    { label: "Download JSON", onClick: onDownload, disabled: !hasAnalysis },
+    { label: "Re-analyze", onClick: onReanalyze, disabled: !hasAnalysis },
+  ];
+
+  return (
+    <div className="row-actions">
+      {job.status === "NOT_ANALYZED" && (
+        <button className="link-button" onClick={onAnalyze}>
+          Analyze
+        </button>
+      )}
+      {job.status === "QUEUED" && (
+        <button className="link-button" onClick={onCancel}>
+          Cancel
+        </button>
+      )}
+      {(job.status === "FAILED" || job.status === "AUTH_REQUIRED") && (
+        <button className="link-button" onClick={onRetry}>
+          Retry
+        </button>
+      )}
+      {(job.status === "COMPLETED" || job.status === "NO_STRATEGY") && (
+        <button className="link-button" onClick={onView}>
+          View
+        </button>
+      )}
+      {job.sanitizedError && (
+        <span className="row-error" title={job.sanitizedError}>
+          ⚠
+        </span>
+      )}
+      <RowActionsMenu items={menuItems} />
+    </div>
+  );
 }
 
 export function CourseTable({
@@ -100,19 +217,63 @@ export function CourseTable({
   onLoadAnalysis,
 }: CourseTableProps) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [expandedJson, setExpandedJson] = useState<unknown | null>(null);
-  const [expandedLoading, setExpandedLoading] = useState(false);
+  const [drawerLessonId, setDrawerLessonId] = useState<number | null>(null);
   const [pendingBatch, setPendingBatch] = useState<PendingBatch | null>(null);
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [chapterFilter, setChapterFilter] = useState("ALL");
+  const [strategyFilter, setStrategyFilter] = useState("ALL");
+  const [pageSize, setPageSize] = useState(25);
+  const [page, setPage] = useState(1);
+  const { progressText, tickRef } = useProgressText();
+  const isNarrow = useIsNarrow(NARROW_BREAKPOINT);
+
+  const anyProcessing = useMemo(() => lessons.some((l) => PROCESSING_STATUSES.includes(jobOf(l).status)), [lessons]);
+  useEffect(() => {
+    if (!anyProcessing) return undefined;
+    const interval = setInterval(() => tickRef((t) => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [anyProcessing, tickRef]);
+
+  const chapters = useMemo(
+    () => Array.from(new Set(lessons.map((l) => l.chapterTitle).filter((c): c is string => !!c))),
+    [lessons],
+  );
+
+  const filteredLessons = useMemo(() => {
+    const searchLower = search.trim().toLowerCase();
+    return lessons.filter((lesson) => {
+      const job = jobOf(lesson);
+      if (searchLower && !lesson.title.toLowerCase().includes(searchLower)) return false;
+      if (statusFilter === "PROCESSING") {
+        if (!PROCESSING_STATUSES.includes(job.status)) return false;
+      } else if (statusFilter !== "ALL" && job.status !== statusFilter) {
+        return false;
+      }
+      if (chapterFilter !== "ALL" && lesson.chapterTitle !== chapterFilter) return false;
+      if (strategyFilter === "FOUND" && lesson.analysis?.strategyFound !== true) return false;
+      if (strategyFilter === "NOT_FOUND" && !(lesson.analysis && lesson.analysis.strategyFound === false)) return false;
+      return true;
+    });
+  }, [lessons, search, statusFilter, chapterFilter, strategyFilter]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredLessons.length / pageSize));
+  // Derived, not effect-driven: if filtering/page-size shrank the result set
+  // out from under the current page, clamp it during render instead of
+  // firing a setState-in-effect just to reset it.
+  const currentPage = Math.min(page, totalPages);
+  const pagedLessons = filteredLessons.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   const unanalyzedIds = useMemo(
-    () => lessons.filter((l) => jobOf(l).status === "NOT_ANALYZED").map((l) => l.id),
-    [lessons],
+    () => filteredLessons.filter((l) => jobOf(l).status === "NOT_ANALYZED").map((l) => l.id),
+    [filteredLessons],
   );
   const failedIds = useMemo(
-    () => lessons.filter((l) => jobOf(l).status === "FAILED").map((l) => l.id),
-    [lessons],
+    () => filteredLessons.filter((l) => jobOf(l).status === "FAILED").map((l) => l.id),
+    [filteredLessons],
   );
+
+  const drawerLesson = drawerLessonId == null ? null : lessons.find((l) => l.id === drawerLessonId) ?? null;
 
   if (!connected) {
     return (
@@ -140,13 +301,10 @@ export function CourseTable({
   }
 
   function selectAll() {
-    setSelected(new Set(lessons.map((l) => l.id)));
+    setSelected(new Set(filteredLessons.map((l) => l.id)));
   }
   function selectAllUnanalyzed() {
     setSelected(new Set(unanalyzedIds));
-  }
-  function selectFailed() {
-    setSelected(new Set(failedIds));
   }
   function clearSelection() {
     setSelected(new Set());
@@ -177,26 +335,17 @@ export function CourseTable({
     clearSelection();
   }
 
-  async function toggleExpand(lesson: CourseLessonSummary) {
-    if (expandedId === lesson.id) {
-      setExpandedId(null);
-      setExpandedJson(null);
-      return;
-    }
-    setExpandedId(lesson.id);
-    setExpandedJson(null);
-    setExpandedLoading(true);
-    try {
-      const json = await onLoadAnalysis(lesson.id);
-      setExpandedJson(json);
-    } finally {
-      setExpandedLoading(false);
+  function retryAllFailed() {
+    for (const id of failedIds) {
+      const jobId = lessons.find((l) => l.id === id)?.job?.jobId;
+      if (jobId) onRetry(jobId);
     }
   }
 
-  function downloadJson(lesson: CourseLessonSummary) {
-    if (expandedJson == null) return;
-    const blob = new Blob([JSON.stringify(expandedJson, null, 2)], { type: "application/json" });
+  async function handleDownload(lesson: CourseLessonSummary) {
+    const json = await onLoadAnalysis(lesson.id);
+    if (json == null) return;
+    const blob = new Blob([JSON.stringify(json, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -224,27 +373,53 @@ export function CourseTable({
         <p className="hint">No lessons synced yet — click "Sync Course" to discover them.</p>
       ) : (
         <>
-          <div className="batch-toolbar">
-            <div className="batch-selection-actions">
-              <button className="link-button" onClick={selectAll}>
-                Select All
-              </button>
+          <div className="course-toolbar">
+            <div className="toolbar-filters">
+              <input
+                type="search"
+                className="toolbar-search"
+                placeholder="Search lessons…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search lessons"
+              />
+              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status">
+                {STATUS_FILTER_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <select value={chapterFilter} onChange={(e) => setChapterFilter(e.target.value)} aria-label="Filter by chapter">
+                <option value="ALL">All chapters</option>
+                {chapters.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+              <select value={strategyFilter} onChange={(e) => setStrategyFilter(e.target.value)} aria-label="Filter by strategy found">
+                <option value="ALL">Strategy: all</option>
+                <option value="FOUND">Strategy found</option>
+                <option value="NOT_FOUND">No strategy</option>
+              </select>
+            </div>
+
+            <div className="toolbar-selection-actions">
               <button className="link-button" onClick={selectAllUnanalyzed}>
                 Select All Unanalyzed
-              </button>
-              <button className="link-button" onClick={selectFailed}>
-                Select Failed
               </button>
               <button className="link-button" onClick={clearSelection}>
                 Clear Selection
               </button>
             </div>
-            <div className="batch-primary-actions">
+
+            <div className="toolbar-primary-actions">
               <button
                 onClick={() => requestBatch(Array.from(selected), false, `${selected.size} selected lesson(s)`)}
                 disabled={selected.size === 0}
               >
-                Analyze Selected
+                Analyze Selected{selected.size > 0 ? ` (${selected.size} selected)` : ""}
               </button>
               <button
                 onClick={() => requestBatch(unanalyzedIds, false, `${unanalyzedIds.length} unanalyzed lesson(s)`)}
@@ -252,7 +427,7 @@ export function CourseTable({
               >
                 Analyze All Unanalyzed
               </button>
-              <button onClick={() => failedIds.forEach((id) => { const job = lessons.find((l) => l.id === id)?.job; if (job?.jobId) onRetry(job.jobId); })} disabled={failedIds.length === 0}>
+              <button onClick={retryAllFailed} disabled={failedIds.length === 0}>
                 Retry Failed
               </button>
             </div>
@@ -274,140 +449,167 @@ export function CourseTable({
             </div>
           )}
 
-          <div className="tablewrap">
-            <table className="course-table">
-              <thead>
-                <tr>
-                  <th>Select</th>
-                  <th>#</th>
-                  <th>Lesson</th>
-                  <th className="hide-narrow">Chapter</th>
-                  <th className="hide-narrow">Duration</th>
-                  <th>Status</th>
-                  <th>Progress</th>
-                  <th className="hide-narrow">Strategy Found</th>
-                  <th>Extracted Strategies</th>
-                  <th className="hide-narrow">Rules</th>
-                  <th className="hide-narrow">Confidence</th>
-                  <th className="hide-narrow">Analysis Output</th>
-                  <th className="hide-narrow">Cost</th>
-                  <th className="hide-narrow">Processing Time</th>
-                  <th className="hide-narrow">Last Analyzed</th>
-                  <th className="hide-narrow">Source</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {lessons.map((lesson, i) => {
-                  const job = jobOf(lesson);
-                  const analysis = lesson.analysis ?? null;
-                  const isProcessing = PROCESSING_STATUSES.includes(job.status);
-                  const stale = isStale(job);
+          {filteredLessons.length === 0 ? (
+            <p className="hint">No lessons match the current search/filters.</p>
+          ) : (
+            <>
+              {isNarrow ? (
+                <div className="lesson-cards">
+                  {pagedLessons.map((lesson) => {
+                    const job = jobOf(lesson);
+                    const analysis = lesson.analysis ?? null;
+                    const progress = progressText(lesson, job);
+                    const [progressLabel, progressDetail] = progress.split("\n");
 
-                  return (
-                    <Fragment key={lesson.id}>
-                      <tr>
-                        <td>
+                    return (
+                      <div className="lesson-card" key={lesson.id}>
+                        <div className="lesson-card-top">
                           <input
                             type="checkbox"
                             checked={selected.has(lesson.id)}
                             onChange={() => toggleOne(lesson.id)}
                             aria-label={`Select ${lesson.title}`}
                           />
-                        </td>
-                        <td>{i + 1}</td>
-                        <td>{lesson.title}</td>
-                        <td className="hide-narrow">{lesson.chapterTitle ?? "—"}</td>
-                        <td className="hide-narrow">{formatDuration(lesson.durationSeconds)}</td>
-                        <td>
+                          <span className="lesson-card-title">{lesson.title}</span>
+                        </div>
+                        <div className="lesson-card-meta">
                           <StatusBadge status={job.status} />
-                          {stale && <span className="stale-hint"> (potentially stale)</span>}
-                        </td>
-                        <td>
-                          {isProcessing ? (
-                            <span>
-                              {job.currentStage ?? job.status}
-                              {job.stageProgress != null ? ` — ${job.stageProgress}%` : " — …"}
-                            </span>
-                          ) : (
-                            "—"
-                          )}
-                        </td>
-                        <td className="hide-narrow">
-                          {analysis == null ? "—" : analysis.strategyFound ? "Yes" : "No"}
-                        </td>
-                        <td>{analysis?.extractedStrategiesLabel ?? "—"}</td>
-                        <td className="hide-narrow">
-                          {analysis && analysis.ruleCounts.length > 0
-                            ? analysis.ruleCounts.map((r) => `${r.label} ${r.count}`).join(", ")
-                            : "—"}
-                        </td>
-                        <td className="hide-narrow">{formatConfidence(analysis?.confidence)}</td>
-                        <td className="hide-narrow">{analysis?.summary ?? "—"}</td>
-                        <td className="hide-narrow">{formatCost(analysis?.estimatedCost)}</td>
-                        <td className="hide-narrow">{formatProcessingTime(analysis?.processingDurationSeconds)}</td>
-                        <td className="hide-narrow">{formatDate(analysis?.completedAt)}</td>
-                        <td className="hide-narrow">
-                          <a href={lesson.sourceUrl} target="_blank" rel="noreferrer">
-                            Open
-                          </a>{" "}
-                          <CopyLinkButton url={lesson.sourceUrl} />
-                        </td>
-                        <td>
-                          <div className="row-actions">
-                            {job.status === "NOT_ANALYZED" && (
-                              <button className="link-button" onClick={() => requestBatch([lesson.id], false, lesson.title)}>
-                                Analyze
-                              </button>
-                            )}
-                            {job.status === "QUEUED" && job.jobId && (
-                              <button className="link-button" onClick={() => onCancel(job.jobId!)}>
-                                Cancel
-                              </button>
-                            )}
-                            {(job.status === "FAILED" || job.status === "AUTH_REQUIRED") && job.jobId && (
-                              <button className="link-button" onClick={() => onRetry(job.jobId!)}>
-                                Retry
-                              </button>
-                            )}
-                            {(job.status === "COMPLETED" || job.status === "NO_STRATEGY") && (
-                              <>
-                                <button className="link-button" onClick={() => void toggleExpand(lesson)}>
-                                  {expandedId === lesson.id ? "Hide Analysis" : "View Analysis"}
-                                </button>
-                                <button className="link-button" onClick={() => requestBatch([lesson.id], true, lesson.title)}>
-                                  Re-analyze
-                                </button>
-                              </>
-                            )}
-                            {job.sanitizedError && (
-                              <span className="row-error" title={job.sanitizedError}>
-                                View Error
-                              </span>
-                            )}
+                          <span>{resultLabel(analysis)}</span>
+                        </div>
+                        {progressDetail && (
+                          <div className="lesson-card-progress">
+                            {progressLabel} — {progressDetail}
                           </div>
-                        </td>
+                        )}
+                        <RowActions
+                          lesson={lesson}
+                          job={job}
+                          onView={() => setDrawerLessonId(lesson.id)}
+                          onAnalyze={() => requestBatch([lesson.id], false, lesson.title)}
+                          onRetry={() => job.jobId && onRetry(job.jobId)}
+                          onCancel={() => job.jobId && onCancel(job.jobId)}
+                          onReanalyze={() => requestBatch([lesson.id], true, lesson.title)}
+                          onDownload={() => void handleDownload(lesson)}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="table-scroll-area">
+                  <table className="course-table">
+                    <thead>
+                      <tr>
+                        <th>
+                          <input
+                            type="checkbox"
+                            aria-label="Select all filtered lessons"
+                            checked={filteredLessons.length > 0 && filteredLessons.every((l) => selected.has(l.id))}
+                            onChange={(e) => (e.target.checked ? selectAll() : clearSelection())}
+                          />
+                        </th>
+                        <th className="hide-narrow">#</th>
+                        <th className="col-lesson">Lesson</th>
+                        <th className="hide-narrow">Chapter</th>
+                        <th className="hide-narrow">Duration</th>
+                        <th>Status</th>
+                        <th>Progress</th>
+                        <th>Result</th>
+                        <th className="hide-narrow">Cost</th>
+                        <th>Actions</th>
                       </tr>
-                      {expandedId === lesson.id && (
-                        <tr className="detail-row">
-                          <td colSpan={17}>
-                            <AnalysisDetailPanel
-                              lesson={lesson}
-                              validatedJson={expandedJson}
-                              loading={expandedLoading}
-                              onDownloadJson={() => downloadJson(lesson)}
-                            />
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
+                    </thead>
+                    <tbody>
+                      {pagedLessons.map((lesson, i) => {
+                        const job = jobOf(lesson);
+                        const analysis = lesson.analysis ?? null;
+                        const stale = isStale(job);
+                        const progress = progressText(lesson, job);
+                        const [progressLabel, progressDetail] = progress.split("\n");
+
+                        return (
+                          <tr key={lesson.id}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                checked={selected.has(lesson.id)}
+                                onChange={() => toggleOne(lesson.id)}
+                                aria-label={`Select ${lesson.title}`}
+                              />
+                            </td>
+                            <td className="hide-narrow">{(currentPage - 1) * pageSize + i + 1}</td>
+                            <td className="col-lesson">{lesson.title}</td>
+                            <td className="hide-narrow">{lesson.chapterTitle ?? "—"}</td>
+                            <td className="hide-narrow">{formatDuration(lesson.durationSeconds)}</td>
+                            <td>
+                              <StatusBadge status={job.status} />
+                              {stale && <span className="stale-hint"> (stale)</span>}
+                            </td>
+                            <td>
+                              {progressDetail ? (
+                                <span className="progress-cell">
+                                  <span className="progress-stage">{progressLabel}</span>
+                                  <span className="progress-detail">{progressDetail}</span>
+                                </span>
+                              ) : (
+                                progressLabel
+                              )}
+                            </td>
+                            <td>{resultLabel(analysis)}</td>
+                            <td className="hide-narrow">{formatCost(analysis?.estimatedCost)}</td>
+                            <td>
+                              <RowActions
+                                lesson={lesson}
+                                job={job}
+                                onView={() => setDrawerLessonId(lesson.id)}
+                                onAnalyze={() => requestBatch([lesson.id], false, lesson.title)}
+                                onRetry={() => job.jobId && onRetry(job.jobId)}
+                                onCancel={() => job.jobId && onCancel(job.jobId)}
+                                onReanalyze={() => requestBatch([lesson.id], true, lesson.title)}
+                                onDownload={() => void handleDownload(lesson)}
+                              />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              <div className="pagination-bar">
+                <label>
+                  Page size:{" "}
+                  <select value={pageSize} onChange={(e) => setPageSize(Number(e.target.value))}>
+                    {PAGE_SIZES.map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="pagination-controls">
+                  <button className="link-button" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={currentPage <= 1}>
+                    Previous
+                  </button>
+                  <span>
+                    Page {currentPage} of {totalPages}
+                  </span>
+                  <button
+                    className="link-button"
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={currentPage >= totalPages}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
         </>
       )}
+
+      <LessonDetailDrawer lesson={drawerLesson} onClose={() => setDrawerLessonId(null)} onLoadAnalysis={onLoadAnalysis} />
     </div>
   );
 }

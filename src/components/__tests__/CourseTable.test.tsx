@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { CourseTable } from "../CourseTable";
 import type { CourseLessonSummary } from "../../lib/courseApi";
@@ -56,15 +56,13 @@ describe("CourseTable", () => {
     expect(screen.getByText(/authorization expired/i)).toBeInTheDocument();
   });
 
-  it("renders one row per lesson with a working Source link and status badge, once connected", () => {
+  it("renders one row per lesson with a compact summary-only set of columns, once connected", () => {
     render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
 
     expect(screen.getByText("Support & Resistance")).toBeInTheDocument();
-    expect(screen.getByText("Foundations")).toBeInTheDocument();
-    expect(screen.getByText("44m")).toBeInTheDocument();
-    expect(screen.getByText("Not analyzed")).toBeInTheDocument();
-    const openLink = screen.getByRole("link", { name: /open/i });
-    expect(openLink).toHaveAttribute("href", makeLesson().sourceUrl);
+    expect(within(screen.getByRole("table")).getByText("Not analyzed")).toBeInTheDocument();
+    // Full output (summary text, JSON) must NOT be rendered inline in the table.
+    expect(screen.queryByText(/no concrete trading strategy taught/i)).not.toBeInTheDocument();
   });
 
   it("shows an empty-state message instead of an empty table when nothing has been synced yet", () => {
@@ -89,7 +87,7 @@ describe("CourseTable", () => {
     expect(onEnqueue).toHaveBeenCalledWith([7], false);
   });
 
-  it("selects lessons via checkboxes and queues them with Analyze Selected", () => {
+  it("selects lessons via checkboxes and shows the selected count next to Analyze Selected", () => {
     const onEnqueue = vi.fn();
     render(
       <CourseTable
@@ -101,9 +99,10 @@ describe("CourseTable", () => {
     );
 
     fireEvent.click(screen.getByLabelText("Select A"));
+    expect(screen.getByRole("button", { name: /analyze selected \(1 selected\)/i })).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: /analyze selected/i }));
     fireEvent.click(screen.getByRole("button", { name: /confirm/i }));
-
     expect(onEnqueue).toHaveBeenCalledWith([1], false);
   });
 
@@ -121,6 +120,7 @@ describe("CourseTable", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: /select all unanalyzed/i }));
     fireEvent.click(screen.getByRole("button", { name: /analyze all unanalyzed/i }));
     fireEvent.click(screen.getByRole("button", { name: /confirm/i }));
     expect(onEnqueue).toHaveBeenCalledWith([1], false);
@@ -154,64 +154,215 @@ describe("CourseTable", () => {
     expect(onCancel).toHaveBeenCalledWith("job_1");
   });
 
-  it("expands [ View Analysis ] for a completed lesson and loads its validated JSON", async () => {
-    const onLoadAnalysis = vi.fn(async () => ({ strategy_found: false, strategies: [] }));
-    render(
-      <CourseTable
-        {...baseProps}
-        connected
-        onLoadAnalysis={onLoadAnalysis}
-        lessons={[
-          makeLesson({
-            job: { jobId: "job_1", status: "COMPLETED" },
-            analysis: {
-              analysisId: 1,
-              strategyFound: false,
-              extractedStrategiesLabel: null,
-              ruleCounts: [],
-              confidence: null,
-              summary: "No concrete trading strategy taught.",
-              estimatedCost: 0.01,
-              processingDurationSeconds: 60,
-              completedAt: "2026-01-01T00:00:00Z",
-            },
-          }),
-        ]}
-      />,
-    );
+  describe("detail drawer", () => {
+    function completedLesson(overrides: Partial<CourseLessonSummary> = {}): CourseLessonSummary {
+      return makeLesson({
+        job: { jobId: "job_1", status: "COMPLETED" },
+        analysis: {
+          analysisId: 1,
+          strategyFound: true,
+          extractedStrategiesLabel: "Break & Retest",
+          ruleCounts: [{ label: "Entry", count: 1 }],
+          confidence: 0.8,
+          summary: "Break & Retest using HTF levels.",
+          estimatedCost: 0.1,
+          processingDurationSeconds: 60,
+          completedAt: "2026-01-01T00:00:00Z",
+        },
+        ...overrides,
+      });
+    }
 
-    fireEvent.click(screen.getByRole("button", { name: /view analysis/i }));
-    expect(onLoadAnalysis).toHaveBeenCalledWith(1);
-    expect(await screen.findByText("No concrete trading strategy taught.")).toBeInTheDocument();
+    it("opens the side drawer via View, without changing the table's own DOM structure", () => {
+      const onLoadAnalysis = vi.fn(async () => ({ strategy_found: true, strategies: [] }));
+      render(<CourseTable {...baseProps} connected onLoadAnalysis={onLoadAnalysis} lessons={[completedLesson()]} />);
+
+      const table = screen.getByRole("table");
+      const rowCountBefore = within(table).getAllByRole("row").length;
+
+      fireEvent.click(screen.getByRole("button", { name: /^view$/i }));
+
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      // The table remains mounted, in place, with the same number of rows —
+      // opening one lesson never expands a <tr> or changes table dimensions.
+      expect(screen.getByRole("table")).toBeInTheDocument();
+      expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(rowCountBefore);
+    });
+
+    it("closes the drawer via its close button", () => {
+      render(<CourseTable {...baseProps} connected lessons={[completedLesson()]} />);
+      fireEvent.click(screen.getByRole("button", { name: /^view$/i }));
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: /close analysis panel/i }));
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+
+    it('shows "No concrete trading strategy taught." in the drawer for a NO_STRATEGY lesson', async () => {
+      const lesson = completedLesson({
+        job: { jobId: "job_2", status: "NO_STRATEGY" },
+        analysis: {
+          analysisId: 2,
+          strategyFound: false,
+          extractedStrategiesLabel: null,
+          ruleCounts: [],
+          confidence: null,
+          summary: "No concrete trading strategy taught.",
+          estimatedCost: 0.05,
+          processingDurationSeconds: 30,
+          completedAt: "2026-01-01T00:00:00Z",
+        },
+      });
+      const onLoadAnalysis = vi.fn(async () => ({ strategy_found: false, strategies: [] }));
+      render(<CourseTable {...baseProps} connected onLoadAnalysis={onLoadAnalysis} lessons={[lesson]} />);
+
+      fireEvent.click(screen.getByRole("button", { name: /^view$/i }));
+      expect(await screen.findByText("No concrete trading strategy taught.", { selector: ".no-strategy-box" })).toBeInTheDocument();
+    });
+
+    it("renders full strategy detail in the drawer for a completed lesson", async () => {
+      const validatedJson = {
+        strategy_found: true,
+        strategies: [
+          {
+            strategy_name: "Break & Retest",
+            market_or_instrument: ["ES"],
+            timeframes: ["5m"],
+            indicators: [],
+            setup_conditions: [],
+            entry_rules: [{ description: "retest entry", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }],
+            confirmation_rules: [],
+            stop_loss_rules: [],
+            profit_target_rules: [],
+            trade_management_rules: [],
+            invalidation_rules: [],
+            no_trade_conditions: [],
+            market_context_rules: [],
+            visual_discretionary_rules: [],
+            examples_shown: [],
+            ambiguities: [],
+          },
+        ],
+      };
+      const onLoadAnalysis = vi.fn(async () => validatedJson);
+      render(<CourseTable {...baseProps} connected onLoadAnalysis={onLoadAnalysis} lessons={[completedLesson()]} />);
+
+      fireEvent.click(screen.getByRole("button", { name: /^view$/i }));
+      expect(onLoadAnalysis).toHaveBeenCalledWith(1);
+      expect(await screen.findByText("retest entry")).toBeInTheDocument();
+    });
+
+    it("keeps the raw JSON collapsed by default inside the drawer", async () => {
+      const onLoadAnalysis = vi.fn(async () => ({ strategy_found: false, strategies: [] }));
+      render(<CourseTable {...baseProps} connected onLoadAnalysis={onLoadAnalysis} lessons={[completedLesson()]} />);
+      fireEvent.click(screen.getByRole("button", { name: /^view$/i }));
+      const summary = await screen.findByText("▶ Raw JSON");
+      expect(summary.closest("details")).not.toHaveAttribute("open");
+    });
   });
 
-  it("offers Re-analyze for a completed lesson, which force-enqueues", () => {
-    const onEnqueue = vi.fn();
-    render(
-      <CourseTable
-        {...baseProps}
-        connected
-        onEnqueue={onEnqueue}
-        lessons={[makeLesson({ id: 3, job: { jobId: "job_1", status: "COMPLETED" } })]}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: /re-analyze/i }));
-    fireEvent.click(screen.getByRole("button", { name: /confirm/i }));
-    expect(onEnqueue).toHaveBeenCalledWith([3], true);
+  describe("search and filters", () => {
+    it("filters lessons by title via the search box", () => {
+      render(
+        <CourseTable
+          {...baseProps}
+          connected
+          lessons={[makeLesson({ id: 1, title: "Support & Resistance" }), makeLesson({ id: 2, title: "Order Blocks" })]}
+        />,
+      );
+      fireEvent.change(screen.getByPlaceholderText(/search lessons/i), { target: { value: "order" } });
+      expect(screen.queryByText("Support & Resistance")).not.toBeInTheDocument();
+      expect(screen.getByText("Order Blocks")).toBeInTheDocument();
+    });
+
+    it("filters lessons by status", () => {
+      render(
+        <CourseTable
+          {...baseProps}
+          connected
+          lessons={[
+            makeLesson({ id: 1, title: "A", job: { jobId: null, status: "NOT_ANALYZED" } }),
+            makeLesson({ id: 2, title: "B", job: { jobId: "job_2", status: "FAILED" } }),
+          ]}
+        />,
+      );
+      fireEvent.change(screen.getByLabelText(/filter by status/i), { target: { value: "FAILED" } });
+      expect(screen.queryByText("A")).not.toBeInTheDocument();
+      expect(screen.getByText("B")).toBeInTheDocument();
+    });
+
+    it("filters lessons by chapter", () => {
+      render(
+        <CourseTable
+          {...baseProps}
+          connected
+          lessons={[
+            makeLesson({ id: 1, title: "A", chapterTitle: "Foundations" }),
+            makeLesson({ id: 2, title: "B", chapterTitle: "Advanced" }),
+          ]}
+        />,
+      );
+      fireEvent.change(screen.getByLabelText(/filter by chapter/i), { target: { value: "Advanced" } });
+      expect(screen.queryByText("A")).not.toBeInTheDocument();
+      expect(screen.getByText("B")).toBeInTheDocument();
+    });
+
+    it("shows a no-match message when filters exclude every lesson", () => {
+      render(<CourseTable {...baseProps} connected lessons={[makeLesson({ title: "A" })]} />);
+      fireEvent.change(screen.getByPlaceholderText(/search lessons/i), { target: { value: "zzz-no-match" } });
+      expect(screen.getByText(/no lessons match/i)).toBeInTheDocument();
+    });
   });
 
-  it("keeps Lesson/Status/Progress/Strategy/Actions columns unmarked for narrow-screen hiding", () => {
+  it("keeps Lesson/Status/Progress/Result/Actions columns unmarked for narrow-screen hiding", () => {
     render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
     const table = screen.getByRole("table");
-    const headers = within(table).getAllByRole("columnheader").map((h) => h.textContent);
-    const alwaysVisible = ["Lesson", "Status", "Progress", "Extracted Strategies", "Actions"];
+    const alwaysVisible = ["Lesson", "Status", "Progress", "Result"];
     for (const label of alwaysVisible) {
       const th = within(table)
         .getAllByRole("columnheader")
         .find((h) => h.textContent === label);
-      expect(th).toBeDefined();
+      expect(th, `expected a "${label}" header`).toBeDefined();
       expect(th?.className).not.toContain("hide-narrow");
     }
-    void headers;
+  });
+
+  it("marks Chapter/Duration/Cost as secondary (hidden on narrow screens)", () => {
+    render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
+    const table = screen.getByRole("table");
+    for (const label of ["Chapter", "Duration", "Cost"]) {
+      const th = within(table)
+        .getAllByRole("columnheader")
+        .find((h) => h.textContent === label);
+      expect(th, `expected a "${label}" header`).toBeDefined();
+      expect(th?.className).toContain("hide-narrow");
+    }
+  });
+
+  describe("responsive layout", () => {
+    const originalInnerWidth = window.innerWidth;
+    afterEach(() => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: originalInnerWidth });
+    });
+
+    it("renders the desktop table on a wide viewport", () => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1200 });
+      render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
+      expect(screen.getByRole("table")).toBeInTheDocument();
+      expect(screen.queryByRole("list")).not.toBeInTheDocument();
+    });
+
+    it("switches to compact lesson cards on a narrow viewport, after a resize", () => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1200 });
+      render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
+      expect(screen.getByRole("table")).toBeInTheDocument();
+
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
+      fireEvent(window, new Event("resize"));
+
+      expect(screen.queryByRole("table")).not.toBeInTheDocument();
+      expect(screen.getByText("Support & Resistance")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^analyze$/i })).toBeInTheDocument();
+    });
   });
 });
