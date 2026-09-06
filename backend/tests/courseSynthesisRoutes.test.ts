@@ -539,6 +539,7 @@ describe("GET /api/course/synthesis", () => {
       ambiguities: [],
       conflicts: [],
       sourceLessonIds: [1],
+      supportingKnowledgeLessonIds: [],
     });
     await createCoursePlaybook(pool, {
       runId: claimed!.runId,
@@ -557,6 +558,17 @@ describe("GET /api/course/synthesis", () => {
           missingSupportingKnowledgeLessonTitles: [],
           missingFrameworkDimensions: [],
           coverageNote: "current",
+        },
+        strategyScopeMapping: {
+          distinctRawNameCount: 0,
+          matchedRawNameCount: 0,
+          unmatchedRawNameCount: 0,
+          matchedRawNames: [],
+          unmatchedRawNames: [],
+          totalStrategyScopedItemCount: 0,
+          matchedItemCount: 0,
+          unmatchedItemCount: 0,
+          completeness: "COMPLETE",
         },
       },
       decisionFramework: { nodes: [], readableSteps: [] },

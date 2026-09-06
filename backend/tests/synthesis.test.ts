@@ -473,11 +473,19 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     expect(sourceIndex?.content).toContain("Lesson 10");
     expect(sourceIndex?.content).toContain("Break & Retest");
 
-    // A "No Standalone Setup" lesson (e.g. "Sizing & Scaling Trades") gets an explicit,
-    // code-generated coverage-gap disclosure — never silently omitted or blended in.
+    // A "No Standalone Setup" lesson (e.g. "Sizing & Scaling Trades") is counted in the
+    // deterministic Coverage Notes section (Phase 3.5B) — reported as a real count, never
+    // silently omitted, and never described as "not represented" (that claim is now false —
+    // its knowledge flows into the framework/canonical strategies).
     const coverageNotes = result.playbook.sections.find((s) => s.key === "coverage_notes");
-    expect(coverageNotes?.content).toContain("Sizing & Scaling Trades");
-    expect(coverageNotes?.content).toContain("No Standalone Setup");
+    expect(coverageNotes?.content).toContain("1 lesson(s) taught no standalone setup");
+    expect(coverageNotes?.content).not.toContain("NOT represented");
+
+    // Blocker 1 (real audit): the deterministic Canonical Strategy Library section always
+    // lists every canonical strategy — never dependent on Gemini's own prose remembering it.
+    const library = result.playbook.sections.find((s) => s.key === "canonical_strategy_library");
+    expect(library?.content).toContain("Break & Retest");
+    expect(library?.content).toContain("exactly 1 distinct canonical strategy");
 
     // Structured coverage metadata mirrors the same gap — never fabricated, never COMPLETE while a gap exists.
     expect(result.playbook.frameworkCoverage.status).toBe("PARTIAL");
@@ -486,7 +494,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     expect(result.playbook.frameworkCoverage.lessonsMissingSupportingKnowledgeExtraction).toBe(1);
     expect(result.playbook.frameworkCoverage.missingSupportingKnowledgeLessonIds).toEqual([11]);
     expect(result.playbook.frameworkCoverage.missingSupportingKnowledgeLessonTitles).toEqual(["Sizing & Scaling Trades"]);
-    expect(result.playbook.frameworkCoverage.coverageNote).toContain("partial");
+    expect(result.playbook.frameworkCoverage.coverageNote).toContain("PARTIAL");
   });
 
   it("never fabricates progress during a single long indeterminate Gemini call (core framework, playbook, decision framework)", async () => {
@@ -585,7 +593,8 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     );
 
     const coverageNotes = result.playbook.sections.find((s) => s.key === "coverage_notes");
-    expect(coverageNotes?.content).toContain("no coverage gaps to report");
+    expect(coverageNotes?.content).toContain("0 lesson(s) taught no standalone setup");
+    expect(coverageNotes?.content).not.toContain("NOT represented");
 
     // Phase 3.5B: status is no longer driven by strategy_found/lesson counts —
     // with knowledgeSources empty, EVERY tracked dimension genuinely lacks
@@ -848,7 +857,6 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
       examples: [],
       ambiguities: [],
       conflicts: [],
-      sourceLessonIds: [10, 20],
       ...overrides,
     };
   }
@@ -902,7 +910,6 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
       }),
     ]; // -> s1: instance 1's rule, s2: instance 2's rule (same lessonId=10 for both)
     const raw = rawStrategy({
-      sourceLessonIds: [10],
       sections: [{ category: "setup", rules: [rawRule({ description: "Setup rule", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["s2"] })] }],
     });
 

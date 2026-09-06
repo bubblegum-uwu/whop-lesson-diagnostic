@@ -219,9 +219,11 @@ describe("runSynthesisLoop", () => {
 
     const playbookRow = await getCoursePlaybookByRun(pool, run.runId);
     expect(playbookRow).not.toBeNull();
-    // The NO_STRATEGY lesson is explicitly named as a coverage gap, never silently omitted.
+    // The NO_STRATEGY lesson is explicitly counted as a coverage gap, never silently omitted —
+    // Phase 3.5B's Coverage Notes reports aggregate counts, not per-lesson names (see runSynthesis.ts).
     const coverageNotes = playbookRow!.playbook.sections.find((s) => s.key === "coverage_notes");
-    expect(coverageNotes?.content).toContain("Sizing & Scaling Trades");
+    expect(coverageNotes?.content).toContain("1 lesson(s) taught no standalone setup");
+    expect(coverageNotes?.content).not.toContain("NOT represented");
     expect(playbookRow!.playbook.frameworkCoverage.status).toBe("PARTIAL");
   });
 

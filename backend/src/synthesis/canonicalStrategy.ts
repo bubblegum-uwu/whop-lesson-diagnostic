@@ -390,7 +390,15 @@ export function enrichCanonicalStrategy(
     examples: raw.examples,
     ambiguities: raw.ambiguities,
     conflicts: raw.conflicts.map((c) => enrichConflict(c, sourceKeyMap, knowledgeKeyMap, lessonTitleById)),
-    sourceLessonIds: raw.sourceLessonIds,
+    // Real-audit fix (Phase 3.5B) — computed deterministically, never asked
+    // of or trusted from Gemini (see schema.ts's doc comments on these two
+    // fields for the exact provenance-conflation bug this replaces):
+    // sourceLessonIds is ONLY lessons whose standalone strategy instance is
+    // a member of this cluster; supportingKnowledgeLessonIds is ONLY
+    // lessons that contributed matched strategy-scoped knowledge without
+    // necessarily teaching the setup themselves. Deduped, order-preserving.
+    sourceLessonIds: [...new Set(members.map((m) => m.lessonId))],
+    supportingKnowledgeLessonIds: [...new Set(scopedKnowledge.map((k) => k.lessonId))],
   };
 }
 
@@ -411,7 +419,7 @@ Every individual rule/item in the source data below is tagged with a short refer
 
 CRITICAL — do not silently resolve contradictions. If one source says "enter immediately on retest" and another says "wait for candle confirmation", record this as EITHER a variant (variants[]), a conditional rule (a rule whose description states the condition), or an unresolved conflict (conflicts[], with supportLevel CONFLICTING on the relevant rule and both sides' keys listed in "conflictSourceKeys") — depending on what the evidence actually shows. Never fabricate a compromise rule that blends the two. Each conflicts[] entry needs its own "description" and "sourceKeys" naming both sides.
 
-Preserve every member's original strategy name somewhere in the output (purpose text or variants). List every contributing lesson id in sourceLessonIds.
+Preserve every member's original strategy name somewhere in the output (purpose text or variants).
 
 Source strategy instances (every individual rule is tagged with its reference "key" — cite these keys in "sourceKeys"/"conflictSourceKeys", never the underlying lessonId/timestamp/evidence fields directly):
 ${JSON.stringify(promptMembers, null, 2)}${knowledgeBlock}

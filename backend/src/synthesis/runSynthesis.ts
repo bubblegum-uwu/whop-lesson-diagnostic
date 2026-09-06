@@ -9,8 +9,18 @@ import { sumUsages } from "./usage.js";
 import type { SynthesisStageDeps } from "./geminiStage.js";
 import { CANONICAL_STRATEGY_THINKING_LEVEL } from "./limits.js";
 import { normalizeLessonKnowledge, collectRawStrategyScopeNames, type LessonKnowledgeSource, type KnowledgeItemRecord, type NormalizedKnowledge } from "./knowledgeNormalize.js";
-import { buildClusterCandidates, resolveStrategyScopeNames } from "./strategyScopeMapping.js";
-import type { CanonicalStrategy, ClusterProposal, CoreFramework, CoursePlaybookDocument, DecisionFramework, FrameworkCoverage } from "./schema.js";
+import { buildClusterCandidates, resolveStrategyScopeNames, type ScopeMappingResult } from "./strategyScopeMapping.js";
+import { SynthesisInvariantError } from "./errors.js";
+import type {
+  CanonicalStrategy,
+  ClusterProposal,
+  CoreFramework,
+  CoursePlaybookDocument,
+  DecisionFramework,
+  FrameworkCoverage,
+  PlaybookSection,
+  StrategyScopeMappingSummary,
+} from "./schema.js";
 
 /**
  * The six Gemini-facing pipeline stages (see synthesis/progress.ts's
@@ -53,7 +63,20 @@ export interface SourceIndexEntry {
   lessonTitle: string;
   chapterTitle: string | null;
   sourceUrl: string;
-  contributedStrategyNames: string[];
+  /**
+   * Real-audit fix (Phase 3.5B) — split from a single conflated
+   * `contributedStrategyNames` field. A real audit found a lesson with
+   * strategy_found=false (e.g. "Stocks") listed as if it taught a
+   * standalone strategy ("Stocks: Break and Retest (B&R) Setup") merely
+   * because it contributed SUPPORTING knowledge to that strategy —
+   * `taughtStrategyNames` is now the standalone-setup provenance
+   * (CanonicalStrategy.sourceLessonIds) and `supportingStrategyNames` is
+   * the separate supporting-knowledge provenance
+   * (CanonicalStrategy.supportingKnowledgeLessonIds); a lesson may
+   * legitimately appear in both if it did both.
+   */
+  taughtStrategyNames: string[];
+  supportingStrategyNames: string[];
 }
 
 export interface RunSynthesisInput {
@@ -214,22 +237,30 @@ export async function runSynthesis(
   usages.push(coreFrameworkUsage);
 
   await emit("PLAYBOOK", null, null, null);
-  const { playbook: playbookWithoutSourceIndex, usage: playbookUsage } = await synthesizePlaybook(
+  const { playbook: geminiPlaybook, usage: playbookUsage } = await synthesizePlaybook(
     deps,
     input.courseTitle,
     canonicalStrategies,
     coreFramework,
   );
   usages.push(playbookUsage);
+
+  const frameworkCoverage = buildFrameworkCoverage(input, normalizedKnowledge);
+  const strategyScopeMapping = buildStrategyScopeMappingSummary(rawScopeNames, scopeMapping, normalizedKnowledge.strategyScopedItems, unmatchedStrategyKnowledge);
+
+  const librarySection = buildCanonicalStrategyLibrarySection(canonicalStrategies);
+  assertCanonicalStrategyLibraryComplete(librarySection, canonicalStrategies);
+
   const playbook: CoursePlaybookDocument = {
-    ...playbookWithoutSourceIndex,
+    ...geminiPlaybook,
     sections: [
-      ...playbookWithoutSourceIndex.sections,
-      buildCoverageNotesSection(input),
+      ...insertCanonicalStrategyLibrarySection(geminiPlaybook.sections, librarySection),
+      buildCoverageNotesSection(input, frameworkCoverage, unmatchedStrategyKnowledge.length),
       buildSourceIndexSection(input, canonicalStrategies),
       ...(unmatchedStrategyKnowledge.length > 0 ? [buildUnmatchedStrategyKnowledgeSection(unmatchedStrategyKnowledge)] : []),
     ],
-    frameworkCoverage: buildFrameworkCoverage(input, normalizedKnowledge),
+    frameworkCoverage,
+    strategyScopeMapping,
   };
 
   await emit("DECISION_FRAMEWORK", null, null, null);
@@ -330,6 +361,14 @@ function buildFrameworkCoverage(input: RunSynthesisInput, normalizedKnowledge: N
     noteParts.push(`${missingLessons.length} lesson(s) returned no extractable knowledge at all (an extraction gap, not simply "no standalone setup").`);
   }
 
+  // Real-audit fix (Phase 3.5B): the note previously opened with "Strategy
+  // synthesis complete", which read as claiming strategy-SCOPE-MAPPING was
+  // fully resolved — a real dry run had 11 unmatched strategy-scoped
+  // knowledge items while this said exactly that. This note is now scoped
+  // STRICTLY to framework-dimension coverage; strategy-scope-mapping
+  // completeness is reported separately (see StrategyScopeMappingSummary /
+  // buildStrategyScopeMappingSummary) and must never be inferred from this
+  // wording either way.
   return {
     status,
     standaloneStrategyLessonsAnalyzed,
@@ -340,9 +379,96 @@ function buildFrameworkCoverage(input: RunSynthesisInput, normalizedKnowledge: N
     missingFrameworkDimensions: missingDimensions.map((d) => d.label),
     coverageNote:
       noteParts.length > 0
-        ? `Strategy synthesis complete. Course-framework coverage is partial: ${noteParts.join(" ")}`
-        : "Strategy synthesis complete. Course-framework coverage is current across every tracked framework dimension.",
+        ? `Course-framework coverage is PARTIAL: ${noteParts.join(" ")}`
+        : "Course-framework coverage is COMPLETE — every tracked framework dimension has current supporting evidence. (This does not by itself mean every strategy-scoped knowledge item was matched to a canonical strategy — see the separate strategy-scope-mapping summary.)",
   };
+}
+
+/**
+ * Real-audit fix (Phase 3.5B) — a SEPARATE, independent completeness signal
+ * from FrameworkCoverage (see StrategyScopeMappingSummary's doc comment in
+ * schema.ts for why these must never be conflated). Reports both at the
+ * distinct-raw-name level (e.g. "B&R" and "Break and Retest" are two raw
+ * names that may resolve to the same cluster) and the individual-item
+ * level, plus the exact unmatched names so a human can review them (see
+ * strategyScopeMapping.ts's two-tier resolution — deterministic, then a
+ * single batched Gemini fallback call).
+ */
+function buildStrategyScopeMappingSummary(
+  rawScopeNames: string[],
+  scopeMapping: ScopeMappingResult,
+  strategyScopedItems: KnowledgeItemRecord[],
+  unmatchedStrategyKnowledge: KnowledgeItemRecord[],
+): StrategyScopeMappingSummary {
+  const matchedRawNames = rawScopeNames.filter((name) => scopeMapping.mapped.has(name));
+  const unmatchedRawNames = rawScopeNames.filter((name) => !scopeMapping.mapped.has(name));
+
+  return {
+    distinctRawNameCount: rawScopeNames.length,
+    matchedRawNameCount: matchedRawNames.length,
+    unmatchedRawNameCount: unmatchedRawNames.length,
+    matchedRawNames,
+    unmatchedRawNames,
+    totalStrategyScopedItemCount: strategyScopedItems.length,
+    matchedItemCount: strategyScopedItems.length - unmatchedStrategyKnowledge.length,
+    unmatchedItemCount: unmatchedStrategyKnowledge.length,
+    completeness: unmatchedRawNames.length === 0 ? "COMPLETE" : "PARTIAL",
+  };
+}
+
+/**
+ * Real-audit fix (Phase 3.5B, Blocker 1) — a real 28-lesson dry run showed
+ * Gemini's own playbook prose miscounting canonical strategies ("The
+ * playbook recognizes fifteen canonical strategies" when there were 16,
+ * silently omitting one). Completeness of an already-known, enumerable
+ * list must never depend on Gemini remembering every item — this section
+ * is built DIRECTLY from `canonicalStrategies`, guaranteeing exact 1:1
+ * coverage by construction. Gemini is never asked to produce this section
+ * (see playbook.ts's REQUIRED_SECTION_KEYS, which no longer includes it).
+ */
+function buildCanonicalStrategyLibrarySection(canonicalStrategies: CanonicalStrategy[]): PlaybookSection {
+  const entries = canonicalStrategies
+    .map((strategy, index) => {
+      const details: string[] = [];
+      if (strategy.purpose) details.push(strategy.purpose);
+      if (strategy.markets.length > 0) details.push(`Markets: ${strategy.markets.join(", ")}`);
+      if (strategy.timeframes.length > 0) details.push(`Timeframes: ${strategy.timeframes.join(", ")}`);
+      if (strategy.instructorPreferences.length > 0) {
+        details.push(`Instructor preferences (discretionary, not a hard requirement): ${strategy.instructorPreferences.map((r) => r.description).join("; ")}`);
+      }
+      return `${index + 1}. **${strategy.name}**${details.length > 0 ? ` — ${details.join(" ")}` : ""}`;
+    })
+    .join("\n\n");
+
+  return {
+    key: "canonical_strategy_library",
+    title: "Canonical Strategy Library",
+    content: `This course teaches exactly ${canonicalStrategies.length} distinct canonical strategy(ies), generated deterministically from the synthesized canonical-strategy set — this list can never omit, undercount, or overcount a strategy.\n\n${entries}`,
+  };
+}
+
+/** Inserts the deterministic library section at the same reading position Gemini's own prose would have used ("entry_framework" or later); appends to the front if that key is somehow absent, so the section is never lost. */
+function insertCanonicalStrategyLibrarySection(sections: PlaybookSection[], librarySection: PlaybookSection): PlaybookSection[] {
+  const index = sections.findIndex((s) => s.key === "entry_framework");
+  if (index === -1) return [librarySection, ...sections];
+  return [...sections.slice(0, index), librarySection, ...sections.slice(index)];
+}
+
+/**
+ * Defensive invariant guard (Blocker 1) — should be structurally
+ * impossible to trip given buildCanonicalStrategyLibrarySection generates
+ * the section directly FROM canonicalStrategies, but exists explicitly per
+ * the real-audit requirement to never allow silent omission, including
+ * against a future refactor reintroducing the bug.
+ */
+function assertCanonicalStrategyLibraryComplete(librarySection: PlaybookSection, canonicalStrategies: CanonicalStrategy[]): void {
+  for (const strategy of canonicalStrategies) {
+    if (!librarySection.content.includes(strategy.name)) {
+      throw new SynthesisInvariantError(
+        `Canonical Strategy Library section is missing canonical strategy "${strategy.name}" — expected exactly ${canonicalStrategies.length} strategies, this must never happen since the section is generated directly from canonicalStrategies.`,
+      );
+    }
+  }
 }
 
 /**
@@ -366,56 +492,67 @@ function buildUnmatchedStrategyKnowledgeSection(unmatched: KnowledgeItemRecord[]
 }
 
 /**
- * A deterministic, code-generated coverage-gap disclosure — never asked of
- * Gemini, which has no way to know what wasn't given to it. Lessons
- * classified "No Standalone Setup" (strategy_found=false) contribute
- * nothing to Stage 3 (no strategy_instances rows exist for them) and
- * nothing to Stage 4's pooled rule categories either, because the current
- * extractor discards everything but the lesson title/duration once
- * strategy_found is false (see gemini/schema.ts's refinement forcing
- * strategies=[]). A lesson like "Sizing & Scaling Trades" may teach
- * critical risk-management, position-sizing, psychology, or trade-
- * management content that this framework/playbook simply never saw.
- *
- * This is a real, confirmed coverage gap, not a hypothetical one — closing
- * it requires a future supplemental extractor (tentatively named
- * TRADING_KNOWLEDGE_EXTRACTOR) that could be run selectively on exactly
- * these lessons, producing its own artifact (risk management, position
- * sizing, scaling in/out, trade management, market preparation,
- * psychology, execution rules, warnings, principles, examples) stored
- * separately from — never forced into — the strategies schema, which Stage
- * 4 could then also pool from. Not implemented in this PR: no video is
- * reprocessed here, and this section only ever names the gap.
+ * Real-audit fix (Phase 3.5B, Blocker 2) — REPLACES the obsolete Phase 3.4
+ * version of this section, which said a "No Standalone Setup" lesson is
+ * "NOT represented anywhere else in this playbook or Core Framework" and
+ * that closing the gap "requires a future supplemental extractor." Both
+ * claims are now FALSE: Phase 3.5A already extracts rich knowledge from
+ * every lesson regardless of strategy_found, and Phase 3.5B actively
+ * synthesizes it into the canonical strategies (supportingKnowledgeLessonIds)
+ * and the course-wide framework (courseKnowledge in runSynthesis). This
+ * version reports the real, current Phase 3.5B coverage picture instead —
+ * deterministic, never asked of Gemini.
  */
-function buildCoverageNotesSection(input: RunSynthesisInput) {
-  if (input.noStandaloneSetupLessonIds.length === 0) {
-    return {
-      key: "coverage_notes",
-      title: "Coverage Notes",
-      content: "Every analyzed lesson in this course taught at least one standalone strategy or setup — no coverage gaps to report.",
-    };
-  }
+function buildCoverageNotesSection(input: RunSynthesisInput, frameworkCoverage: FrameworkCoverage, unmatchedStrategyKnowledgeCount: number) {
+  const totalLessons = input.lessons.length;
+  const standaloneCount = frameworkCoverage.standaloneStrategyLessonsAnalyzed;
+  const noStandaloneCount = frameworkCoverage.lessonsWithoutStandaloneSetup;
+  const supportingKnowledgeExtractedCount = noStandaloneCount - frameworkCoverage.lessonsMissingSupportingKnowledgeExtraction;
 
-  const byId = new Map(input.lessons.map((l) => [l.id, l]));
-  const gapLessons = input.noStandaloneSetupLessonIds.map((id) => byId.get(id)).filter((l): l is NonNullable<typeof l> => l != null);
-
-  const listing = gapLessons.map((l) => `- ${l.title}${l.chapterTitle ? ` (${l.chapterTitle})` : ""}`).join("\n");
+  const lines = [
+    `${totalLessons} lesson(s) analyzed.`,
+    `${standaloneCount} lesson(s) taught at least one standalone strategy/setup.`,
+    `${noStandaloneCount} lesson(s) taught no standalone setup — this does NOT mean they are unrepresented. Phase 3.5A extracts rich supporting knowledge (risk management, sizing, psychology, market context, execution, and more) from every lesson regardless of whether it teaches a standalone setup, and Phase 3.5B synthesizes that knowledge into the canonical strategies and course-wide framework above.`,
+    `${supportingKnowledgeExtractedCount} of those ${noStandaloneCount} lesson(s) successfully contributed extractable supporting knowledge. ${frameworkCoverage.lessonsMissingSupportingKnowledgeExtraction} returned no extractable knowledge at all — a real extraction gap, distinct from simply "no standalone setup".`,
+    `${unmatchedStrategyKnowledgeCount} strategy-scoped knowledge item(s) could not be confidently matched to a canonical strategy and are preserved separately (see "Unmatched Strategy-Scoped Knowledge" below) rather than being merged into the wrong strategy or the course-wide framework.`,
+    frameworkCoverage.missingFrameworkDimensions.length > 0
+      ? `Framework dimensions with no current supporting evidence: ${frameworkCoverage.missingFrameworkDimensions.join(", ")}.`
+      : `Every tracked framework dimension has current supporting evidence.`,
+  ];
 
   return {
     key: "coverage_notes",
-    title: "Coverage Notes — What This Playbook Does NOT Cover",
-    content: `The following ${gapLessons.length} lesson(s) were classified "No Standalone Setup" and are NOT represented anywhere else in this playbook or the Core Framework. This does not mean they taught nothing useful — it means the current analysis pipeline only extracts structured detail from lessons that teach a standalone, clusterable trading setup. A lesson on position sizing, scaling, trade psychology, or general risk management can be entirely absent from this document even though it may be essential to trading the strategies above correctly.\n\n${listing}\n\nClosing this gap requires re-analyzing these specific lessons with a supplemental extractor built for general course knowledge (risk management, position sizing, scaling, trade management, market preparation, psychology, execution, warnings, principles, examples) rather than standalone setups — out of scope for this synthesis run.`,
+    title: "Coverage Notes",
+    content: lines.join("\n\n"),
   };
 }
 
-/** Section 19 — deterministic, not synthesized: a plain listing of every contributing lesson and what it contributed. */
+/**
+ * Section 19 — deterministic, not synthesized: a plain listing of every
+ * contributing lesson and what it contributed.
+ *
+ * Real-audit fix (Phase 3.5B, Blocker 3) — a real dry run showed a lesson
+ * with strategy_found=false ("Stocks") listed as "Stocks: Break and Retest
+ * (B&R) Setup", which reads as if Stocks taught the standalone B&R
+ * strategy — it only contributed strategy-SCOPED SUPPORTING KNOWLEDGE to
+ * it. Now built from two disjoint-in-intent, both-deterministic
+ * CanonicalStrategy fields: `sourceLessonIds` (taught the standalone setup)
+ * and `supportingKnowledgeLessonIds` (contributed matched supporting
+ * knowledge) — never collapsed into one list again.
+ */
 function buildSourceIndexSection(input: RunSynthesisInput, canonicalStrategies: CanonicalStrategy[]) {
-  const strategyNamesByLesson = new Map<number, string[]>();
+  const taughtByLesson = new Map<number, string[]>();
+  const supportingByLesson = new Map<number, string[]>();
   for (const strategy of canonicalStrategies) {
     for (const lessonId of strategy.sourceLessonIds) {
-      const existing = strategyNamesByLesson.get(lessonId) ?? [];
+      const existing = taughtByLesson.get(lessonId) ?? [];
       existing.push(strategy.name);
-      strategyNamesByLesson.set(lessonId, existing);
+      taughtByLesson.set(lessonId, existing);
+    }
+    for (const lessonId of strategy.supportingKnowledgeLessonIds) {
+      const existing = supportingByLesson.get(lessonId) ?? [];
+      existing.push(strategy.name);
+      supportingByLesson.set(lessonId, existing);
     }
   }
 
@@ -424,11 +561,17 @@ function buildSourceIndexSection(input: RunSynthesisInput, canonicalStrategies: 
     lessonTitle: lesson.title,
     chapterTitle: lesson.chapterTitle,
     sourceUrl: lesson.sourceUrl,
-    contributedStrategyNames: strategyNamesByLesson.get(lesson.id) ?? [],
+    taughtStrategyNames: taughtByLesson.get(lesson.id) ?? [],
+    supportingStrategyNames: supportingByLesson.get(lesson.id) ?? [],
   }));
 
   const content = entries
-    .map((e) => `- ${e.lessonTitle}${e.chapterTitle ? ` (${e.chapterTitle})` : ""}: ${e.contributedStrategyNames.length > 0 ? e.contributedStrategyNames.join(", ") : "no strategy taught"}`)
+    .map((e) => {
+      const taught = e.taughtStrategyNames.length > 0 ? e.taughtStrategyNames.join(", ") : "none";
+      const supportingLine =
+        e.supportingStrategyNames.length > 0 ? `\n    Supporting canonical strategy knowledge: ${e.supportingStrategyNames.join(", ")}` : "";
+      return `- ${e.lessonTitle}${e.chapterTitle ? ` (${e.chapterTitle})` : ""}\n    Standalone strategies taught: ${taught}${supportingLine}`;
+    })
     .join("\n");
 
   return { key: "source_index", title: "Source Index", content };

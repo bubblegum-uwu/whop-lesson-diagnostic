@@ -307,7 +307,6 @@ describe("synthesis/canonicalStrategy — Phase 3.5B knowledge enrichment", () =
       examples: [],
       ambiguities: [],
       conflicts: [],
-      sourceLessonIds: [10],
     };
 
     const enriched = enrichCanonicalStrategy(raw, [makeInstance()], scopedKnowledge);
@@ -345,7 +344,6 @@ describe("synthesis/canonicalStrategy — Phase 3.5B knowledge enrichment", () =
       examples: [],
       ambiguities: [],
       conflicts: [],
-      sourceLessonIds: [10],
     };
 
     const enriched = enrichCanonicalStrategy(raw, [makeInstance()]);
@@ -423,6 +421,7 @@ describe("synthesis/coreFramework — Phase 3.5B course-wide knowledge pooling",
     ambiguities: [],
     conflicts: [],
     sourceLessonIds: [],
+    supportingKnowledgeLessonIds: [],
   };
 
   it("pools GLOBAL knowledge items (a lesson with no standalone setup) into the course-wide framework — this was the exact gap Phase 3.4 left open", async () => {

@@ -205,7 +205,29 @@ export const CanonicalStrategySchema = z.object({
   examples: z.array(ExampleSchema),
   ambiguities: z.array(z.string()),
   conflicts: z.array(ConflictSchema),
+  /**
+   * Real-audit fix (Phase 3.5B) — lessons whose STANDALONE STRATEGY INSTANCE
+   * is a member of this cluster (i.e. this lesson taught the setup itself).
+   * Computed DETERMINISTICALLY by enrichCanonicalStrategy from `members`,
+   * never asked of or trusted from Gemini — a real audit found Gemini's own
+   * `sourceLessonIds` conflating "taught this strategy" with "contributed
+   * supporting knowledge to this strategy" (e.g. a lesson with
+   * strategy_found=false, contributing only strategy-scoped knowledge,
+   * showing up here as if it taught the setup). See
+   * `supportingKnowledgeLessonIds` for the separate, second concept.
+   */
   sourceLessonIds: z.array(z.number()),
+  /**
+   * Real-audit fix (Phase 3.5B) — lessons that contributed strategy-scoped
+   * supporting KnowledgeItems to this cluster (via strategyScopeMapping.ts)
+   * WITHOUT themselves teaching the standalone strategy — e.g. a lesson on
+   * general market context that happens to mention "with Break & Retest,
+   * risk 1%". Computed deterministically from `scopedKnowledge`, never from
+   * Gemini. Disjoint in intent from `sourceLessonIds`, though the same
+   * lesson id may legitimately appear in both if it both taught the setup
+   * AND separately contributed matched scoped knowledge.
+   */
+  supportingKnowledgeLessonIds: z.array(z.number()).optional().default([]),
 });
 export type CanonicalStrategy = z.infer<typeof CanonicalStrategySchema>;
 
@@ -431,6 +453,14 @@ export const RawCanonicalStrategySchema = CanonicalStrategySchema.omit({
   warnings: true,
   instructorPreferences: true,
   conflicts: true,
+  // Real-audit fix (Phase 3.5B) — sourceLessonIds/supportingKnowledgeLessonIds
+  // are now ALWAYS computed deterministically by enrichCanonicalStrategy from
+  // `members`/`scopedKnowledge` (never trusted from Gemini's own output — a
+  // real audit found Gemini conflating "taught this strategy" with
+  // "contributed supporting knowledge to it" in this exact field). Omitted
+  // here so Gemini is never even asked for them.
+  sourceLessonIds: true,
+  supportingKnowledgeLessonIds: true,
 }).extend({
   sections: z.array(RawRuleSectionSchema),
   conflicts: z.array(RawConflictSchema),
@@ -449,9 +479,8 @@ export const RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA = {
     examples: { type: "array", items: exampleJsonSchema },
     ambiguities: { type: "array", items: { type: "string" } },
     conflicts: { type: "array", items: rawConflictJsonSchema },
-    sourceLessonIds: { type: "array", items: { type: "number" } },
   },
-  required: ["name", "purpose", "markets", "timeframes", "sections", "variants", "examples", "ambiguities", "conflicts", "sourceLessonIds"],
+  required: ["name", "purpose", "markets", "timeframes", "sections", "variants", "examples", "ambiguities", "conflicts"],
 };
 
 // ---- Stage 4: core framework ----------------------------------------------
@@ -524,6 +553,7 @@ export const PlaybookSectionSchema = z.object({
   title: z.string().min(1),
   content: z.string(),
 });
+export type PlaybookSection = z.infer<typeof PlaybookSectionSchema>;
 
 export const PlaybookSchema = z.object({
   title: z.string().min(1),
@@ -575,9 +605,37 @@ export const FrameworkCoverageSchema = z.object({
 });
 export type FrameworkCoverage = z.infer<typeof FrameworkCoverageSchema>;
 
-/** The final, persisted playbook document: Gemini's validated Playbook plus code-generated coverage metadata and sections (Coverage Notes, Source Index — see runSynthesis.ts). */
+/**
+ * Real-audit fix (Phase 3.5B) — a real 28-lesson dry run's coverageNote said
+ * "Strategy synthesis complete" while 11 strategy-scoped knowledge items
+ * remained unmatched to any canonical strategy, which reads as (falsely)
+ * implying strategy-scope mapping had fully resolved. This is a SEPARATE,
+ * independent concept from FrameworkCoverage — frameworkCoverage.status
+ * tracks whether the 13 tracked KNOWLEDGE DIMENSIONS have supporting
+ * evidence; this tracks whether every distinct strategy name referenced by
+ * scope.strategies was successfully resolved to a canonical-strategy
+ * cluster (see strategyScopeMapping.ts). A course can legitimately be
+ * FrameworkCoverage.COMPLETE while StrategyScopeMappingSummary is PARTIAL,
+ * or vice versa — neither should ever be inferred from the other's wording.
+ */
+export const StrategyScopeMappingSummarySchema = z.object({
+  distinctRawNameCount: z.number().int().min(0),
+  matchedRawNameCount: z.number().int().min(0),
+  unmatchedRawNameCount: z.number().int().min(0),
+  matchedRawNames: z.array(z.string()),
+  unmatchedRawNames: z.array(z.string()),
+  totalStrategyScopedItemCount: z.number().int().min(0),
+  matchedItemCount: z.number().int().min(0),
+  unmatchedItemCount: z.number().int().min(0),
+  /** COMPLETE only when every distinct raw strategy-scope name resolved — completely independent of FrameworkCoverage.status. */
+  completeness: z.enum(["COMPLETE", "PARTIAL"]),
+});
+export type StrategyScopeMappingSummary = z.infer<typeof StrategyScopeMappingSummarySchema>;
+
+/** The final, persisted playbook document: Gemini's validated Playbook plus code-generated coverage metadata and sections (Canonical Strategy Library, Coverage Notes, Source Index — see runSynthesis.ts). */
 export interface CoursePlaybookDocument extends Playbook {
   frameworkCoverage: FrameworkCoverage;
+  strategyScopeMapping: StrategyScopeMappingSummary;
 }
 
 // ---- Stage 6: master decision framework -----------------------------------
@@ -589,13 +647,71 @@ export const DecisionNodeSchema = z.object({
   description: nullableString(),
   next: z.array(z.string()),
   branches: z.array(z.object({ label: z.string(), next: z.string() })),
+  /**
+   * Real-audit fix (Phase 3.5B) — same convention as KnowledgeItem.scope
+   * (gemini/schema.ts): a REQUIRED, non-nullable object where every array
+   * empty means genuinely global (applies on every path); any non-empty
+   * array means this node's gate/action is conditioned on that
+   * instrument/timeframe/session/trader-profile/strategy restriction and
+   * must NEVER be placed on the unconditional path before that context is
+   * established (see decisionFramework.ts's buildPrompt and
+   * decisionScopeAudit.ts's findGlobalGateScopeLeaks, which validates this
+   * deterministically via the same isKnowledgeItemScoped derivation — never
+   * a separate Gemini-generated GLOBAL/SCOPED label). A real audit found a
+   * genuinely scoped rule (a 9:30-11am intraday/options-only execution
+   * window) turned into an unconditional global gate, incorrectly
+   * constraining unrelated daily/weekly and swing strategies.
+   */
+  scope: KnowledgeItemScopeSchema.optional().default(() => ({ strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] })),
+});
+
+export const DecisionNodeScopeLeakSchema = z.object({
+  nodeId: z.string(),
+  label: z.string(),
+  scope: KnowledgeItemScopeSchema,
 });
 
 export const DecisionFrameworkSchema = z.object({
   nodes: z.array(DecisionNodeSchema),
   readableSteps: z.array(z.string()),
+  /**
+   * Real-audit fix (Phase 3.5B) — deterministic, computed by
+   * decisionScopeAudit.ts's findGlobalGateScopeLeaks AFTER Gemini's
+   * response is validated, never asked of or trusted from Gemini itself
+   * (defaults to [] on the raw Gemini response, then is overwritten with
+   * the real computed value — see decisionFramework.ts). Any node here
+   * means a genuinely scoped rule was placed on the unconditional global
+   * path before strategy selection — a structural bug in the returned
+   * graph that should be empty by construction once the prompt fix holds,
+   * but is reported rather than silently trusted.
+   */
+  scopeLeaks: z.array(DecisionNodeScopeLeakSchema).optional().default([]),
 });
 export type DecisionFramework = z.infer<typeof DecisionFrameworkSchema>;
+
+/**
+ * JSON schema mirror of KnowledgeItemScope, for the one place besides
+ * KnowledgeItem extraction itself where Gemini is actually asked to
+ * produce a scope object — DecisionNode.scope, since a decision-graph node
+ * has no deterministic source to derive its scope from (unlike
+ * SynthesizedRule.scope, which is always attached deterministically from
+ * cited sources — see canonicalStrategy.ts/coreFramework.ts). Nullability
+ * is represented by OMISSION from the node's `required` list below (this
+ * file's established convention — see nullableString()'s doc comment) —
+ * never an array-valued "type", which this codebase's own schema tests
+ * assert never appears anywhere in a response schema.
+ */
+const decisionNodeScopeJsonSchema = {
+  type: "object",
+  properties: {
+    strategies: { type: "array", items: { type: "string" } },
+    marketsOrInstruments: { type: "array", items: { type: "string" } },
+    timeframes: { type: "array", items: { type: "string" } },
+    sessions: { type: "array", items: { type: "string" } },
+    traderProfiles: { type: "array", items: { type: "string" } },
+  },
+  required: ["strategies", "marketsOrInstruments", "timeframes", "sessions", "traderProfiles"],
+};
 
 export const DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
   type: "object",
@@ -618,8 +734,9 @@ export const DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
               required: ["label", "next"],
             },
           },
+          scope: decisionNodeScopeJsonSchema,
         },
-        required: ["id", "type", "label", "next", "branches"],
+        required: ["id", "type", "label", "next", "branches", "scope"],
       },
     },
     readableSteps: { type: "array", items: { type: "string" } },
