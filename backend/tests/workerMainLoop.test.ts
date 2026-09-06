@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from "vitest";
 import { randomBytes } from "node:crypto";
 import { upsertCourse } from "../src/db/coursesRepo.js";
 import { syncLessons, listLessons, getLessonById } from "../src/db/lessonsRepo.js";
@@ -25,6 +25,15 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await pool.query("TRUNCATE analysis_jobs, lesson_analyses, strategy_instances, usage_records, job_events RESTART IDENTITY CASCADE");
+  await deleteAuthSession(pool);
+});
+
+// auth_sessions is a genuine singleton shared across the whole test database
+// (see backend/README.md "single-operator system") — leaving a row behind
+// after this file's LAST test would break any other test file that later
+// asserts "no session has ever been established" against the same table,
+// since vitest's file order here isn't guaranteed to put this file first.
+afterEach(async () => {
   await deleteAuthSession(pool);
 });
 
