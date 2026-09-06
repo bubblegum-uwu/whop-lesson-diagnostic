@@ -108,6 +108,7 @@ const validJson = JSON.stringify({
       ambiguities: [],
     },
   ],
+  knowledge: { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] },
 });
 
 function makeGemini(overrides: Partial<GeminiClient> = {}): GeminiClient {

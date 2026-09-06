@@ -22,6 +22,9 @@ function makeLesson(overrides: Partial<CourseLessonSummary> = {}): CourseLessonS
       ruleCounts: [{ label: "Entry", count: 2 }],
       confidence: 0.87,
       summary: "Break & Retest using HTF levels.",
+      hasSupportingKnowledge: true,
+      knowledgeItemCounts: [],
+      schemaVersion: "v2",
       estimatedCost: 0.12,
       processingDurationSeconds: 95,
       completedAt: "2026-01-02T00:00:00Z",
@@ -29,6 +32,8 @@ function makeLesson(overrides: Partial<CourseLessonSummary> = {}): CourseLessonS
     ...overrides,
   };
 }
+
+const emptyKnowledge = { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] };
 
 const strategyJson = {
   strategy_found: true,
@@ -54,9 +59,59 @@ const strategyJson = {
       ambiguities: [],
     },
   ],
+  knowledge: emptyKnowledge,
 };
 
-const noStrategyJson = { strategy_found: false, strategies: [] };
+const noStrategyJson = {
+  strategy_found: false,
+  strategies: [],
+  knowledge: {
+    summary: "Covers risk management and position sizing for scaling into trades.",
+    knowledgeItems: [
+      {
+        category: "risk_management",
+        statement: "Never risk more than 1% of account equity on a single trade.",
+        ruleType: "HARD_RULE",
+        classification: "explicit",
+        confidence: 0.95,
+        conditions: null,
+        exceptions: [],
+        scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+        numericalValues: [
+          { metric: "max risk per trade", operator: "LTE", value: 1, value2: null, unit: "%", role: "RULE_THRESHOLD", rawText: "1%", context: "max risk per trade" },
+        ],
+        start_timestamp: "2:15",
+        end_timestamp: null,
+        evidence: '"Never risk more than 1% on any single trade."',
+      },
+      {
+        category: "psychology",
+        statement: "I usually take a short break after two consecutive losses.",
+        ruleType: "PREFERENCE",
+        classification: "explicit",
+        confidence: 0.7,
+        conditions: null,
+        exceptions: [],
+        scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+        numericalValues: [],
+        start_timestamp: "8:40",
+        end_timestamp: null,
+        evidence: '"I usually step away after two losses in a row."',
+      },
+    ],
+    examples: [
+      {
+        description: "A trade sized at 1% risk on a $10,000 account.",
+        illustratesCategory: "position_sizing",
+        outcome: "Stopped out for the planned 1% loss.",
+        start_timestamp: "5:00",
+        end_timestamp: "5:45",
+        evidence: '"Here I risked exactly 1%, which came out to two contracts."',
+      },
+    ],
+    conflictsAndAmbiguities: ["Unclear whether the 1% figure is per-trade or per-day."],
+  },
+};
 
 describe("LessonDetailDrawer", () => {
   it("renders nothing when lesson is null", () => {
@@ -101,7 +156,7 @@ describe("LessonDetailDrawer", () => {
     expect(screen.getByText(/Markets: ES/)).toBeInTheDocument();
   });
 
-  it('shows "No concrete trading strategy taught." prominently for NO_STRATEGY, without empty strategy sections', async () => {
+  it('shows "No Standalone Setup" prominently for NO_STRATEGY, without empty strategy sections — and never implies the lesson has no useful content', async () => {
     const lesson = makeLesson({
       job: { jobId: "job_2", status: "NO_STRATEGY" },
       analysis: {
@@ -110,15 +165,62 @@ describe("LessonDetailDrawer", () => {
         extractedStrategiesLabel: null,
         ruleCounts: [],
         confidence: null,
-        summary: "No concrete trading strategy taught.",
+        summary: "Covers risk management and position sizing for scaling into trades.",
+        hasSupportingKnowledge: true,
+        knowledgeItemCounts: [{ label: "Risk Management", count: 1 }, { label: "Psychology", count: 1 }],
+        schemaVersion: "v2",
         estimatedCost: 0.05,
         processingDurationSeconds: 40,
         completedAt: "2026-01-02T00:00:00Z",
       },
     });
     render(<LessonDetailDrawer lesson={lesson} onClose={vi.fn()} onLoadAnalysis={vi.fn(async () => noStrategyJson)} />);
-    expect(await screen.findByText("No concrete trading strategy taught.")).toBeInTheDocument();
+    expect(await screen.findByText(/no standalone setup/i, { selector: ".no-strategy-box" })).toBeInTheDocument();
+    expect(screen.getByText(/still contains supporting knowledge/i, { selector: ".no-strategy-box" })).toBeInTheDocument();
     expect(screen.queryByText("Setup")).not.toBeInTheDocument();
+  });
+
+  it("keeps supporting-knowledge sections visible for a no-strategy lesson, organized by category, hiding categories with no items", async () => {
+    const lesson = makeLesson({ job: { jobId: "job_2", status: "NO_STRATEGY" } });
+    render(<LessonDetailDrawer lesson={lesson} onClose={vi.fn()} onLoadAnalysis={vi.fn(async () => noStrategyJson)} />);
+
+    expect(await screen.findByText("Risk Management")).toBeInTheDocument();
+    expect(screen.getByText("Never risk more than 1% of account equity on a single trade.")).toBeInTheDocument();
+    expect(screen.getByText("Hard Rule")).toBeInTheDocument();
+    expect(screen.getByText("1%", { selector: ".mono-box" })).toBeInTheDocument();
+    expect(screen.getByText("max risk per trade", { selector: ".rule-description" })).toBeInTheDocument();
+
+    // A category with zero items (e.g. Execution) never renders its own empty section.
+    expect(screen.queryByText("Execution")).not.toBeInTheDocument();
+  });
+
+  it("separates instructor preferences from hard rules — never promotes a stated preference into a rule", async () => {
+    const lesson = makeLesson({ job: { jobId: "job_2", status: "NO_STRATEGY" } });
+    render(<LessonDetailDrawer lesson={lesson} onClose={vi.fn()} onLoadAnalysis={vi.fn(async () => noStrategyJson)} />);
+
+    expect(await screen.findByText("Instructor Heuristics")).toBeInTheDocument();
+    expect(screen.getByText("I usually take a short break after two consecutive losses.")).toBeInTheDocument();
+    expect(screen.getByText("Preference")).toBeInTheDocument();
+  });
+
+  it("shows examples and conflicts/ambiguities as their own sections, distinct from knowledgeItems", async () => {
+    const lesson = makeLesson({ job: { jobId: "job_2", status: "NO_STRATEGY" } });
+    render(<LessonDetailDrawer lesson={lesson} onClose={vi.fn()} onLoadAnalysis={vi.fn(async () => noStrategyJson)} />);
+
+    expect(await screen.findByText("Examples")).toBeInTheDocument();
+    expect(screen.getByText("A trade sized at 1% risk on a $10,000 account.")).toBeInTheDocument();
+    expect(screen.getByText(/Stopped out for the planned 1% loss/, { selector: ".rule-conditions" })).toBeInTheDocument();
+
+    expect(screen.getByText("Conflicts / Ambiguity")).toBeInTheDocument();
+    expect(screen.getByText("Unclear whether the 1% figure is per-trade or per-day.")).toBeInTheDocument();
+  });
+
+  it("hides every knowledge section when knowledge is entirely empty (e.g. a strategy-only lesson)", async () => {
+    render(<LessonDetailDrawer lesson={makeLesson()} onClose={vi.fn()} onLoadAnalysis={vi.fn(async () => strategyJson)} />);
+    await screen.findByText("retest entry");
+    for (const label of ["Risk Management", "Position Sizing", "Numerical Rules", "Examples", "Instructor Heuristics", "Conflicts / Ambiguity"]) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
   });
 
   it("keeps raw JSON collapsed by default, even after the analysis has loaded", async () => {

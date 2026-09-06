@@ -70,6 +70,12 @@ describe("GET /api/course/lessons (PR2 job/analysis join)", () => {
       `INSERT INTO analysis_jobs (lesson_id, analysis_fingerprint, status, current_stage) VALUES ($1, 'fp', 'COMPLETED', 'validating_result') RETURNING job_id`,
       [lesson.id],
     );
+    // Deliberately a pre-v2 shaped row (promptVersion/schemaVersion "v1",
+    // no `knowledge` at all) — cast past the now-stricter LessonStrategyAnalysis
+    // type the same way lessonAnalysisDetailRoute.test.ts does, to prove the
+    // real HTTP route (not just the repo) stays readable for old analyses
+    // and that its new hasSupportingKnowledge/knowledgeItemCounts fields
+    // degrade to empty rather than crashing.
     await createLessonAnalysis(pool, {
       lessonId: lesson.id,
       jobId: job.rows[0].job_id,
@@ -98,7 +104,7 @@ describe("GET /api/course/lessons (PR2 job/analysis join)", () => {
             ambiguities: [],
           },
         ],
-      },
+      } as never,
       analysisSummary: "Break & Retest summary",
       model: "gemini-3.8-flash",
       promptVersion: "v1",
@@ -121,7 +127,16 @@ describe("GET /api/course/lessons (PR2 job/analysis join)", () => {
     const result = body() as {
       lessons: {
         job: { status: string };
-        analysis: { extractedStrategiesLabel: string; ruleCounts: unknown[]; confidence: number; summary: string; estimatedCost: number };
+        analysis: {
+          extractedStrategiesLabel: string;
+          ruleCounts: unknown[];
+          confidence: number;
+          summary: string;
+          estimatedCost: number;
+          hasSupportingKnowledge: boolean;
+          knowledgeItemCounts: unknown[];
+          schemaVersion: string;
+        };
       }[];
     };
     expect(result.lessons[0].job.status).toBe("COMPLETED");
@@ -130,6 +145,9 @@ describe("GET /api/course/lessons (PR2 job/analysis join)", () => {
     expect(result.lessons[0].analysis.confidence).toBe(0.9);
     expect(result.lessons[0].analysis.summary).toBe("Break & Retest summary");
     expect(result.lessons[0].analysis.estimatedCost).toBe(0.01);
+    expect(result.lessons[0].analysis.hasSupportingKnowledge).toBe(false);
+    expect(result.lessons[0].analysis.knowledgeItemCounts).toEqual([]);
+    expect(result.lessons[0].analysis.schemaVersion).toBe("v1");
   });
 
   it("exposes the job's leaseExpiresAt so the frontend can tell an expired lease apart from a merely-quiet heartbeat", async () => {

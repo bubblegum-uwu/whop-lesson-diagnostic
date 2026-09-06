@@ -516,4 +516,56 @@ describe("CourseIntelligence", () => {
     // refresh() effect) — wait past that boundary for the second, higher-cost response to land.
     await waitFor(() => expect(screen.getByText("Cost so far: $0.09")).toBeInTheDocument(), { timeout: 6000 });
   }, 8000);
+
+  describe("Download Full Synthesis JSON", () => {
+    let originalCreateObjectURL: typeof URL.createObjectURL;
+    let originalRevokeObjectURL: typeof URL.revokeObjectURL;
+
+    afterEach(() => {
+      URL.createObjectURL = originalCreateObjectURL;
+      URL.revokeObjectURL = originalRevokeObjectURL;
+    });
+
+    it("does not appear before any synthesis has completed", async () => {
+      stubFetch(baseStatus());
+      render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+      await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i });
+      expect(screen.queryByRole("button", { name: /download full synthesis json/i })).not.toBeInTheDocument();
+    });
+
+    it("downloads the ENTIRE synthesis — clusters, canonical strategies, core framework, playbook, and decision framework — as one JSON file, not just one section", async () => {
+      const data = baseSynthesisData();
+      const status = baseStatus({ latestCompletedRun: data.run, latestRun: data.run });
+      stubFetch(status, data);
+
+      originalCreateObjectURL = URL.createObjectURL;
+      originalRevokeObjectURL = URL.revokeObjectURL;
+      const createObjectURL = vi.fn((_obj: Blob | MediaSource) => "blob:mock-url");
+      const revokeObjectURL = vi.fn();
+      URL.createObjectURL = createObjectURL;
+      URL.revokeObjectURL = revokeObjectURL;
+      const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+      render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+      const button = await screen.findByRole("button", { name: /download full synthesis json/i });
+      fireEvent.click(button);
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      const blobArg = createObjectURL.mock.calls[0][0] as Blob;
+      expect(blobArg.type).toBe("application/json");
+      const parsed = JSON.parse(await blobArg.text());
+      // Every top-level section CourseSynthesisData carries, not just the playbook.
+      expect(parsed.clusters).toHaveLength(1);
+      expect(parsed.canonicalStrategies).toHaveLength(1);
+      expect(parsed.canonicalStrategies[0].strategy.name).toBe("Break & Retest");
+      expect(parsed.coreFramework).toEqual({ sections: [] });
+      expect(parsed.playbook.title).toBe("Trading Accelerator Playbook");
+      expect(parsed.decisionFramework.readableSteps).toEqual(["Determine HTF context", "Manage the trade"]);
+      expect(parsed.run.runId).toBe("run_1");
+      expect(clickSpy).toHaveBeenCalledTimes(1);
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-url");
+
+      clickSpy.mockRestore();
+    });
+  });
 });

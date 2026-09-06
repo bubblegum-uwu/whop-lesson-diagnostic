@@ -126,6 +126,104 @@ export interface RuleCount {
   count: number;
 }
 
+/**
+ * Phase 3.5 — mirrors backend/src/gemini/schema.ts's KnowledgeCategory
+ * exactly (v2 extractor). A lesson with strategyFound=false can still have
+ * real content in these categories — "No Standalone Setup" means only
+ * "no complete standalone trading setup," never "nothing useful here."
+ */
+export type KnowledgeCategory =
+  | "market_context"
+  | "risk_management"
+  | "position_sizing"
+  | "scaling_in"
+  | "scaling_out"
+  | "trade_management"
+  | "execution"
+  | "higher_timeframe"
+  | "preparation"
+  | "psychology"
+  | "no_trade_conditions"
+  | "warnings"
+  | "definitions";
+
+/** Mirrors backend RuleType — the item's stated STRENGTH, distinct from `classification` (how it was extracted). */
+export type RuleType = "HARD_RULE" | "GUIDELINE" | "PREFERENCE" | "WARNING" | "PROHIBITION" | "DEFINITION" | "OBSERVATION";
+
+/** How a knowledge item's claim was OBTAINED — same enum/meaning as a Strategy Rule's classification, distinct from ruleType (what kind of statement it is). */
+export type Classification = "explicit" | "inferred" | "visual";
+
+/**
+ * Where a knowledge item applies — every array empty means genuinely
+ * course-wide/global; the backend does NOT generate a GLOBAL/SCOPED label
+ * (a real diagnostic run showed Gemini could produce one that disagreed
+ * with its own arrays) — derive it here with `isKnowledgeItemScoped`
+ * instead of trusting a label.
+ */
+export interface KnowledgeItemScope {
+  strategies: string[];
+  marketsOrInstruments: string[];
+  timeframes: string[];
+  sessions: string[];
+  traderProfiles: string[];
+}
+
+/** True whenever ANY scope array is non-empty (SCOPED). All five empty means GLOBAL. Mirrors backend gemini/schema.ts's isKnowledgeItemScoped — the single source of truth for this derivation. */
+export function isKnowledgeItemScoped(scope: KnowledgeItemScope): boolean {
+  return scope.strategies.length > 0 || scope.marketsOrInstruments.length > 0 || scope.timeframes.length > 0 || scope.sessions.length > 0 || scope.traderProfiles.length > 0;
+}
+
+export type NumericalOperator = "EQ" | "GT" | "GTE" | "LT" | "LTE" | "BETWEEN" | "APPROX";
+
+/** RULE_THRESHOLD/GUIDELINE are binding-ish; EXAMPLE/DERIVED_EXAMPLE are illustrative-only and must never be read as a universal rule. */
+export type NumericalRole = "RULE_THRESHOLD" | "GUIDELINE" | "EXAMPLE" | "REFERENCE" | "DERIVED_EXAMPLE";
+
+export interface NumericalValue {
+  metric: string;
+  operator: NumericalOperator;
+  value: number;
+  /** Set only when operator is BETWEEN — the range's upper bound. */
+  value2: number | null;
+  unit: string;
+  role: NumericalRole;
+  /** The instructor's original compact wording, verbatim — e.g. "at least 2R", "1% to 5%". Never rewritten. */
+  rawText: string;
+  context: string;
+}
+
+export interface KnowledgeItem {
+  category: KnowledgeCategory;
+  statement: string;
+  ruleType: RuleType;
+  classification: Classification;
+  confidence: number;
+  /** WHEN this rule applies — distinct from `exceptions` (when it does NOT). */
+  conditions: string | null;
+  /** Cases where the normally-applicable rule should NOT be applied, or applies differently. */
+  exceptions: string[];
+  scope: KnowledgeItemScope;
+  numericalValues: NumericalValue[];
+  start_timestamp: string;
+  end_timestamp: string | null;
+  evidence: string;
+}
+
+export interface LessonExample {
+  description: string;
+  illustratesCategory: KnowledgeCategory | null;
+  outcome: string | null;
+  start_timestamp: string;
+  end_timestamp: string | null;
+  evidence: string;
+}
+
+export interface LessonKnowledge {
+  summary: string;
+  knowledgeItems: KnowledgeItem[];
+  examples: LessonExample[];
+  conflictsAndAmbiguities: string[];
+}
+
 export interface LessonAnalysisSummary {
   analysisId: number;
   strategyFound: boolean;
@@ -133,6 +231,11 @@ export interface LessonAnalysisSummary {
   ruleCounts: RuleCount[];
   confidence: number | null;
   summary: string;
+  /** True when this lesson's analysis carries any risk/sizing/management/psychology/... content, independent of strategyFound. */
+  hasSupportingKnowledge: boolean;
+  knowledgeItemCounts: RuleCount[];
+  /** "v1" (pre-Phase-3.5, no `knowledge` in the full analysis JSON) or "v2" — see backend/src/pipeline/analysisVersion.ts. */
+  schemaVersion: string;
   estimatedCost: number | null;
   processingDurationSeconds: number | null;
   completedAt: string;

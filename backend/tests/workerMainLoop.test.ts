@@ -106,6 +106,7 @@ const validJson = JSON.stringify({
       ambiguities: [],
     },
   ],
+  knowledge: { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] },
 });
 
 function makeGemini(overrides: Partial<GeminiClient> = {}): GeminiClient {
@@ -174,7 +175,11 @@ describe("runWorkerLoop", () => {
 
     const analysis = await findLatestByFingerprint(pool, fingerprint);
     expect(analysis?.strategyFound).toBe(true);
-    expect(analysis?.inputTokens).toBe(1000);
+    // Two independent Gemini calls now happen per analysis (strategy pass +
+    // knowledge pass — see pipeline/analyzeLesson.ts's two-pass
+    // architecture); the mock returns the same usage for both calls, so
+    // the persisted total is double the per-call figure.
+    expect(analysis?.inputTokens).toBe(2000);
     expect(analysis?.estimatedCost).toBeGreaterThan(0);
 
     const strategies = await listByAnalysisId(pool, analysis!.analysisId);
@@ -196,7 +201,8 @@ describe("runWorkerLoop", () => {
     const gemini = makeGemini();
     await runWorkerLoop(makeDeps({}, gemini));
 
-    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(2);
+    // 2 jobs x 2 Gemini calls each (strategy pass + knowledge pass).
+    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(4);
     const jobA = (await getJob(pool, (await findLatestByFingerprint(pool, "fp-a"))!.jobId))!;
     const jobB = (await getJob(pool, (await findLatestByFingerprint(pool, "fp-b"))!.jobId))!;
     expect(jobA.status).toBe("COMPLETED");
@@ -211,13 +217,14 @@ describe("runWorkerLoop", () => {
     const firstJob = await createJob(pool, lesson.id, fingerprint);
     const gemini = makeGemini();
     await runWorkerLoop(makeDeps({}, gemini));
-    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(1);
+    // 2 Gemini calls (strategy pass + knowledge pass) for this one job.
+    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(2);
     expect((await getJob(pool, firstJob.jobId))?.status).toBe("COMPLETED");
 
     // A second job for the SAME fingerprint (simulating a duplicate enqueue).
     const secondJob = await createJob(pool, lesson.id, fingerprint);
     await runWorkerLoop(makeDeps({}, gemini));
-    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(1); // still 1 — no second Gemini call
+    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(2); // still 2 — no second Gemini work at all
     expect((await getJob(pool, secondJob.jobId))?.status).toBe("COMPLETED");
   });
 
@@ -272,7 +279,7 @@ describe("runWorkerLoop", () => {
     const lesson = await makeLesson();
     const fingerprint = "fp-no-strategy";
     const job = await createJob(pool, lesson.id, fingerprint);
-    const noStrategyJson = JSON.stringify({ lesson: { title: "t", duration_seconds: 1 }, strategy_found: false, strategies: [] });
+    const noStrategyJson = JSON.stringify({ lesson: { title: "t", duration_seconds: 1 }, strategy_found: false, strategies: [], knowledge: { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] } });
     const gemini = makeGemini({ analyzeVideo: vi.fn(async () => ({ text: noStrategyJson, usage: { inputTokens: 500, outputTokens: 20, thinkingTokens: 0 } })) });
 
     await runWorkerLoop(makeDeps({}, gemini));
@@ -281,7 +288,62 @@ describe("runWorkerLoop", () => {
     const analysis = await findLatestByFingerprint(pool, fingerprint);
     expect(analysis?.status).toBe("no_strategy");
     expect(analysis?.strategyFound).toBe(false);
-    expect(analysis?.inputTokens).toBe(500);
+    // Summed across both Gemini calls (strategy pass + knowledge pass).
+    expect(analysis?.inputTokens).toBe(1000);
+  });
+
+  // Phase 3.5: a lesson can have strategy_found=false while still carrying
+  // real, persisted supporting knowledge (risk management, sizing, ...) —
+  // this proves that content survives the full worker persistence path
+  // (createLessonAnalysis's validated_json, not just the in-memory Gemini
+  // result), and that createStrategyInstances is still correctly skipped
+  // (zero strategy_instances rows) even though the analysis itself is rich.
+  it("persists real supporting knowledge for a no-strategy lesson — strategyFound=false never means nothing useful was extracted", async () => {
+    await activeSession();
+    const lesson = await makeLesson();
+    const fingerprint = "fp-no-strategy-rich";
+    const job = await createJob(pool, lesson.id, fingerprint);
+    const richNoStrategyJson = JSON.stringify({
+      lesson: { title: "t", duration_seconds: 1 },
+      strategy_found: false,
+      strategies: [],
+      knowledge: {
+        summary: "Covers position sizing and risk management for scaling into trades.",
+        knowledgeItems: [
+          {
+            category: "risk_management",
+            statement: "Never risk more than 1% of account equity on a single trade.",
+            ruleType: "HARD_RULE",
+            classification: "explicit",
+            confidence: 0.95,
+            conditions: null,
+            exceptions: [],
+            scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+            numericalValues: [
+              { metric: "max risk per trade", operator: "LTE", value: 1, value2: null, unit: "%", role: "RULE_THRESHOLD", rawText: "1%", context: "max risk per trade" },
+            ],
+            start_timestamp: "02:15",
+            end_timestamp: null,
+            evidence: "Spoken instruction at 02:15.",
+          },
+        ],
+        examples: [],
+        conflictsAndAmbiguities: [],
+      },
+    });
+    const gemini = makeGemini({ analyzeVideo: vi.fn(async () => ({ text: richNoStrategyJson, usage: { inputTokens: 500, outputTokens: 120, thinkingTokens: 10 } })) });
+
+    await runWorkerLoop(makeDeps({}, gemini));
+
+    expect((await getJob(pool, job.jobId))?.status).toBe("NO_STRATEGY");
+    const analysis = await findLatestByFingerprint(pool, fingerprint);
+    expect(analysis?.strategyFound).toBe(false);
+    expect(analysis?.validatedJson.knowledge.knowledgeItems).toHaveLength(1);
+    expect(analysis?.validatedJson.knowledge.knowledgeItems[0].category).toBe("risk_management");
+    expect(analysis?.validatedJson.knowledge.knowledgeItems[0].ruleType).toBe("HARD_RULE");
+    // strategy_instances is still correctly skipped — this is knowledge, not a standalone setup.
+    const instances = await listByAnalysisId(pool, analysis!.analysisId);
+    expect(instances).toHaveLength(0);
   });
 
   it("a second concurrent execution exits immediately without processing anything (advisory lock is authoritative)", async () => {
@@ -297,8 +359,9 @@ describe("runWorkerLoop", () => {
 
     await Promise.all([runWorkerLoop(depsA), runWorkerLoop(depsB)]);
 
-    // Both jobs were processed exactly once in total, by whichever execution won the lock.
-    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(2);
+    // Both jobs were processed exactly once in total (2 jobs x 2 Gemini
+    // calls each — strategy pass + knowledge pass), by whichever execution won the lock.
+    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(4);
     const jobA = await findLatestByFingerprint(pool, "fp-lock-a");
     const jobB = await findLatestByFingerprint(pool, "fp-lock-b");
     expect(jobA).not.toBeNull();

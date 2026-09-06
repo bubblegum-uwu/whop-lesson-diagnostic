@@ -282,6 +282,35 @@ button:disabled {
 .badge-inferred { background: #332c17; color: #e0c67f; }
 .badge-visual { background: #17232f; color: #7fbfe0; }
 
+/* Phase 3.5: a KnowledgeItem's ruleType — its STATED STRENGTH, distinct from
+   the classification badges above (which describe how it was extracted).
+   Colors mirror the support-level palette below: green = binding/confirmed,
+   blue = neutral/descriptive, amber = personal/variant, red = danger. */
+.badge-ruletype-hard_rule { background: #17331f; color: #7fe0a0; }
+.badge-ruletype-guideline { background: #17232f; color: #7fbfe0; }
+.badge-ruletype-preference { background: #332c17; color: #e0c67f; }
+.badge-ruletype-warning, .badge-ruletype-prohibition { background: #331717; color: #ff9b9b; }
+.badge-ruletype-definition, .badge-ruletype-observation { background: #1c2028; color: #8b91a0; }
+
+.badge-category {
+  background: #1c2028;
+  color: #8b91a0;
+  text-transform: capitalize;
+}
+
+/* Pre-merge fidelity refinement: a KnowledgeItem meaningfully limited to one
+   strategy/instrument/timeframe/session/trader-profile — shown only when
+   SCOPED (GLOBAL, the default, renders no badge at all, to avoid clutter). */
+.badge-scope-scoped {
+  background: #1c2028;
+  color: #e0c67f;
+  text-transform: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .confidence, .timestamp {
   color: #8b91a0;
 }
@@ -340,6 +369,39 @@ button:disabled {
   color: #6b7180;
   font-size: 0.85rem;
   margin: 0;
+}
+
+.rule-conditions {
+  margin: 0 0 0.25rem;
+  color: #e0c67f;
+  font-size: 0.85rem;
+}
+
+.rule-numerical-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 0.4rem;
+}
+
+.rule-numerical-values .mono-box {
+  padding: 0.15rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+/* Phase 3.5: the lesson drawer's organized-by-category knowledge sections
+   (Market Context, Risk Management, ... — see LessonDetailDrawer.tsx's
+   Section component, which hides one entirely when empty). Reuses
+   .rule-list/.rule-item's existing look, just labeled with its own heading
+   style distinct from .strategy-card's h3/.rule-section's h4. */
+.knowledge-section {
+  margin-bottom: 1.25rem;
+}
+
+.knowledge-section-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+  color: #d4d8e0;
 }
 
 .plain-list {
@@ -415,6 +477,14 @@ button:disabled {
   border-radius: 6px;
   padding: 0.35rem 0.6rem;
   color: #7fe0a0;
+}
+
+/* Pre-merge fidelity refinement: a numericalValue whose role is EXAMPLE or
+   DERIVED_EXAMPLE illustrates one instance only — must never read as a
+   binding rule threshold, so it's visually distinguished (amber, not green). */
+.mono-box-illustrative {
+  color: #e0c67f;
+  border-color: #3a331a;
 }
 
 /* ---- PR2/UX: batch processing dashboard ---- */
@@ -678,6 +748,24 @@ button:disabled {
 .course-table td.col-chapter {
   max-width: 160px;
   white-space: normal;
+}
+
+.course-table .col-analyzed {
+  min-width: 130px;
+  white-space: nowrap;
+}
+
+.col-sort-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.col-sort-button:hover {
+  color: #d4d8e0;
 }
 
 .clamp-2-lines {

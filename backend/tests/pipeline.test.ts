@@ -16,6 +16,7 @@ import {
   type GeminiFileRef,
 } from "../src/gemini/client.js";
 import { createSecretRedactor } from "../src/lib/redact.js";
+import { STRATEGY_ONLY_EXTRACTION_PROMPT } from "../src/gemini/schema.js";
 import type { WhopCourseLessonResponse } from "../src/whop/types.js";
 import type { AnalyzeLessonDeps } from "../src/pipeline/analyzeLesson.js";
 
@@ -45,6 +46,8 @@ function makeLessonResponse(overrides: Partial<WhopCourseLessonResponse> = {}): 
     ...overrides,
   };
 }
+
+const emptyKnowledge = { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] };
 
 const validStrategyJson = JSON.stringify({
   lesson: { title: "ignored - overwritten by pipeline", duration_seconds: 1 },
@@ -78,12 +81,39 @@ const validStrategyJson = JSON.stringify({
       ambiguities: [],
     },
   ],
+  knowledge: emptyKnowledge,
 });
 
+// Phase 3.5: strategy_found=false still carries real, non-empty `knowledge`
+// — this is exactly the case the rich-knowledge extractor exists for (a
+// lesson with no standalone setup but real risk-management content).
 const noStrategyJson = JSON.stringify({
   lesson: { title: "ignored", duration_seconds: 1 },
   strategy_found: false,
   strategies: [],
+  knowledge: {
+    summary: "Covers position sizing and risk management for scaling into trades.",
+    knowledgeItems: [
+      {
+        category: "risk_management",
+        statement: "Never risk more than 1% of account equity on a single trade.",
+        ruleType: "HARD_RULE",
+        classification: "explicit",
+        confidence: 0.95,
+        conditions: null,
+        exceptions: [],
+        scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+        numericalValues: [
+          { metric: "max risk per trade", operator: "LTE", value: 1, value2: null, unit: "%", role: "RULE_THRESHOLD", rawText: "1%", context: "max risk per trade" },
+        ],
+        start_timestamp: "02:15",
+        end_timestamp: null,
+        evidence: "Spoken instruction at 02:15.",
+      },
+    ],
+    examples: [],
+    conflictsAndAmbiguities: [],
+  },
 });
 
 function makeFile(state: GeminiFileRef["state"] = "ACTIVE"): GeminiFileRef {
@@ -130,7 +160,13 @@ describe("analyzeLesson pipeline", () => {
       "analyzing_lesson",
       "validating_result",
     ]);
-    expect(result.usage).toEqual({ inputTokens: 1000, outputTokens: 200, thinkingTokens: 50 });
+    // Two independent Gemini calls now happen per analysis (strategy pass +
+    // knowledge pass — see pipeline/analyzeLesson.ts's two-pass
+    // architecture); the default mock returns the same usage for both
+    // calls, so the combined total is double the per-call figure.
+    expect(result.usage).toEqual({ inputTokens: 2000, outputTokens: 400, thinkingTokens: 100 });
+    expect(result.passUsage.strategy).toEqual({ inputTokens: 1000, outputTokens: 200, thinkingTokens: 50 });
+    expect(result.passUsage.knowledge).toEqual({ inputTokens: 1000, outputTokens: 200, thinkingTokens: 50 });
   });
 
   it("registers the Whop access token with the redactor immediately", async () => {
@@ -320,5 +356,163 @@ describe("analyzeLesson pipeline", () => {
 
     await expect(analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps)).rejects.toThrow();
     await expect(access(capturedPath)).rejects.toThrow();
+  });
+
+  // Two-pass architecture (test requirements 10/11/14/15): a dedicated
+  // strategy-extraction pass and a dedicated knowledge-extraction pass,
+  // both against the SAME uploaded video, with atomic failure semantics.
+  describe("two-pass architecture", () => {
+    it("uploads and prepares the video exactly ONCE per lesson analysis, not once per pass", async () => {
+      const uploadFile = vi.fn(async () => makeFile("ACTIVE"));
+      const waitUntilActive = vi.fn(async (f: GeminiFileRef) => f);
+      const deps = makeDeps({}, { uploadFile, waitUntilActive });
+
+      await analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps);
+
+      expect(uploadFile).toHaveBeenCalledOnce();
+      expect(waitUntilActive).toHaveBeenCalledOnce();
+    });
+
+    it("makes exactly two analyzeVideo calls per lesson analysis, both referencing the same uploaded file", async () => {
+      const analyzeVideo = vi.fn(async (_file: GeminiFileRef, _model: string, _mode: "agentic" | "static", _prompt: string, _schema: object, _maxTokens?: number) => ({
+        text: validStrategyJson,
+        usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 },
+      }));
+      const deps = makeDeps({}, { analyzeVideo });
+
+      await analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps);
+
+      expect(analyzeVideo).toHaveBeenCalledTimes(2);
+      const [firstCallFile] = analyzeVideo.mock.calls[0];
+      const [secondCallFile] = analyzeVideo.mock.calls[1];
+      expect(secondCallFile).toBe(firstCallFile); // same GeminiFileRef object — no second upload
+    });
+
+    it("calls one pass with the strategy-only prompt and the other with a different prompt", async () => {
+      const seenPrompts: string[] = [];
+      const deps = makeDeps(
+        {},
+        {
+          analyzeVideo: vi.fn(async (_file, _model, _mode, prompt: string) => {
+            seenPrompts.push(prompt);
+            return { text: validStrategyJson, usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 } };
+          }),
+        },
+      );
+
+      await analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps);
+
+      expect(seenPrompts).toHaveLength(2);
+      expect(seenPrompts).toContain(STRATEGY_ONLY_EXTRACTION_PROMPT);
+      expect(new Set(seenPrompts).size).toBe(2); // the two calls use genuinely different prompts
+    });
+
+    it("fails the whole analysis when ONLY the strategy pass throws, even though the knowledge pass would have succeeded", async () => {
+      const deps = makeDeps(
+        {},
+        {
+          analyzeVideo: vi.fn(async (_file, _model, _mode, prompt: string) => {
+            if (prompt === STRATEGY_ONLY_EXTRACTION_PROMPT) {
+              throw new GeminiAnalysisError("strategy pass failed");
+            }
+            return { text: noStrategyJson, usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 } };
+          }),
+        },
+      );
+      await expect(analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps)).rejects.toMatchObject({ stage: "analyzing_lesson" });
+    });
+
+    it("fails the whole analysis when ONLY the knowledge pass throws, even though the strategy pass would have succeeded", async () => {
+      const deps = makeDeps(
+        {},
+        {
+          analyzeVideo: vi.fn(async (_file, _model, _mode, prompt: string) => {
+            if (prompt === STRATEGY_ONLY_EXTRACTION_PROMPT) {
+              return { text: validStrategyJson, usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 } };
+            }
+            throw new GeminiAnalysisError("knowledge pass failed");
+          }),
+        },
+      );
+      await expect(analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps)).rejects.toMatchObject({ stage: "analyzing_lesson" });
+    });
+
+    it("still deletes the uploaded file exactly once when only one of the two passes fails", async () => {
+      const deleteFile = vi.fn(async () => undefined);
+      const deps = makeDeps(
+        {},
+        {
+          analyzeVideo: vi.fn(async (_file, _model, _mode, prompt: string) => {
+            if (prompt === STRATEGY_ONLY_EXTRACTION_PROMPT) throw new GeminiAnalysisError("boom");
+            return { text: noStrategyJson, usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 } };
+          }),
+          deleteFile,
+        },
+      );
+      await expect(analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps)).rejects.toThrow();
+      expect(deleteFile).toHaveBeenCalledOnce();
+    });
+
+    it("fails validation (and the pipeline) when only the strategy pass returns invalid JSON, identifying it as the strategy pass", async () => {
+      const deps = makeDeps(
+        {},
+        {
+          analyzeVideo: vi.fn(async (_file, _model, _mode, prompt: string) => {
+            if (prompt === STRATEGY_ONLY_EXTRACTION_PROMPT) {
+              return { text: "not json", usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 } };
+            }
+            return { text: JSON.stringify({ knowledge: emptyKnowledge }), usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 } };
+          }),
+        },
+      );
+      let caught: unknown;
+      try {
+        await analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(SchemaValidationError);
+      expect((caught as SchemaValidationError).message).toContain("strategy pass");
+    });
+
+    it("fails validation when only the knowledge pass returns invalid JSON, identifying it as the knowledge pass", async () => {
+      const deps = makeDeps(
+        {},
+        {
+          analyzeVideo: vi.fn(async (_file, _model, _mode, prompt: string) => {
+            if (prompt === STRATEGY_ONLY_EXTRACTION_PROMPT) {
+              return { text: JSON.stringify({ strategy_found: false, strategies: [] }), usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 } };
+            }
+            return { text: "not json", usage: { inputTokens: 100, outputTokens: 10, thinkingTokens: 0 } };
+          }),
+        },
+      );
+      let caught: unknown;
+      try {
+        await analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(SchemaValidationError);
+      expect((caught as SchemaValidationError).message).toContain("knowledge pass");
+    });
+
+    it("aggregates usage across both passes into the combined total, while retaining per-pass usage for diagnostics", async () => {
+      const deps = makeDeps(
+        {},
+        {
+          analyzeVideo: vi.fn(async (_file, _model, _mode, prompt: string) => {
+            if (prompt === STRATEGY_ONLY_EXTRACTION_PROMPT) {
+              return { text: validStrategyJson, usage: { inputTokens: 300, outputTokens: 40, thinkingTokens: 5 } };
+            }
+            return { text: JSON.stringify({ knowledge: emptyKnowledge }), usage: { inputTokens: 700, outputTokens: 60, thinkingTokens: 15 } };
+          }),
+        },
+      );
+      const result = await analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps);
+      expect(result.usage).toEqual({ inputTokens: 1000, outputTokens: 100, thinkingTokens: 20 });
+      expect(result.passUsage.strategy).toEqual({ inputTokens: 300, outputTokens: 40, thinkingTokens: 5 });
+      expect(result.passUsage.knowledge).toEqual({ inputTokens: 700, outputTokens: 60, thinkingTokens: 15 });
+    });
   });
 });

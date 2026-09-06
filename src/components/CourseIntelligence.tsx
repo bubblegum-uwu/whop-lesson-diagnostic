@@ -377,6 +377,18 @@ export function CourseIntelligence({ backendUrl, accessToken, connected }: Cours
   const inFlight = status.latestRun?.status === "QUEUED" || status.latestRun?.status === "RUNNING";
   const coverage = data?.playbook?.frameworkCoverage ?? null;
 
+  function downloadFullSynthesisJson() {
+    if (!data) return;
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const slug = (status?.course?.title ?? "course").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+    a.download = `${slug}-synthesis-full.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function downloadPlaybookJson() {
     if (!data?.playbook) return;
     const blob = new Blob([JSON.stringify(data.playbook, null, 2)], { type: "application/json" });
@@ -413,6 +425,11 @@ export function CourseIntelligence({ backendUrl, accessToken, connected }: Cours
           {status.latestCompletedRun && !inFlight && (
             <button className="link-button" onClick={() => handleSynthesizeClick(true)} disabled={busy}>
               Re-synthesize
+            </button>
+          )}
+          {data && (
+            <button className="link-button" onClick={downloadFullSynthesisJson}>
+              Download Full Synthesis JSON
             </button>
           )}
         </div>

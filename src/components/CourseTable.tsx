@@ -78,6 +78,17 @@ function formatCost(value: number | null | undefined): string {
   return `$${value.toFixed(2)}`;
 }
 
+/** Compact "ANALYZED" cell text, e.g. "Sep 6, 2026, 8:31 AM" — the full timestamp is available via the cell's `title` attribute on hover. This is `analysis?.completedAt` — the latest SUCCESSFUL analysis's completion time, deliberately distinct from `lastSyncedAt` (when the lesson's metadata was last pulled from Whop). It does not change while a re-analysis job is QUEUED/PROCESSING/etc: `analysis` and `job` are independently sourced, so the previous successful timestamp keeps showing until a new analysis actually completes and lands as the new `analysis`. */
+function formatAnalyzedCompact(value: string | null | undefined): string {
+  if (!value) return "—";
+  return new Date(value).toLocaleString(undefined, { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function formatAnalyzedFull(value: string | null | undefined): string {
+  if (!value) return "Not yet analyzed";
+  return new Date(value).toLocaleString();
+}
+
 function formatClock(totalSeconds: number): string {
   const m = Math.floor(totalSeconds / 60);
   const s = Math.max(0, Math.round(totalSeconds % 60));
@@ -255,6 +266,7 @@ export function CourseTable({
   const [strategyFilter, setStrategyFilter] = useState("ALL");
   const [pageSize, setPageSize] = useState(25);
   const [page, setPage] = useState(1);
+  const [analyzedSort, setAnalyzedSort] = useState<"asc" | "desc" | null>(null);
   const { progressText, tickRef } = useProgressText();
   const isNarrow = useIsNarrow(NARROW_BREAKPOINT);
 
@@ -287,12 +299,34 @@ export function CourseTable({
     });
   }, [lessons, search, statusFilter, chapterFilter, strategyFilter]);
 
-  const totalPages = Math.max(1, Math.ceil(filteredLessons.length / pageSize));
+  // Lessons never analyzed (null completedAt) always sort to the end,
+  // regardless of direction — there's no meaningful position for "never" in
+  // either an ascending or descending date order.
+  const sortedLessons = useMemo(() => {
+    if (!analyzedSort) return filteredLessons;
+    const withTime = filteredLessons.map((lesson) => ({
+      lesson,
+      time: lesson.analysis?.completedAt ? new Date(lesson.analysis.completedAt).getTime() : null,
+    }));
+    withTime.sort((a, b) => {
+      if (a.time == null && b.time == null) return 0;
+      if (a.time == null) return 1;
+      if (b.time == null) return -1;
+      return analyzedSort === "asc" ? a.time - b.time : b.time - a.time;
+    });
+    return withTime.map((w) => w.lesson);
+  }, [filteredLessons, analyzedSort]);
+
+  const totalPages = Math.max(1, Math.ceil(sortedLessons.length / pageSize));
   // Derived, not effect-driven: if filtering/page-size shrank the result set
   // out from under the current page, clamp it during render instead of
   // firing a setState-in-effect just to reset it.
   const currentPage = Math.min(page, totalPages);
-  const pagedLessons = filteredLessons.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const pagedLessons = sortedLessons.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  function toggleAnalyzedSort() {
+    setAnalyzedSort((prev) => (prev === "desc" ? "asc" : "desc"));
+  }
 
   const unanalyzedIds = useMemo(
     () => filteredLessons.filter((l) => jobOf(l).status === "NOT_ANALYZED").map((l) => l.id),
@@ -453,7 +487,7 @@ export function CourseTable({
 
             <div className="toolbar-primary-actions">
               <button
-                onClick={() => requestBatch(Array.from(selected), false, `${selected.size} selected lesson(s)`)}
+                onClick={() => requestBatch(Array.from(selected), true, `${selected.size} selected lesson(s)`)}
                 disabled={selected.size === 0}
               >
                 Analyze Selected{selected.size > 0 ? ` (${selected.size} selected)` : ""}
@@ -512,6 +546,9 @@ export function CourseTable({
                         <div className="lesson-card-meta">
                           <StatusBadge status={job.status} />
                           <span>{resultLabel(analysis)}</span>
+                          {analysis?.completedAt && (
+                            <span title={formatAnalyzedFull(analysis.completedAt)}>Analyzed {formatAnalyzedCompact(analysis.completedAt)}</span>
+                          )}
                         </div>
                         {progressDetail && (
                           <div className="lesson-card-progress">
@@ -552,6 +589,11 @@ export function CourseTable({
                         <th>Status</th>
                         <th>Progress</th>
                         <th>Result</th>
+                        <th className="hide-narrow col-analyzed">
+                          <button type="button" className="col-sort-button" onClick={toggleAnalyzedSort} aria-label="Sort by analyzed date">
+                            Analyzed{analyzedSort === "asc" ? " ▲" : analyzedSort === "desc" ? " ▼" : ""}
+                          </button>
+                        </th>
                         <th className="hide-narrow">Cost</th>
                         <th>Actions</th>
                       </tr>
@@ -600,6 +642,9 @@ export function CourseTable({
                             </td>
                             <td className="col-result" title={resultTitle}>
                               <span className="clamp-2-lines">{result}</span>
+                            </td>
+                            <td className="hide-narrow col-analyzed" title={formatAnalyzedFull(analysis?.completedAt)}>
+                              {formatAnalyzedCompact(analysis?.completedAt)}
                             </td>
                             <td className="hide-narrow">{formatCost(analysis?.estimatedCost)}</td>
                             <td>

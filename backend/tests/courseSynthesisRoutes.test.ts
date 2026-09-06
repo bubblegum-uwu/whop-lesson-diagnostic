@@ -11,6 +11,7 @@ import { createCoursePlaybook } from "../src/db/coursePlaybooksRepo.js";
 import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "../src/http/routes/courseSynthesis.js";
 import type { JobTrigger } from "../src/jobs/runJobTrigger.js";
 import type { Strategy } from "../src/gemini/schema.js";
+import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 import { makeResponse } from "./helpers/httpMocks.js";
 
@@ -100,7 +101,12 @@ async function addAnalyzedLesson(courseId: number, opts: { strategyFound: boolea
     jobId,
     status: opts.strategyFound ? "completed" : "no_strategy",
     strategyFound: opts.strategyFound,
-    validatedJson: { lesson: { title: lesson.title, duration_seconds: 600 }, strategy_found: opts.strategyFound, strategies: opts.strategyFound ? [makeStrategy()] : [] },
+    validatedJson: {
+      lesson: { title: lesson.title, duration_seconds: 600 },
+      strategy_found: opts.strategyFound,
+      strategies: opts.strategyFound ? [makeStrategy()] : [],
+      knowledge: EMPTY_LESSON_KNOWLEDGE,
+    },
     analysisSummary: opts.strategyFound ? "Break & Retest" : "No concrete trading strategy taught.",
     model: GEMINI_MODEL,
     promptVersion: "v1",

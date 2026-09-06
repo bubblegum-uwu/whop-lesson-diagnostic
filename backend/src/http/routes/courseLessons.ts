@@ -4,7 +4,7 @@ import { getCourseByWhopId } from "../../db/coursesRepo.js";
 import { listLessons } from "../../db/lessonsRepo.js";
 import { getLatestJobsByLesson } from "../../db/analysisJobsRepo.js";
 import { getLatestByLessons } from "../../db/lessonAnalysesRepo.js";
-import { ruleCounts, aggregateConfidence, extractedStrategiesLabel } from "../../pipeline/analysisSummary.js";
+import { ruleCounts, aggregateConfidence, extractedStrategiesLabel, knowledgeItemCounts, hasSupportingKnowledge } from "../../pipeline/analysisSummary.js";
 
 export interface CourseLessonsRouteDeps {
   pool: Pool;
@@ -77,6 +77,14 @@ export function createCourseLessonsHandler(deps: CourseLessonsRouteDeps) {
                 ruleCounts: ruleCounts(analysis.validatedJson),
                 confidence: aggregateConfidence(analysis.validatedJson),
                 summary: analysis.analysisSummary,
+                // Phase 3.5: a lesson can have strategyFound=false while still
+                // carrying real supporting knowledge (risk management, sizing,
+                // psychology, ...) — this lets the Course table show that
+                // distinctly from a lesson with genuinely nothing extracted,
+                // without the frontend having to re-derive it from raw counts.
+                hasSupportingKnowledge: hasSupportingKnowledge(analysis.validatedJson),
+                knowledgeItemCounts: knowledgeItemCounts(analysis.validatedJson),
+                schemaVersion: analysis.schemaVersion,
                 estimatedCost: analysis.estimatedCost,
                 processingDurationSeconds: analysis.processingDurationSeconds,
                 completedAt: analysis.completedAt,
