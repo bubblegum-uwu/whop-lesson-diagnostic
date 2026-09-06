@@ -365,4 +365,68 @@ describe("CourseTable", () => {
       expect(screen.getByRole("button", { name: /^analyze$/i })).toBeInTheDocument();
     });
   });
+
+  describe("worker heartbeat status hints", () => {
+    it("shows no heartbeat warning while the heartbeat is recent", () => {
+      const recent = new Date(Date.now() - 5_000).toISOString();
+      render(
+        <CourseTable
+          {...baseProps}
+          connected
+          lessons={[makeLesson({ job: { jobId: "job_1", status: "ANALYZING", lastHeartbeatAt: recent } })]}
+        />,
+      );
+      expect(screen.queryByText(/waiting for update/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/no recent worker heartbeat/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/waiting for recovery/i)).not.toBeInTheDocument();
+    });
+
+    it("shows a soft 'Waiting for update' hint once the heartbeat is moderately old — never the word 'stale'", () => {
+      const moderatelyOld = new Date(Date.now() - 45_000).toISOString();
+      render(
+        <CourseTable
+          {...baseProps}
+          connected
+          lessons={[makeLesson({ job: { jobId: "job_1", status: "GEMINI_PROCESSING", lastHeartbeatAt: moderatelyOld } })]}
+        />,
+      );
+      expect(screen.getByText(/waiting for update/i)).toBeInTheDocument();
+      expect(screen.queryByText(/stale/i)).not.toBeInTheDocument();
+    });
+
+    it("shows 'Waiting for recovery' wording, not a fabricated failure status, once the lease has actually expired", () => {
+      const longAgo = new Date(Date.now() - 120_000).toISOString();
+      const expiredLease = new Date(Date.now() - 5_000).toISOString();
+      render(
+        <CourseTable
+          {...baseProps}
+          connected
+          lessons={[
+            makeLesson({
+              job: { jobId: "job_1", status: "ANALYZING", lastHeartbeatAt: longAgo, leaseExpiresAt: expiredLease },
+            }),
+          ]}
+        />,
+      );
+      expect(screen.getByText(/waiting for recovery/i)).toBeInTheDocument();
+      // Still shows the real (non-terminal) job status — never invents a new backend status or implies failure.
+      const table = within(screen.getByRole("table"));
+      expect(table.getAllByText(/analyzing/i).length).toBeGreaterThan(0);
+      expect(table.queryByText(/^failed$/i)).not.toBeInTheDocument();
+    });
+
+    it("never shows a heartbeat warning for a terminal job, no matter how old its last heartbeat is", () => {
+      const veryOld = new Date(Date.now() - 10 * 60_000).toISOString();
+      render(
+        <CourseTable
+          {...baseProps}
+          connected
+          lessons={[makeLesson({ job: { jobId: "job_1", status: "COMPLETED", lastHeartbeatAt: veryOld } })]}
+        />,
+      );
+      expect(screen.queryByText(/waiting for update/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/no recent worker heartbeat/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/waiting for recovery/i)).not.toBeInTheDocument();
+    });
+  });
 });

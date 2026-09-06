@@ -115,6 +115,7 @@ export interface LessonJobSummary {
   stageProgress?: number | null;
   overallProgress?: number | null;
   lastHeartbeatAt?: string | null;
+  leaseExpiresAt?: string | null;
   attemptCount?: number;
   sanitizedError?: string | null;
   errorType?: string | null;

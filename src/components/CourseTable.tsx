@@ -93,11 +93,41 @@ function resultLabel(analysis: CourseLessonSummary["analysis"]): string {
   return analysis.extractedStrategiesLabel ?? "Strategy found";
 }
 
-/** A processing job is "stale" if no heartbeat arrived recently — a display hint only, never an auto-fail. */
-function isStale(job: LessonJobSummary): boolean {
-  if (!PROCESSING_STATUSES.includes(job.status)) return false;
-  if (!job.lastHeartbeatAt) return false;
-  return Date.now() - new Date(job.lastHeartbeatAt).getTime() > 30_000;
+export type HeartbeatLevel = "normal" | "waiting" | "no_heartbeat" | "recovery";
+
+export interface HeartbeatState {
+  level: HeartbeatLevel;
+  /** null renders nothing — the normal, healthy case. */
+  label: string | null;
+}
+
+const NO_HEARTBEAT_STATE: HeartbeatState = { level: "normal", label: null };
+
+/**
+ * A display hint only — never an auto-fail, and never implies the job has
+ * failed. A long Gemini call (uploading/processing/analyzing) can go
+ * minutes between heartbeats even while perfectly healthy, so this reads as
+ * increasingly cautious language rather than an alarm:
+ *   < 30s heartbeat age            -> normal (nothing shown)
+ *   30s–90s                        -> soft "Waiting for update"
+ *   > 90s (job still non-terminal) -> "No recent worker heartbeat"
+ *   lease_expires_at has actually
+ *   passed (worker likely dead)    -> stronger "Waiting for recovery"
+ * A genuinely expired lease is a stronger signal than heartbeat age alone
+ * (the Scheduler safety net will reclaim it), so it takes priority.
+ */
+function heartbeatState(job: LessonJobSummary): HeartbeatState {
+  if (!PROCESSING_STATUSES.includes(job.status)) return NO_HEARTBEAT_STATE;
+
+  if (job.leaseExpiresAt && new Date(job.leaseExpiresAt).getTime() < Date.now()) {
+    return { level: "recovery", label: "Waiting for recovery" };
+  }
+
+  if (!job.lastHeartbeatAt) return NO_HEARTBEAT_STATE;
+  const heartbeatAgeMs = Date.now() - new Date(job.lastHeartbeatAt).getTime();
+  if (heartbeatAgeMs > 90_000) return { level: "no_heartbeat", label: "No recent worker heartbeat" };
+  if (heartbeatAgeMs > 30_000) return { level: "waiting", label: "Waiting for update" };
+  return NO_HEARTBEAT_STATE;
 }
 
 function jobOf(lesson: CourseLessonSummary): LessonJobSummary {
@@ -369,6 +399,13 @@ export function CourseTable({
       </div>
       {lastSyncedAt && <p className="hint">Last synced: {new Date(lastSyncedAt).toLocaleString()}</p>}
 
+      {/* Flex row, not an overlay: when the drawer is open it's a real sibling
+          with its own fixed width, so .course-main (flex: 1 1 auto, min-width: 0)
+          shrinks to make room instead of the drawer floating on top of columns
+          the reader still needs (see .col-result/.hide-narrow container-query
+          rules in index.css, which react to this shrunken width). */}
+      <div className="course-layout">
+        <div className="course-main">
       {lessons.length === 0 ? (
         <p className="hint">No lessons synced yet — click "Sync Course" to discover them.</p>
       ) : (
@@ -523,9 +560,11 @@ export function CourseTable({
                       {pagedLessons.map((lesson, i) => {
                         const job = jobOf(lesson);
                         const analysis = lesson.analysis ?? null;
-                        const stale = isStale(job);
+                        const heartbeat = heartbeatState(job);
                         const progress = progressText(lesson, job);
                         const [progressLabel, progressDetail] = progress.split("\n");
+                        const result = resultLabel(analysis);
+                        const resultTitle = (analysis?.strategyFound ? analysis.extractedStrategiesLabel : null) ?? result;
 
                         return (
                           <tr key={lesson.id}>
@@ -538,12 +577,16 @@ export function CourseTable({
                               />
                             </td>
                             <td className="hide-narrow">{(currentPage - 1) * pageSize + i + 1}</td>
-                            <td className="col-lesson">{lesson.title}</td>
-                            <td className="hide-narrow">{lesson.chapterTitle ?? "—"}</td>
+                            <td className="col-lesson" title={lesson.title}>
+                              <span className="clamp-2-lines">{lesson.title}</span>
+                            </td>
+                            <td className="hide-narrow col-chapter">
+                              <span className="clamp-2-lines">{lesson.chapterTitle ?? "—"}</span>
+                            </td>
                             <td className="hide-narrow">{formatDuration(lesson.durationSeconds)}</td>
                             <td>
                               <StatusBadge status={job.status} />
-                              {stale && <span className="stale-hint"> (stale)</span>}
+                              {heartbeat.label && <span className={`heartbeat-hint heartbeat-${heartbeat.level}`}> {heartbeat.label}</span>}
                             </td>
                             <td>
                               {progressDetail ? (
@@ -555,7 +598,9 @@ export function CourseTable({
                                 progressLabel
                               )}
                             </td>
-                            <td>{resultLabel(analysis)}</td>
+                            <td className="col-result" title={resultTitle}>
+                              <span className="clamp-2-lines">{result}</span>
+                            </td>
                             <td className="hide-narrow">{formatCost(analysis?.estimatedCost)}</td>
                             <td>
                               <RowActions
@@ -608,8 +653,9 @@ export function CourseTable({
           )}
         </>
       )}
-
-      <LessonDetailDrawer lesson={drawerLesson} onClose={() => setDrawerLessonId(null)} onLoadAnalysis={onLoadAnalysis} />
+        </div>
+        <LessonDetailDrawer lesson={drawerLesson} onClose={() => setDrawerLessonId(null)} onLoadAnalysis={onLoadAnalysis} />
+      </div>
     </div>
   );
 }

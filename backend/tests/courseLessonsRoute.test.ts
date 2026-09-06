@@ -131,4 +131,40 @@ describe("GET /api/course/lessons (PR2 job/analysis join)", () => {
     expect(result.lessons[0].analysis.summary).toBe("Break & Retest summary");
     expect(result.lessons[0].analysis.estimatedCost).toBe(0.01);
   });
+
+  it("exposes the job's leaseExpiresAt so the frontend can tell an expired lease apart from a merely-quiet heartbeat", async () => {
+    const courseId = randomId("cors");
+    const course = await upsertCourse(pool, { whopCourseId: courseId, whopExperienceId: "exp_1", slug: "s", title: "Course" });
+    await syncLessons(pool, course.id, [
+      {
+        whopLessonId: randomId("lesn"),
+        title: "L",
+        lessonType: "video",
+        visibility: "visible",
+        chapterWhopId: null,
+        chapterTitle: null,
+        chapterOrder: null,
+        courseOrder: 1,
+        durationSeconds: 600,
+        videoAssetStatus: "ready",
+        videoAvailable: true,
+        sourceUrl: "https://whop.com/s/exp_1/app/courses/x/lessons/y/",
+      },
+    ]);
+    const [lesson] = await listLessons(pool, course.id);
+    await pool.query(
+      `INSERT INTO analysis_jobs (lesson_id, analysis_fingerprint, status, current_stage, lease_owner, lease_expires_at)
+       VALUES ($1, 'fp-lease', 'ANALYZING', 'analyzing_lesson', 'owner-1', now() + interval '2 minutes')`,
+      [lesson.id],
+    );
+
+    const handler = createCourseLessonsHandler({ pool, whopCourseId: courseId });
+    const { res, body } = makeResponse();
+    await handler({} as Request, res);
+
+    const result = body() as { lessons: { job: { status: string; leaseExpiresAt: string | null } }[] };
+    expect(result.lessons[0].job.status).toBe("ANALYZING");
+    expect(result.lessons[0].job.leaseExpiresAt).not.toBeNull();
+    expect(new Date(result.lessons[0].job.leaseExpiresAt!).getTime()).toBeGreaterThan(Date.now());
+  });
 });

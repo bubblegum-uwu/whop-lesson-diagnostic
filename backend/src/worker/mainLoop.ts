@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { acquireWorkerLock } from "./advisoryLock.js";
+import { startHeartbeat } from "./heartbeat.js";
 import {
   claimNextEligibleJob,
   renewLease,
@@ -33,6 +34,8 @@ export interface WorkerLoopDeps {
   pipelineDeps: Omit<AnalyzeLessonDeps, "onProgress" | "onDurationDiscovered">;
   redactor?: SecretRedactor;
   logger?: SafeLogger;
+  /** Overridable only for tests — production always uses the default. */
+  heartbeatIntervalMs?: number;
 }
 
 const STAGE_TO_JOB_STATUS: Record<PipelineStage, JobStatus> = {
@@ -45,7 +48,8 @@ const STAGE_TO_JOB_STATUS: Record<PipelineStage, JobStatus> = {
   validating_result: "VALIDATING",
 };
 
-const HEARTBEAT_THROTTLE_MS = 10_000;
+/** Both the ffmpeg-progress throttle and the independent heartbeat timer tick on this cadence — "approximately every 10 seconds" per the lease design. */
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 
 /** Thrown internally when a lease-fenced update finds this execution has been reclaimed; the caller aborts processing immediately without persisting anything. */
 class LeaseLostError extends Error {
@@ -97,17 +101,42 @@ async function processOneJob(job: AnalysisJob, leaseOwner: string, deps: WorkerL
   }
   redactor.register(accessToken);
 
-  let lastHeartbeatAt = 0;
+  let lastProgressHeartbeatAt = 0;
   let leaseLost = false;
 
-  async function guardedRenew(update: Parameters<typeof renewLease>[3]): Promise<void> {
-    if (leaseLost) return;
-    const ok = await renewLease(deps.pool, job.jobId, leaseOwner, update);
-    if (!ok) {
-      leaseLost = true;
-      throw new LeaseLostError();
-    }
+  // A FIFO queue, not a skip-if-busy guard: stage/progress changes from the
+  // pipeline carry real content (status, current_stage, progress) and must
+  // never be silently dropped just because a periodic heartbeat ping is
+  // already in flight. Two `renewLease` calls fired back-to-back on
+  // different pooled connections can otherwise complete out of order (the
+  // DB only serializes the row lock, not the order UPDATEs were issued in),
+  // which could let an earlier, slower write clobber a later one's status.
+  // Chaining every call through one promise guarantees they land in
+  // invocation order, one at a time — which also satisfies "never run two
+  // renewals concurrently" for the periodic heartbeat ticks specifically.
+  let renewChain: Promise<boolean> = Promise.resolve(true);
+  function renewNow(update: Parameters<typeof renewLease>[3]): Promise<boolean> {
+    const next = renewChain.then(async () => {
+      if (leaseLost) return false;
+      const ok = await renewLease(deps.pool, job.jobId, leaseOwner, update);
+      if (!ok) leaseLost = true;
+      return ok;
+    });
+    renewChain = next.catch(() => false);
+    return next;
   }
+
+  const heartbeatIntervalMs = deps.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+  // Keeps the lease/heartbeat alive independently of any pipeline callback —
+  // required because a single long-awaited operation (a Gemini analysis
+  // call, a file-processing poll, an upload) produces no progress event of
+  // its own for minutes at a time. Started as soon as real work begins;
+  // always stopped in the `finally` below, so it can never leak into the
+  // next claimed lesson.
+  const heartbeat = startHeartbeat({
+    intervalMs: heartbeatIntervalMs,
+    renew: () => renewNow({}),
+  });
 
   const startedAt = new Date();
   const pipelineDeps: AnalyzeLessonDeps = {
@@ -117,13 +146,13 @@ async function processOneJob(job: AnalysisJob, leaseOwner: string, deps: WorkerL
     },
     onProgress: (progress) => {
       const now = Date.now();
-      if (now - lastHeartbeatAt < HEARTBEAT_THROTTLE_MS) return;
-      lastHeartbeatAt = now;
+      if (now - lastProgressHeartbeatAt < heartbeatIntervalMs) return;
+      lastProgressHeartbeatAt = now;
       const stageProgress =
         progress.totalSeconds && progress.totalSeconds > 0
           ? Math.min(100, Math.round((progress.elapsedSeconds / progress.totalSeconds) * 100))
           : null;
-      guardedRenew({ status: "PREPARING_VIDEO", stageProgress, overallProgress: stageProgress }).catch(() => undefined);
+      void renewNow({ status: "PREPARING_VIDEO", stageProgress, overallProgress: stageProgress });
     },
   };
 
@@ -132,7 +161,7 @@ async function processOneJob(job: AnalysisJob, leaseOwner: string, deps: WorkerL
     const result = await analyzeLesson(lesson.sourceUrl, accessToken, pipelineDeps, (stage) => {
       lastStage = stage;
       const jobStatus = STAGE_TO_JOB_STATUS[stage];
-      guardedRenew({ status: jobStatus, currentStage: stage, stageProgress: null }).catch(() => undefined);
+      void renewNow({ status: jobStatus, currentStage: stage, stageProgress: null });
       recordJobEvent(deps.pool, job.jobId, { eventType: "stage_change", stage, message: null }).catch(() => undefined);
     });
     void lastStage;
@@ -229,6 +258,11 @@ async function processOneJob(job: AnalysisJob, leaseOwner: string, deps: WorkerL
     } else {
       await markFailed(deps.pool, job.jobId, leaseOwner, "permanent", sanitizedMessage);
     }
+  } finally {
+    // Guaranteed on every exit path — success, lease-lost abandonment, and
+    // every failure classification — so a timer can never leak into the
+    // next claimed lesson.
+    heartbeat.stop();
   }
 }
 
