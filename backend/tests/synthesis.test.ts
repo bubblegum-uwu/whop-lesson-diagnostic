@@ -1,15 +1,29 @@
 import { describe, it, expect, vi } from "vitest";
 import type { Strategy } from "../src/gemini/schema.js";
 import type { GeminiClient, GeminiUsage } from "../src/gemini/client.js";
+import { GeminiAnalysisError } from "../src/gemini/client.js";
 import { buildStrategySignature, chunkSignatures, type StrategyInstanceRecord } from "../src/synthesis/normalize.js";
 import { clusterStrategyInstances } from "../src/synthesis/cluster.js";
-import { synthesizeCanonicalStrategy } from "../src/synthesis/canonicalStrategy.js";
+import { synthesizeCanonicalStrategy, enrichCanonicalStrategy } from "../src/synthesis/canonicalStrategy.js";
 import { extractCoreFramework } from "../src/synthesis/coreFramework.js";
 import { synthesizePlaybook } from "../src/synthesis/playbook.js";
 import { synthesizeDecisionFramework } from "../src/synthesis/decisionFramework.js";
 import { runSynthesis } from "../src/synthesis/runSynthesis.js";
 import { computeSourceAnalysisHash } from "../src/synthesis/fingerprint.js";
-import { SynthesisSchemaValidationError } from "../src/synthesis/errors.js";
+import { SynthesisSchemaValidationError, SynthesisGeminiCallError } from "../src/synthesis/errors.js";
+import { callGeminiForStage } from "../src/synthesis/geminiStage.js";
+import { classifyError } from "../src/pipeline/errorClassification.js";
+import {
+  CLUSTER_BATCH_RESPONSE_JSON_SCHEMA,
+  CLUSTER_MERGE_RESPONSE_JSON_SCHEMA,
+  CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
+  RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
+  CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+  PLAYBOOK_RESPONSE_JSON_SCHEMA,
+  DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+  RULE_CATEGORY_KEYS,
+  type RawCanonicalStrategy,
+} from "../src/synthesis/schema.js";
 import type { CanonicalStrategy, ClusterProposal, CoreFramework } from "../src/synthesis/schema.js";
 
 function makeStrategy(overrides: Partial<Strategy> = {}): Strategy {
@@ -209,9 +223,39 @@ function validCanonicalStrategyJson(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function validRawCanonicalStrategyJson(overrides: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    name: "Break & Retest",
+    purpose: "p",
+    markets: ["ES"],
+    timeframes: ["5m"],
+    sections: [
+      {
+        category: "entryRules",
+        rules: [
+          {
+            description: "Enter on retest",
+            classification: "explicit",
+            supportLevel: "MULTI_SOURCE",
+            supportCount: 2,
+            sources: [{ lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e" }],
+            conflictSources: [],
+          },
+        ],
+      },
+    ],
+    variants: [],
+    examples: [],
+    ambiguities: [],
+    conflicts: [],
+    sourceLessonIds: [10],
+    ...overrides,
+  });
+}
+
 describe("synthesis/canonicalStrategy", () => {
   it("validates and returns a canonical strategy with usage", async () => {
-    const gemini = makeGemini({ generateStructured: vi.fn(async () => ({ text: validCanonicalStrategyJson(), usage })) });
+    const gemini = makeGemini({ generateStructured: vi.fn(async () => ({ text: validRawCanonicalStrategyJson(), usage })) });
     const cluster: ClusterProposal = {
       clusterKey: "br",
       proposedCanonicalName: "Break & Retest",
@@ -293,7 +337,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
       }
       if (prompt.includes("synthesizing ONE canonical trading strategy")) {
         calls.push("canonical");
-        return { text: validCanonicalStrategyJson(), usage };
+        return { text: validRawCanonicalStrategyJson(), usage };
       }
       if (prompt.includes("Core Trading Framework")) {
         calls.push("core_framework");
@@ -369,7 +413,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
             usage,
           };
         }
-        if (prompt.includes("synthesizing ONE canonical trading strategy")) return { text: validCanonicalStrategyJson(), usage };
+        if (prompt.includes("synthesizing ONE canonical trading strategy")) return { text: validRawCanonicalStrategyJson(), usage };
         if (prompt.includes("Core Trading Framework")) return { text: validCoreFrameworkJson(), usage };
         if (prompt.includes("Comprehensive Trading Playbook")) return { text: validPlaybookJson(), usage };
         return { text: validDecisionFrameworkJson(), usage };
@@ -393,4 +437,287 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     expect(result.playbook.frameworkCoverage.lessonsMissingSupportingKnowledgeExtraction).toBe(0);
     expect(result.playbook.frameworkCoverage.missingSupportingKnowledgeLessonIds).toEqual([]);
   });
+});
+
+describe("synthesis/geminiStage diagnostics (SynthesisGeminiCallError)", () => {
+  it("wraps a generateStructured() failure with stage/model/schema/prompt-size context instead of losing it", async () => {
+    const underlying = new GeminiAnalysisError("Gemini structured-generation request failed: 400 Request contains an invalid argument.");
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => {
+        throw underlying;
+      }),
+    });
+    const longPrompt = "x".repeat(12_345);
+
+    await expect(callGeminiForStage({ gemini, model: "gemini-3.8-flash" }, "canonical_strategy", longPrompt, {})).rejects.toMatchObject({
+      name: "SynthesisGeminiCallError",
+      stage: "canonical_strategy",
+      model: "gemini-3.8-flash",
+      promptChars: 12_345,
+      cause: underlying,
+    });
+  });
+
+  it("never includes the prompt content itself in the error message, only its length", async () => {
+    const secretLookingPrompt = "SUPER SECRET COURSE CONTENT lesson transcript details that must never leak";
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => {
+        throw new GeminiAnalysisError("400 Request contains an invalid argument.");
+      }),
+    });
+
+    let caught: SynthesisGeminiCallError | undefined;
+    try {
+      await callGeminiForStage({ gemini, model: "m" }, "cluster_chunk", secretLookingPrompt, {});
+    } catch (err) {
+      caught = err as SynthesisGeminiCallError;
+    }
+
+    expect(caught).toBeInstanceOf(SynthesisGeminiCallError);
+    expect(caught!.message).not.toContain("SUPER SECRET");
+    expect(caught!.message).toContain(`prompt_chars=${secretLookingPrompt.length}`);
+    expect(caught!.message).toContain("stage=cluster_chunk");
+    expect(caught!.message).toMatch(/schema=cluster_chunk_v\d+/);
+    expect(caught!.message).toContain("400 Request contains an invalid argument");
+  });
+
+  it("produces a schema identifier derived from the stage name, distinct per stage", async () => {
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => {
+        throw new Error("boom");
+      }),
+    });
+
+    let clusterErr: SynthesisGeminiCallError | undefined;
+    try {
+      await callGeminiForStage({ gemini, model: "m" }, "cluster_chunk", "p", {});
+    } catch (err) {
+      clusterErr = err as SynthesisGeminiCallError;
+    }
+    let canonicalErr: SynthesisGeminiCallError | undefined;
+    try {
+      await callGeminiForStage({ gemini, model: "m" }, "canonical_strategy", "p", {});
+    } catch (err) {
+      canonicalErr = err as SynthesisGeminiCallError;
+    }
+
+    expect(clusterErr!.schemaId).not.toBe(canonicalErr!.schemaId);
+    expect(clusterErr!.schemaId).toMatch(/^cluster_chunk_v\d+$/);
+    expect(canonicalErr!.schemaId).toMatch(/^canonical_strategy_v\d+$/);
+  });
+});
+
+describe("pipeline/errorClassification unwraps SynthesisGeminiCallError", () => {
+  it("classifies based on the underlying cause, not the wrapper itself", () => {
+    const transientCause = new GeminiAnalysisError("Gemini structured-generation request failed: 503 Service Unavailable.");
+    const transientWrapped = new SynthesisGeminiCallError("cluster_chunk", "m", "cluster_chunk_v2", 100, transientCause);
+    expect(classifyError(transientWrapped)).toBe("transient");
+
+    const permanentCause = new GeminiAnalysisError("Gemini structured-generation request failed: 400 Request contains an invalid argument.");
+    const permanentWrapped = new SynthesisGeminiCallError("canonical_strategy", "m", "canonical_strategy_v2", 100, permanentCause);
+    expect(classifyError(permanentWrapped)).toBe("permanent");
+  });
+});
+
+describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
+  const members: StrategyInstanceRecord[] = [
+    makeInstance({ strategyInstanceId: 1, lessonId: 10, lessonTitle: "Break and Retest Basics" }),
+    makeInstance({ strategyInstanceId: 2, lessonId: 20, lessonTitle: "Advanced Retests" }),
+  ];
+
+  function rawStrategy(overrides: Partial<RawCanonicalStrategy> = {}): RawCanonicalStrategy {
+    return {
+      name: "Break & Retest",
+      purpose: "p",
+      markets: ["ES"],
+      timeframes: ["5m"],
+      sections: [],
+      variants: [],
+      examples: [],
+      ambiguities: [],
+      conflicts: [],
+      sourceLessonIds: [10, 20],
+      ...overrides,
+    };
+  }
+
+  function rawRule(overrides: Partial<RawCanonicalStrategy["sections"][number]["rules"][number]> = {}) {
+    return {
+      description: "Enter on retest",
+      classification: "explicit" as const,
+      supportLevel: "MULTI_SOURCE" as const,
+      supportCount: 2,
+      sources: [],
+      conflictSources: [],
+      ...overrides,
+    };
+  }
+
+  it("reattaches lessonTitle and strategyInstanceId to every rule source from already-known member data, never fabricated", () => {
+    const raw = rawStrategy({
+      sections: [
+        {
+          category: "entryRules",
+          rules: [
+            rawRule({
+              sources: [
+                { lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e1" },
+                { lessonId: 20, startTimestamp: "2:00", endTimestamp: null, evidence: "e2" },
+              ],
+            }),
+          ],
+        },
+      ],
+    });
+
+    const enriched = enrichCanonicalStrategy(raw, members);
+    expect(enriched.entryRules[0].sources).toEqual([
+      { lessonId: 10, lessonTitle: "Break and Retest Basics", strategyInstanceId: 1, startTimestamp: "1:00", endTimestamp: null, evidence: "e1" },
+      { lessonId: 20, lessonTitle: "Advanced Retests", strategyInstanceId: 2, startTimestamp: "2:00", endTimestamp: null, evidence: "e2" },
+    ]);
+  });
+
+  it("leaves strategyInstanceId null when a lesson contributed more than one instance to the cluster, rather than guessing", () => {
+    const ambiguousMembers: StrategyInstanceRecord[] = [
+      makeInstance({ strategyInstanceId: 1, lessonId: 10, lessonTitle: "Multi-Strategy Lesson" }),
+      makeInstance({ strategyInstanceId: 2, lessonId: 10, lessonTitle: "Multi-Strategy Lesson" }),
+    ];
+    const raw = rawStrategy({
+      sourceLessonIds: [10],
+      sections: [
+        {
+          category: "setup",
+          rules: [
+            rawRule({
+              description: "Setup rule",
+              supportLevel: "SINGLE_SOURCE",
+              supportCount: 1,
+              sources: [{ lessonId: 10, startTimestamp: null, endTimestamp: null, evidence: "e" }],
+            }),
+          ],
+        },
+      ],
+    });
+
+    const enriched = enrichCanonicalStrategy(raw, ambiguousMembers);
+    expect(enriched.setup[0].sources[0].strategyInstanceId).toBeNull();
+    expect(enriched.setup[0].sources[0].lessonTitle).toBe("Multi-Strategy Lesson");
+  });
+
+  it("defaults every rule category Gemini didn't mention to an empty array, never fabricated", () => {
+    const raw = rawStrategy({ sections: [{ category: "setup", rules: [rawRule()] }] });
+    const enriched = enrichCanonicalStrategy(raw, members);
+    expect(enriched.setup).toHaveLength(1);
+    for (const category of RULE_CATEGORY_KEYS) {
+      if (category === "setup") continue;
+      expect(enriched[category]).toEqual([]);
+    }
+  });
+
+  it("concatenates rules when Gemini names the same category more than once, instead of one section overwriting another", () => {
+    const raw = rawStrategy({
+      sections: [
+        { category: "entryRules", rules: [rawRule({ description: "First entry rule" })] },
+        { category: "entryRules", rules: [rawRule({ description: "Second entry rule" })] },
+      ],
+    });
+    const enriched = enrichCanonicalStrategy(raw, members);
+    expect(enriched.entryRules.map((r) => r.description)).toEqual(["First entry rule", "Second entry rule"]);
+  });
+
+  it("preserves unresolved conflicts with full reattached source provenance on both sides", () => {
+    const raw = rawStrategy({
+      conflicts: [
+        {
+          description: "One source says enter immediately, another waits for confirmation.",
+          sources: [
+            { lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "enter immediately" },
+            { lessonId: 20, startTimestamp: "3:00", endTimestamp: null, evidence: "wait for confirmation" },
+          ],
+        },
+      ],
+    });
+
+    const enriched = enrichCanonicalStrategy(raw, members);
+    expect(enriched.conflicts).toHaveLength(1);
+    expect(enriched.conflicts[0].description).toBe(raw.conflicts[0].description);
+    expect(enriched.conflicts[0].sources).toEqual([
+      { lessonId: 10, lessonTitle: "Break and Retest Basics", strategyInstanceId: 1, startTimestamp: "1:00", endTimestamp: null, evidence: "enter immediately" },
+      { lessonId: 20, lessonTitle: "Advanced Retests", strategyInstanceId: 2, startTimestamp: "3:00", endTimestamp: null, evidence: "wait for confirmation" },
+    ]);
+  });
+
+  it("end-to-end: synthesizeCanonicalStrategy enriches Gemini's raw response and still validates against the full, unchanged CanonicalStrategySchema", async () => {
+    const rawJson = JSON.stringify(
+      rawStrategy({
+        sections: [
+          {
+            category: "entryRules",
+            rules: [rawRule({ sources: [{ lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e" }] })],
+          },
+        ],
+      }),
+    );
+    const gemini = makeGemini({ generateStructured: vi.fn(async () => ({ text: rawJson, usage })) });
+    const cluster: ClusterProposal = {
+      clusterKey: "br",
+      proposedCanonicalName: "Break & Retest",
+      memberInstanceIds: [1, 2],
+      similarityRationale: "r",
+      differencesNotes: "",
+    };
+
+    const { canonicalStrategy } = await synthesizeCanonicalStrategy({ gemini, model: "m" }, cluster, members);
+
+    // The persisted, validated shape carries the full rich provenance — lessonTitle and
+    // strategyInstanceId — even though Gemini itself was never asked to restate them.
+    expect(canonicalStrategy.entryRules[0].sources[0]).toEqual({
+      lessonId: 10,
+      lessonTitle: "Break and Retest Basics",
+      strategyInstanceId: 1,
+      startTimestamp: "1:00",
+      endTimestamp: null,
+      evidence: "e",
+    });
+  });
+});
+
+describe("synthesis response schemas — no array-valued 'type' nodes", () => {
+  // NOT a confirmed Gemini incompatibility fix — Google's structured-output
+  // docs list `type: ["string", "null"]` as supported. This guards a
+  // deliberate simplification made after the production 400 (see version.ts's
+  // v2 changelog): every response_format schema we hand to Gemini represents
+  // "nullable" by omitting the field from `required` instead, purely because
+  // that form is simpler and semantically equivalent, not because the array
+  // form was shown to be rejected.
+  function assertNoTypeArrays(node: unknown, path: string): void {
+    if (Array.isArray(node)) {
+      node.forEach((child, i) => assertNoTypeArrays(child, `${path}[${i}]`));
+      return;
+    }
+    if (node === null || typeof node !== "object") return;
+    const obj = node as Record<string, unknown>;
+    if ("type" in obj) {
+      expect(Array.isArray(obj.type), `${path}.type must not be an array (found ${JSON.stringify(obj.type)})`).toBe(false);
+    }
+    for (const [key, value] of Object.entries(obj)) {
+      assertNoTypeArrays(value, `${path}.${key}`);
+    }
+  }
+
+  const schemas: Record<string, object> = {
+    CLUSTER_BATCH_RESPONSE_JSON_SCHEMA,
+    CLUSTER_MERGE_RESPONSE_JSON_SCHEMA,
+    CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
+    RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
+    CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+    PLAYBOOK_RESPONSE_JSON_SCHEMA,
+    DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+  };
+
+  for (const [name, schema] of Object.entries(schemas)) {
+    it(`${name} never uses an array-valued "type" anywhere in its tree`, () => {
+      assertNoTypeArrays(schema, name);
+    });
+  }
 });

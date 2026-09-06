@@ -10,12 +10,27 @@ import { z } from "zod";
 
 // ---- Shared provenance / rule shapes -------------------------------------
 
+// `.nullable().optional().transform((v) => v ?? null)` keeps the inferred
+// TS type exactly `T | null` (so nothing downstream needs to change) while
+// accepting a field Gemini omits entirely — see the matching JSON schema
+// below, which represents "nullable" by leaving the field out of
+// `required` rather than `type: [T, "null"]`. Google's structured-output
+// docs do document `type: [T, "null"]` as supported, so this is NOT a
+// confirmed Gemini incompatibility fix — the production 400's actual
+// cause is still unknown (the original error handling lost which stage
+// even failed). This is kept as a harmless simplification/compatibility
+// hardening because omission-from-`required` is semantically equivalent
+// and strictly simpler for Gemini to satisfy, not because the array form
+// was shown to be rejected.
+const nullableString = () => z.string().nullable().optional().transform((v) => v ?? null);
+const nullableNumber = () => z.number().nullable().optional().transform((v) => v ?? null);
+
 export const SourceRefSchema = z.object({
   lessonId: z.number(),
   lessonTitle: z.string(),
-  strategyInstanceId: z.number().nullable(),
-  startTimestamp: z.string().nullable(),
-  endTimestamp: z.string().nullable(),
+  strategyInstanceId: nullableNumber(),
+  startTimestamp: nullableString(),
+  endTimestamp: nullableString(),
   evidence: z.string(),
 });
 export type SourceRef = z.infer<typeof SourceRefSchema>;
@@ -46,17 +61,22 @@ export const ConflictSchema = z.object({
 });
 export type Conflict = z.infer<typeof ConflictSchema>;
 
+// Nullable fields are represented by omission from `required`, NOT
+// `type: [T, "null"]` — kept as a simplification/compatibility hardening
+// (semantically equivalent, strictly simpler), not because the array form
+// was confirmed to cause the production 400. Google's own docs list
+// `type: [T, "null"]` as supported, so it is not the confirmed root cause.
 const sourceRefJsonSchema = {
   type: "object",
   properties: {
     lessonId: { type: "number" },
     lessonTitle: { type: "string" },
-    strategyInstanceId: { type: ["number", "null"] },
-    startTimestamp: { type: ["string", "null"] },
-    endTimestamp: { type: ["string", "null"] },
+    strategyInstanceId: { type: "number" },
+    startTimestamp: { type: "string" },
+    endTimestamp: { type: "string" },
     evidence: { type: "string" },
   },
-  required: ["lessonId", "lessonTitle", "strategyInstanceId", "startTimestamp", "endTimestamp", "evidence"],
+  required: ["lessonId", "lessonTitle", "evidence"],
 };
 
 const synthesizedRuleJsonSchema = {
@@ -217,6 +237,147 @@ export const CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA = {
   ],
 };
 
+// ---- Stage 3 raw wire format ------------------------------------------------
+//
+// v2 (the previous shape here) asked Gemini for 11 separate sibling arrays
+// — one per rule category — each an array of the full nested rule/source
+// shape. A real-Gemini smoke test (tests/synthesisRealApiSmoke.test.ts)
+// confirmed that schema IS rejected with a 400 by the actual API, not just
+// a theoretical risk. Because these 11 properties are written out as
+// separate JSON Schema object literals (JSON has no $ref-sharing on the
+// wire — each of the 11 is a full independent copy when serialized), the
+// v2 schema included roughly 11x more copies of the same deeply nested
+// rule/source shape than necessary. v3 collapses them into a SINGLE
+// `sections` array, each entry tagged with which of the 11 categories it
+// belongs to — the same information, restructured so the nested rule shape
+// appears exactly once in the schema instead of eleven times. This has not
+// itself been re-verified against the real API in this environment (no
+// Gemini API key available here) — see the PR for the exact command to
+// confirm it, and tests/synthesisRealApiSmoke.test.ts's bisection ladder
+// for isolating exactly which structural factor (duplication count, nested
+// depth, sources vs conflictSources, enums) was actually responsible.
+//
+// Every rule's `sources`/`conflictSources` still only need lessonId +
+// timestamps + evidence; lessonTitle and strategyInstanceId — already
+// known for every member of this cluster — are filled in deterministically
+// by canonicalStrategy.ts's enrichment step, same as v2. No provenance,
+// conflict, or persisted field is dropped by any of this — only how
+// Gemini's own output is grouped changed; the final, persisted
+// CanonicalStrategy shape/CanonicalStrategySchema above is untouched.
+
+const rawSourceRefJsonSchema = {
+  type: "object",
+  properties: {
+    lessonId: { type: "number" },
+    startTimestamp: { type: "string" },
+    endTimestamp: { type: "string" },
+    evidence: { type: "string" },
+  },
+  required: ["lessonId", "evidence"],
+};
+
+export const RawSourceRefSchema = z.object({
+  lessonId: z.number(),
+  startTimestamp: nullableString(),
+  endTimestamp: nullableString(),
+  evidence: z.string(),
+});
+export type RawSourceRef = z.infer<typeof RawSourceRefSchema>;
+
+const rawSynthesizedRuleJsonSchema = {
+  ...synthesizedRuleJsonSchema,
+  properties: {
+    ...synthesizedRuleJsonSchema.properties,
+    sources: { type: "array", items: rawSourceRefJsonSchema },
+    conflictSources: { type: "array", items: rawSourceRefJsonSchema },
+  },
+};
+const rawSynthesizedRuleArray = { type: "array", items: rawSynthesizedRuleJsonSchema };
+
+export const RawSynthesizedRuleSchema = SynthesizedRuleSchema.extend({
+  sources: z.array(RawSourceRefSchema),
+  conflictSources: z.array(RawSourceRefSchema),
+});
+export type RawSynthesizedRule = z.infer<typeof RawSynthesizedRuleSchema>;
+
+const rawConflictJsonSchema = {
+  ...conflictJsonSchema,
+  properties: { ...conflictJsonSchema.properties, sources: { type: "array", items: rawSourceRefJsonSchema } },
+};
+
+export const RawConflictSchema = z.object({
+  description: z.string().min(1),
+  sources: z.array(RawSourceRefSchema),
+});
+export type RawConflict = z.infer<typeof RawConflictSchema>;
+
+/** The 11 CanonicalStrategy rule-category keys — see CanonicalStrategySchema above. Exported so canonicalStrategy.ts's enrichment step can iterate them without re-listing them a third time. */
+export const RULE_CATEGORY_KEYS = [
+  "marketContext",
+  "prerequisites",
+  "setup",
+  "entryRules",
+  "confirmationRules",
+  "stopLossRules",
+  "profitTargetRules",
+  "tradeManagementRules",
+  "invalidationRules",
+  "noTradeConditions",
+  "visualDiscretionaryRules",
+] as const;
+export type RuleCategoryKey = (typeof RULE_CATEGORY_KEYS)[number];
+
+export const RawRuleSectionSchema = z.object({
+  category: z.enum(RULE_CATEGORY_KEYS),
+  rules: z.array(RawSynthesizedRuleSchema),
+});
+export type RawRuleSection = z.infer<typeof RawRuleSectionSchema>;
+
+const rawRuleSectionJsonSchema = {
+  type: "object",
+  properties: {
+    category: { type: "string", enum: [...RULE_CATEGORY_KEYS] },
+    rules: rawSynthesizedRuleArray,
+  },
+  required: ["category", "rules"],
+};
+
+export const RawCanonicalStrategySchema = CanonicalStrategySchema.omit({
+  marketContext: true,
+  prerequisites: true,
+  setup: true,
+  entryRules: true,
+  confirmationRules: true,
+  stopLossRules: true,
+  profitTargetRules: true,
+  tradeManagementRules: true,
+  invalidationRules: true,
+  noTradeConditions: true,
+  visualDiscretionaryRules: true,
+  conflicts: true,
+}).extend({
+  sections: z.array(RawRuleSectionSchema),
+  conflicts: z.array(RawConflictSchema),
+});
+export type RawCanonicalStrategy = z.infer<typeof RawCanonicalStrategySchema>;
+
+export const RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    name: { type: "string" },
+    purpose: { type: "string" },
+    markets: { type: "array", items: { type: "string" } },
+    timeframes: { type: "array", items: { type: "string" } },
+    sections: { type: "array", items: rawRuleSectionJsonSchema },
+    variants: { type: "array", items: variantJsonSchema },
+    examples: { type: "array", items: exampleJsonSchema },
+    ambiguities: { type: "array", items: { type: "string" } },
+    conflicts: { type: "array", items: rawConflictJsonSchema },
+    sourceLessonIds: { type: "array", items: { type: "number" } },
+  },
+  required: ["name", "purpose", "markets", "timeframes", "sections", "variants", "examples", "ambiguities", "conflicts", "sourceLessonIds"],
+};
+
 // ---- Stage 4: core framework ----------------------------------------------
 
 export const CoreFrameworkSectionSchema = z.object({
@@ -312,7 +473,7 @@ export const DecisionNodeSchema = z.object({
   id: z.string().min(1),
   type: z.enum(["start", "decision", "action", "end"]),
   label: z.string().min(1),
-  description: z.string().nullable(),
+  description: nullableString(),
   next: z.array(z.string()),
   branches: z.array(z.object({ label: z.string(), next: z.string() })),
 });
@@ -334,7 +495,7 @@ export const DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
           id: { type: "string" },
           type: { type: "string", enum: ["start", "decision", "action", "end"] },
           label: { type: "string" },
-          description: { type: ["string", "null"] },
+          description: { type: "string" },
           next: { type: "array", items: { type: "string" } },
           branches: {
             type: "array",
@@ -345,7 +506,7 @@ export const DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
             },
           },
         },
-        required: ["id", "type", "label", "description", "next", "branches"],
+        required: ["id", "type", "label", "next", "branches"],
       },
     },
     readableSteps: { type: "array", items: { type: "string" } },

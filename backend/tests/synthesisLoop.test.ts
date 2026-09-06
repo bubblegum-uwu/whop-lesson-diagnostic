@@ -10,6 +10,7 @@ import { getCoursePlaybookByRun } from "../src/db/coursePlaybooksRepo.js";
 import { runSynthesisLoop, type SynthesisWorkerDeps } from "../src/worker/synthesisLoop.js";
 import type { GeminiClient } from "../src/gemini/client.js";
 import type { Strategy } from "../src/gemini/schema.js";
+import { createSecretRedactor } from "../src/lib/redact.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 
 const pool = createTestPool();
@@ -147,23 +148,14 @@ async function seedRunReadyToClaim() {
   return { course, run, strategyLesson, noStrategyLesson };
 }
 
+/** The RAW/wire shape synthesizeCanonicalStrategy's Gemini call expects (see synthesis/schema.ts's v3 `sections` format) — not the final, persisted CanonicalStrategy shape. */
 function validCanonicalStrategyJson() {
   return JSON.stringify({
     name: "Break & Retest",
     purpose: "p",
     markets: ["ES"],
     timeframes: ["5m"],
-    marketContext: [],
-    prerequisites: [],
-    setup: [],
-    entryRules: [],
-    confirmationRules: [],
-    stopLossRules: [],
-    profitTargetRules: [],
-    tradeManagementRules: [],
-    invalidationRules: [],
-    noTradeConditions: [],
-    visualDiscretionaryRules: [],
+    sections: [],
     variants: [],
     examples: [],
     ambiguities: [],
@@ -247,6 +239,38 @@ describe("runSynthesisLoop", () => {
     expect(finalRun?.sanitizedError).toBeTruthy();
     expect(await listStrategyClustersByRun(pool, run.runId)).toHaveLength(0);
     expect(await getCoursePlaybookByRun(pool, run.runId)).toBeNull();
+  });
+
+  it("wraps a real Gemini API failure with stage/model/schema/prompt-size context, persists it sanitized, and never leaks prompt content or secrets", async () => {
+    const { run } = await seedRunReadyToClaim();
+    const redactor = createSecretRedactor();
+    const secretApiKey = "sk-super-secret-gemini-key-do-not-leak";
+    redactor.register(secretApiKey);
+
+    const gemini: GeminiClient = {
+      uploadFile: vi.fn(),
+      waitUntilActive: vi.fn(),
+      analyzeVideo: vi.fn(),
+      deleteFile: vi.fn(),
+      generateStructured: vi.fn(async () => {
+        throw new Error(`400 Request contains an invalid argument. (key=${secretApiKey})`);
+      }),
+    };
+
+    await runSynthesisLoop({ ...makeDeps(gemini), redactor });
+
+    const finalRun = await getSynthesisRun(pool, run.runId);
+    expect(finalRun?.status).toBe("FAILED");
+    expect(finalRun?.sanitizedError).toBeTruthy();
+    expect(finalRun?.sanitizedError).toContain("stage=cluster_chunk");
+    expect(finalRun?.sanitizedError).toContain(`model=${GEMINI_MODEL}`);
+    expect(finalRun?.sanitizedError).toMatch(/schema=cluster_chunk_v\d+/);
+    expect(finalRun?.sanitizedError).toMatch(/prompt_chars=\d+/);
+    expect(finalRun?.sanitizedError).toContain("400 Request contains an invalid argument");
+    expect(finalRun?.sanitizedError).not.toContain(secretApiKey);
+    expect(finalRun?.sanitizedError).toContain("[REDACTED]");
+    // The prompt itself (course/lesson content) must never appear in the persisted error — only its length.
+    expect(finalRun?.sanitizedError).not.toContain("clustering trading-strategy instances");
   });
 
   it("keeps renewing the lease while a single long Gemini call is still in flight, via the independent heartbeat", async () => {
