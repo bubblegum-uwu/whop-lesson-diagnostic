@@ -1,3 +1,5 @@
+import type { GeminiThinkingLevel } from "../gemini/client.js";
+
 /**
  * Explicit `max_output_tokens` budgets for each synthesis stage's Gemini
  * call — previously UNSET everywhere (see gemini/client.ts's
@@ -83,6 +85,31 @@
  * undersized — pooling/decision-node stages are less comparison-heavy than
  * clustering or canonical_strategy's per-cluster synthesis).
  *
+ * v5 (current) — canonical_strategy budget LOWERED, 65536 -> 32768, after
+ * the actual fix landed: v4's compact `sourceKeys` wire format (see
+ * schema.ts) stopped Gemini from re-emitting already-known provenance text
+ * per source citation, which was the real cause of v3's 31032-output-token
+ * failure — not an insufficient budget. Two real diagnostic runs under the
+ * v4 wire format (one 1-member cluster, one 2-member cluster) both
+ * completed successfully at:
+ *
+ *   1-member: output_tokens=3059 (medium thinking) / 2999 (low thinking)
+ *   2-member: output_tokens=3558 (medium thinking) / 3582 (low thinking)
+ *
+ * 32768 gives roughly 9x headroom over the largest real observation
+ * (3582) — generous enough for materially larger real clusters without
+ * reintroducing v1/v2's mistake of an undersized cap, while ruling out an
+ * accidental extremely-expensive runaway generation that 65536 would
+ * still permit. The old 31032-token failure belonged to the OLD
+ * provenance-heavy wire format (v2/v3) and is no longer representative of
+ * what this stage actually produces — recalibrate again if a future real
+ * run approaches this ceiling under normal (non-runaway) conditions.
+ * cluster_chunk/cluster_merge are NOT changed by v5 — 4096 was confirmed
+ * insufficient there for the same shared thinking/output-budget reason
+ * documented in v2, and that finding is independent of canonical_strategy's
+ * wire format. playbook/core_framework/decision_framework are also
+ * unchanged by v5 — no real usage data exists yet for any of them.
+ *
  * tests/synthesisCanonicalLoadTest.test.ts and
  * scripts/canonicalStrategyDiagnostic.ts (both opt-in, real API) exist
  * specifically to keep calibrating these; re-run them after any change
@@ -102,20 +129,15 @@ export const SYNTHESIS_MAX_OUTPUT_TOKENS = {
   /** Same shape/reasoning as cluster_chunk — the reduce step reasons over already-summarized proposals, same order of magnitude of comparison work. Not yet independently confirmed against real data, but shares cluster_chunk's confirmed budget on the same reasoning. */
   cluster_merge: 32768,
   /**
-   * CONFIRMED insufficient at v2's 32768 against real data (see the v3
-   * changelog above: output_tokens=31032/32768, interaction_status=incomplete
-   * for the real "Break and Retest (B&R) with Key Levels and Order Blocks"
-   * cluster). Raised to 65536 — gemini-3.8-flash's documented output-token
-   * ceiling — rather than a smaller intermediate number, since this stage
-   * already failed once at "substantially more than the first confirmed
-   * failure," and the model cannot go higher than 65536 regardless. By far
-   * the richest VISIBLE output of the six stages (up to 11 rule
-   * categories, each an array of rules with provenance) and also the most
-   * synthesis/reasoning-heavy task (resolving conflicts across sources,
-   * deciding support levels) — exactly the profile most exposed to the
-   * shared thinking/output budget.
+   * v5: LOWERED from 65536 back to 32768 now that the v4 compact
+   * `sourceKeys` wire format has confirmed real output stays in the
+   * ~3000-3600 token range (see the v5 changelog above) — 65536 was sized
+   * for the old provenance-heavy wire format's failure, which the wire
+   * format fix (not the budget) actually resolved. 32768 keeps ~9x
+   * headroom over the largest real observation while capping the cost of
+   * an accidental runaway generation.
    */
-  canonical_strategy: 65536,
+  canonical_strategy: 32768,
   /** Pooled cross-strategy rule categories — less comparison-heavy than clustering (pooling already-canonicalized rules, not raw pairwise comparison). Kept at v2's 16384 — no evidence yet it's undersized. */
   core_framework: 16384,
   /**
@@ -138,3 +160,47 @@ export const SYNTHESIS_MAX_OUTPUT_TOKENS = {
 } as const;
 
 export type SynthesisStageForLimits = keyof typeof SYNTHESIS_MAX_OUTPUT_TOKENS;
+
+/**
+ * The production `generation_config.thinking_level` for canonical_strategy
+ * ONLY — every other synthesis stage leaves thinking_level unset (server
+ * default, observed as "medium") and MUST continue to do so; this constant
+ * is deliberately not a stage-keyed map like SYNTHESIS_MAX_OUTPUT_TOKENS
+ * above, specifically so adding another stage to it is a visible,
+ * intentional code change rather than one line in a table.
+ *
+ * CONFIRMED via two real A/B/C diagnostic comparisons under the v4 compact
+ * `sourceKeys` wire format — one 1-member cluster, one 2-member cluster
+ * requiring Gemini to actually reconcile two lesson instances' rules — that
+ * "low" produces IDENTICAL correctness to the server default:
+ *
+ *   1-member:  medium: output=3059 thinking=2301 cost=$0.0146 10/11 categories, completed/PASS/PASS
+ *              low:    output=2999 thinking=0    cost=$0.0087 10/11 categories, completed/PASS/PASS
+ *   2-member:  medium: output=3558 thinking=2161 cost=$0.0162 10/11 categories, completed/PASS/PASS
+ *              low:    output=3582 thinking=0    cost=$0.0108 10/11 categories, completed/PASS/PASS
+ *
+ * Same interaction_status=completed, same json_parse/zod_validation PASS,
+ * same 10/11 rule-category coverage, similar visible output size, in BOTH
+ * the single-source and multi-source-reconciliation case — at 33-40% lower
+ * cost. canonical_strategy's task (structured consolidation of
+ * already-extracted rules: grouping, assigning support levels, recording
+ * variants/conflicts explicitly) is bounded structured-output work, not
+ * open-ended reasoning, which is consistent with low thinking losing
+ * nothing here.
+ *
+ * NOT applied to any other stage: no comparable real A/B evidence exists
+ * yet for cluster_chunk/cluster_merge (comparison-heavy clustering, where
+ * v2's changelog already found thinking token consumption matters a great
+ * deal), core_framework, playbook (open-ended long-form prose), or
+ * decision_framework (constructing a coherent decision tree) — several of
+ * which plausibly benefit from more thinking, unlike canonical_strategy's
+ * bounded consolidation task. Never extend this to another stage without
+ * the same kind of real, measured A/B comparison this constant is based on.
+ *
+ * scripts/canonicalStrategyDiagnostic.ts's CANONICAL_STRATEGY_THINKING_LEVEL
+ * env var independently overrides this for diagnostic runs (bypasses this
+ * constant entirely, since the diagnostic script calls
+ * synthesizeCanonicalStrategy directly rather than through runSynthesis.ts)
+ * — that override capability is preserved unchanged by this constant.
+ */
+export const CANONICAL_STRATEGY_THINKING_LEVEL: GeminiThinkingLevel = "low";

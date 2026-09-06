@@ -10,6 +10,7 @@ import { synthesizePlaybook } from "../src/synthesis/playbook.js";
 import { synthesizeDecisionFramework } from "../src/synthesis/decisionFramework.js";
 import { runSynthesis } from "../src/synthesis/runSynthesis.js";
 import { computeSourceAnalysisHash } from "../src/synthesis/fingerprint.js";
+import { CANONICAL_STRATEGY_THINKING_LEVEL } from "../src/synthesis/limits.js";
 import { SynthesisSchemaValidationError, SynthesisGeminiCallError } from "../src/synthesis/errors.js";
 import { callGeminiForStage } from "../src/synthesis/geminiStage.js";
 import { classifyError } from "../src/pipeline/errorClassification.js";
@@ -505,6 +506,46 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
       // Exactly one "stage started" event, never a growing count invented while the single Gemini call is in flight.
       expect(stageEvents).toEqual([{ stage, completedItems: null, totalItems: null }]);
     }
+  });
+
+  it("passes thinkingLevel=\"low\" ONLY to canonical_strategy's Gemini call — every other stage omits it entirely, preserving the server default", async () => {
+    const clusterJson = JSON.stringify({
+      clusters: [{ clusterKey: "br", proposedCanonicalName: "Break & Retest", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" }],
+    });
+    const thinkingLevelByStage: Record<string, unknown> = {};
+    const generateStructured = vi.fn(async (prompt: string, _model: string, _schema: object, _maxOutputTokens?: number, thinkingLevel?: unknown) => {
+      if (prompt.includes("clustering trading-strategy instances")) {
+        thinkingLevelByStage.cluster_chunk = thinkingLevel;
+        return { text: clusterJson, usage };
+      }
+      if (prompt.includes("synthesizing ONE canonical trading strategy")) {
+        thinkingLevelByStage.canonical_strategy = thinkingLevel;
+        return { text: validRawCanonicalStrategyJson(), usage };
+      }
+      if (prompt.includes("Core Trading Framework")) {
+        thinkingLevelByStage.core_framework = thinkingLevel;
+        return { text: validCoreFrameworkJson(), usage };
+      }
+      if (prompt.includes("Comprehensive Trading Playbook")) {
+        thinkingLevelByStage.playbook = thinkingLevel;
+        return { text: validPlaybookJson(), usage };
+      }
+      thinkingLevelByStage.decision_framework = thinkingLevel;
+      return { text: validDecisionFrameworkJson(), usage };
+    });
+    const gemini = makeGemini({ generateStructured });
+
+    await runSynthesis(
+      { gemini, model: "m" },
+      { courseTitle: "Trading Accelerator", instances: [makeInstance()], lessons: [{ id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" }], noStandaloneSetupLessonIds: [] },
+    );
+
+    expect(CANONICAL_STRATEGY_THINKING_LEVEL).toBe("low");
+    expect(thinkingLevelByStage.canonical_strategy).toBe(CANONICAL_STRATEGY_THINKING_LEVEL);
+    expect(thinkingLevelByStage.cluster_chunk).toBeUndefined();
+    expect(thinkingLevelByStage.core_framework).toBeUndefined();
+    expect(thinkingLevelByStage.playbook).toBeUndefined();
+    expect(thinkingLevelByStage.decision_framework).toBeUndefined();
   });
 
   it("reports no coverage gap when every lesson taught a standalone setup", async () => {

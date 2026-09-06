@@ -7,6 +7,7 @@ import { synthesizePlaybook } from "./playbook.js";
 import { synthesizeDecisionFramework } from "./decisionFramework.js";
 import { sumUsages } from "./usage.js";
 import type { SynthesisStageDeps } from "./geminiStage.js";
+import { CANONICAL_STRATEGY_THINKING_LEVEL } from "./limits.js";
 import type { CanonicalStrategy, ClusterProposal, CoreFramework, CoursePlaybookDocument, DecisionFramework, FrameworkCoverage } from "./schema.js";
 
 /**
@@ -135,7 +136,14 @@ export async function runSynthesis(
     const members = cluster.memberInstanceIds
       .map((id) => instancesById.get(id))
       .filter((m): m is StrategyInstanceRecord => m != null);
-    const { canonicalStrategy, usage } = await synthesizeCanonicalStrategy(deps, cluster, members);
+    // Explicit thinking_level="low" (synthesis/limits.ts's CANONICAL_STRATEGY_THINKING_LEVEL) —
+    // confirmed by two real A/B/C diagnostic comparisons (see PR #11) to
+    // produce identical correctness to the server default at 33-40% lower
+    // cost. Scoped to this one call site only — every other stage in this
+    // file omits thinkingLevel entirely, preserving the server default.
+    const { canonicalStrategy, usage } = await synthesizeCanonicalStrategy(deps, cluster, members, {
+      thinkingLevel: CANONICAL_STRATEGY_THINKING_LEVEL,
+    });
     usages.push(usage);
     clustersWithStrategy.push({ cluster, canonicalStrategy });
     // Awaited: this cluster's completion (and its contribution to
