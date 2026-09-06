@@ -49,6 +49,20 @@ const VALID_THINKING_LEVELS: ReadonlySet<string> = new Set<GeminiThinkingLevel>(
  *   TARGET_CLUSTER_NAME="Key Level and Order Block Break and Retest" \
  *     CANONICAL_STRATEGY_DIAGNOSTIC=1 npx tsx scripts/canonicalStrategyDiagnostic.ts
  *
+ * Real clustering can produce a slightly different display name for the
+ * "same" cluster from one run to the next (it's a real Gemini call, not
+ * deterministic), which makes TARGET_CLUSTER_NAME brittle for repeated
+ * runs against the actual first cluster. TARGET_CLUSTER_INDEX selects by
+ * position in `clusters` instead (0 = the first cluster produced, same as
+ * the default) — the selected cluster's generated name is still printed
+ * before canonical_strategy runs, so you always see what was picked:
+ *
+ *   TARGET_CLUSTER_INDEX=0 \
+ *     CANONICAL_STRATEGY_DIAGNOSTIC=1 npx tsx scripts/canonicalStrategyDiagnostic.ts
+ *
+ * TARGET_CLUSTER_NAME still works as before and takes precedence if both
+ * are set.
+ *
  * Optional CANONICAL_STRATEGY_THINKING_LEVEL ("minimal" | "low" | "medium" |
  * "high") passes generation_config.thinking_level through for this run's
  * canonical_strategy call only — see gemini/client.ts's GeminiThinkingLevel.
@@ -126,9 +140,36 @@ async function main(): Promise<void> {
     console.log(`clustering produced ${clusters.length} cluster(s): ${clusters.map((c) => c.proposedCanonicalName).join(" | ")}`);
 
     const targetName = process.env.TARGET_CLUSTER_NAME;
-    const targetCluster = targetName ? clusters.find((c) => c.proposedCanonicalName === targetName) : clusters[0];
+    const rawTargetIndex = process.env.TARGET_CLUSTER_INDEX;
+
+    let targetCluster: (typeof clusters)[number] | undefined;
+    if (targetName) {
+      targetCluster = clusters.find((c) => c.proposedCanonicalName === targetName);
+      if (!targetCluster) {
+        console.error(`No cluster named "${targetName}" was produced.`);
+        process.exitCode = 1;
+        return;
+      }
+    } else if (rawTargetIndex != null) {
+      const targetIndex = Number(rawTargetIndex);
+      if (!Number.isInteger(targetIndex) || targetIndex < 0) {
+        console.error(`Invalid TARGET_CLUSTER_INDEX=${rawTargetIndex} — must be a non-negative integer.`);
+        process.exitCode = 1;
+        return;
+      }
+      if (targetIndex >= clusters.length) {
+        console.error(`TARGET_CLUSTER_INDEX=${targetIndex} is out of range — clustering produced only ${clusters.length} cluster(s) (valid indices: 0-${clusters.length - 1}).`);
+        process.exitCode = 1;
+        return;
+      }
+      targetCluster = clusters[targetIndex];
+      console.log(`selected cluster at index ${targetIndex}: "${targetCluster.proposedCanonicalName}"`);
+    } else {
+      targetCluster = clusters[0];
+    }
+
     if (!targetCluster) {
-      console.error(targetName ? `No cluster named "${targetName}" was produced.` : "Clustering produced no clusters at all — nothing to diagnose.");
+      console.error("Clustering produced no clusters at all — nothing to diagnose.");
       process.exitCode = 1;
       return;
     }
