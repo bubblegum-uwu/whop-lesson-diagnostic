@@ -84,6 +84,59 @@ export async function syncCourse(backendUrl: string, accessToken: string): Promi
   return { kind: "error", message: body?.error?.message ?? `Course sync failed (${res.status}).` };
 }
 
+export type AnalysisJobStatus =
+  | "NOT_ANALYZED"
+  | "QUEUED"
+  | "RETRIEVING"
+  | "PREPARING_VIDEO"
+  | "UPLOADING"
+  | "GEMINI_PROCESSING"
+  | "ANALYZING"
+  | "VALIDATING"
+  | "COMPLETED"
+  | "NO_STRATEGY"
+  | "FAILED"
+  | "AUTH_REQUIRED"
+  | "CANCELLED";
+
+export const PROCESSING_STATUSES: AnalysisJobStatus[] = [
+  "RETRIEVING",
+  "PREPARING_VIDEO",
+  "UPLOADING",
+  "GEMINI_PROCESSING",
+  "ANALYZING",
+  "VALIDATING",
+];
+
+export interface LessonJobSummary {
+  jobId: string | null;
+  status: AnalysisJobStatus;
+  currentStage?: string | null;
+  stageProgress?: number | null;
+  overallProgress?: number | null;
+  lastHeartbeatAt?: string | null;
+  attemptCount?: number;
+  sanitizedError?: string | null;
+  errorType?: string | null;
+}
+
+export interface RuleCount {
+  label: string;
+  count: number;
+}
+
+export interface LessonAnalysisSummary {
+  analysisId: number;
+  strategyFound: boolean;
+  extractedStrategiesLabel: string | null;
+  ruleCounts: RuleCount[];
+  confidence: number | null;
+  summary: string;
+  estimatedCost: number | null;
+  processingDurationSeconds: number | null;
+  completedAt: string;
+}
+
 export interface CourseLessonSummary {
   id: number;
   title: string;
@@ -94,6 +147,9 @@ export interface CourseLessonSummary {
   videoAvailable: boolean;
   sourceUrl: string;
   lastSyncedAt: string;
+  /** Absent when a backend predates PR2 — the Course table treats a missing job as NOT_ANALYZED. */
+  job?: LessonJobSummary;
+  analysis?: LessonAnalysisSummary | null;
 }
 
 export interface CourseLessonsResponse {
@@ -108,4 +164,134 @@ export async function getCourseLessons(
   const res = await fetch(`${backendUrl}/api/course/lessons`, { headers: authHeaders(accessToken) });
   if (!res.ok) throw new Error(`Failed to load course lessons (${res.status}).`);
   return (await res.json()) as CourseLessonsResponse;
+}
+
+/** Full validated JSON for one lesson's latest analysis — used by [ View Analysis ] / Download JSON. */
+export async function getLessonAnalysisJson(
+  backendUrl: string,
+  accessToken: string,
+  lessonId: number,
+): Promise<unknown | null> {
+  const res = await fetch(`${backendUrl}/api/course/lessons/${lessonId}/analysis`, { headers: authHeaders(accessToken) });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Failed to load lesson analysis (${res.status}).`);
+  const body = (await res.json()) as { validatedJson: unknown };
+  return body.validatedJson;
+}
+
+export interface AnalysisSummary {
+  totalLessons: number;
+  analyzed: number;
+  strategyLessons: number;
+  noStrategy: number;
+  processing: number;
+  queued: number;
+  failed: number;
+  authRequired: number;
+  remaining: number;
+  totalCost: number | null;
+  averageCostPerLesson: number | null;
+  averageProcessingSeconds: number | null;
+}
+
+export async function getAnalysisSummary(backendUrl: string, accessToken: string): Promise<AnalysisSummary | null> {
+  const res = await fetch(`${backendUrl}/api/analysis/summary`, { headers: authHeaders(accessToken) });
+  if (!res.ok) throw new Error(`Failed to load analysis summary (${res.status}).`);
+  const body = (await res.json()) as { summary: AnalysisSummary | null };
+  return body.summary;
+}
+
+export interface EnqueueResult {
+  queued: { lessonId: number; jobId: string }[];
+  skipped: { lessonId: number; reason: string }[];
+}
+
+/** Queues batch analysis for the given lessons. Never waits on lesson processing — returns as soon as the jobs are durably queued. */
+export async function enqueueAnalysisJobs(
+  backendUrl: string,
+  accessToken: string,
+  lessonIds: number[],
+  force = false,
+): Promise<EnqueueResult> {
+  const res = await fetch(`${backendUrl}/api/analysis/jobs`, {
+    method: "POST",
+    headers: { ...authHeaders(accessToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ lessonIds, force }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => undefined);
+    throw new Error(body?.error?.message ?? `Failed to queue analysis (${res.status}).`);
+  }
+  return (await res.json()) as EnqueueResult;
+}
+
+export async function retryAnalysisJob(backendUrl: string, accessToken: string, jobId: string): Promise<void> {
+  const res = await fetch(`${backendUrl}/api/analysis/jobs/${encodeURIComponent(jobId)}/retry`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => undefined);
+    throw new Error(body?.error?.message ?? `Failed to retry job (${res.status}).`);
+  }
+}
+
+/** Only ever succeeds while the job is still QUEUED — in-flight processing cannot be reliably cancelled (documented limitation). */
+export async function cancelAnalysisJob(backendUrl: string, accessToken: string, jobId: string): Promise<boolean> {
+  const res = await fetch(`${backendUrl}/api/analysis/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    headers: authHeaders(accessToken),
+  });
+  return res.ok;
+}
+
+/**
+ * Subscribes to live job-progress notifications. Uses the same fetch() +
+ * ReadableStream pattern as analyzeLessonClient.ts (never native
+ * EventSource), so the operator's bearer token stays in a header, never a
+ * URL. This stream is a notification layer only: Postgres (via
+ * getCourseLessons) remains the source of truth, and the caller should
+ * reload full state on (re)connect, not rely on this alone.
+ */
+export function subscribeAnalysisEvents(
+  backendUrl: string,
+  accessToken: string,
+  onEvents: () => void,
+): () => void {
+  const controller = new AbortController();
+
+  (async () => {
+    while (!controller.signal.aborted) {
+      try {
+        const res = await fetch(`${backendUrl}/api/analysis/events`, {
+          headers: authHeaders(accessToken),
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) return;
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let sepIndex: number;
+          while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, sepIndex);
+            buffer = buffer.slice(sepIndex + 2);
+            const dataLine = frame.split("\n").find((line) => line.startsWith("data:"));
+            if (dataLine) onEvents();
+          }
+        }
+      } catch {
+        // fall through to reconnect below unless aborted
+      }
+      if (!controller.signal.aborted) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+  })();
+
+  return () => controller.abort();
 }

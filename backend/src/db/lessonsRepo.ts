@@ -163,3 +163,36 @@ export async function listLessons(pool: Pool, courseId: number): Promise<LessonR
   );
   return result.rows.map(mapRow);
 }
+
+export async function getLessonById(pool: Pool, lessonId: number): Promise<LessonRow | null> {
+  const result = await pool.query(
+    `SELECT id, course_id, whop_lesson_id, title, lesson_type, visibility,
+            chapter_whop_id, chapter_title, chapter_order, course_order,
+            duration_seconds, video_asset_status, video_available, source_url,
+            archived_at, last_synced_at
+     FROM lessons WHERE id = $1`,
+    [lessonId],
+  );
+  return result.rows[0] ? mapRow(result.rows[0]) : null;
+}
+
+export async function getLessonsByIds(pool: Pool, lessonIds: number[]): Promise<LessonRow[]> {
+  if (lessonIds.length === 0) return [];
+  const result = await pool.query(
+    `SELECT id, course_id, whop_lesson_id, title, lesson_type, visibility,
+            chapter_whop_id, chapter_title, chapter_order, course_order,
+            duration_seconds, video_asset_status, video_available, source_url,
+            archived_at, last_synced_at
+     FROM lessons WHERE id = ANY($1::bigint[])`,
+    [lessonIds],
+  );
+  return result.rows.map(mapRow);
+}
+
+/** Backfills a duration Whop didn't report at sync time (see pipeline's onDurationDiscovered). Never overwrites a value with null. */
+export async function updateDurationSeconds(pool: Pool, lessonId: number, durationSeconds: number): Promise<void> {
+  await pool.query(
+    `UPDATE lessons SET duration_seconds = $2, updated_at = now() WHERE id = $1`,
+    [lessonId, durationSeconds],
+  );
+}

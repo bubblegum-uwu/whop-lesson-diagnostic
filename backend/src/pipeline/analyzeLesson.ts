@@ -2,7 +2,7 @@ import { extractLessonId, WhopUrlParseError } from "../lib/whopUrl.js";
 import type { FetchWhopLesson } from "../whop/client.js";
 import { WhopApiError } from "../whop/client.js";
 import { buildSignedMuxHlsUrl, InvalidMuxAssetError } from "../mux/signedUrl.js";
-import type { RemuxDeps, RemuxOptions } from "../ffmpeg/remux.js";
+import type { RemuxDeps, RemuxOptions, RemuxProgress } from "../ffmpeg/remux.js";
 import { remuxToMp4 } from "../ffmpeg/remux.js";
 import { withTempMp4File } from "../tempFiles/tempFile.js";
 import type { GeminiClient } from "../gemini/client.js";
@@ -17,6 +17,7 @@ export type PipelineStage =
   | "resolving_secure_video"
   | "preparing_video"
   | "uploading_to_gemini"
+  | "gemini_processing"
   | "analyzing_lesson"
   | "validating_result";
 
@@ -25,6 +26,7 @@ export const STAGE_LABELS: Record<PipelineStage, string> = {
   resolving_secure_video: "Resolving secure video",
   preparing_video: "Preparing video",
   uploading_to_gemini: "Uploading to Gemini",
+  gemini_processing: "Processing on Gemini",
   analyzing_lesson: "Analyzing lesson",
   validating_result: "Validating result",
 };
@@ -61,10 +63,19 @@ export interface AnalyzeLessonDeps {
   redactor?: SecretRedactor;
   logger?: SafeLogger;
   ffmpegPath?: string;
+  /** Real ffmpeg progress, forwarded from remux() — used by the PR2 worker to persist PREPARING_VIDEO progress. Unused by the single-lesson SSE flow. */
+  onProgress?: (progress: RemuxProgress) => void;
+  /** Fired as soon as a duration is known (from Whop metadata or ffmpeg/ffprobe) — used to backfill lessons.duration_seconds. */
+  onDurationDiscovered?: (seconds: number) => void;
 }
 
 export interface AnalyzeLessonResult {
   analysis: LessonStrategyAnalysis;
+  usage: {
+    inputTokens: number | null;
+    outputTokens: number | null;
+    thinkingTokens: number | null;
+  };
 }
 
 /**
@@ -110,6 +121,9 @@ export async function analyzeLesson(
     durationSeconds = lesson.video_asset?.duration_seconds ?? null;
     signedPlaybackId = lesson.video_asset?.signed_playback_id ?? null;
     signedToken = lesson.video_asset?.signed_video_playback_token ?? null;
+    if (durationSeconds != null) {
+      deps.onDurationDiscovered?.(durationSeconds);
+    }
   } catch (err) {
     if (err instanceof WhopApiError) {
       throw new PipelineError(`Whop API error (${err.status}): ${err.message}`, "retrieving_lesson", err);
@@ -133,10 +147,24 @@ export async function analyzeLesson(
     );
   }
 
+  let usage: AnalyzeLessonResult["usage"] = { inputTokens: null, outputTokens: null, thinkingTokens: null };
+
   const rawResultText = await withTempMp4File(async (tempFilePath) => {
     emit("preparing_video");
     try {
-      await deps.remux(signedUrl, tempFilePath, { ffmpegPath: deps.ffmpegPath });
+      await deps.remux(signedUrl, tempFilePath, {
+        ffmpegPath: deps.ffmpegPath,
+        knownDurationSeconds: durationSeconds,
+        onProgress: deps.onProgress
+          ? (progress) => {
+              deps.onProgress?.(progress);
+              if (durationSeconds == null && progress.totalSeconds != null) {
+                durationSeconds = progress.totalSeconds;
+                deps.onDurationDiscovered?.(progress.totalSeconds);
+              }
+            }
+          : undefined,
+      });
     } catch (err) {
       throw new PipelineError(
         `Failed to prepare the video for analysis: ${
@@ -151,6 +179,7 @@ export async function analyzeLesson(
     let file;
     try {
       file = await deps.gemini.uploadFile(tempFilePath);
+      emit("gemini_processing");
       file = await deps.gemini.waitUntilActive(file);
     } catch (err) {
       throw new PipelineError(
@@ -163,7 +192,9 @@ export async function analyzeLesson(
     emit("analyzing_lesson");
     let text: string;
     try {
-      text = await deps.gemini.analyzeVideo(file, deps.geminiModel, deps.geminiProcessingMode);
+      const result = await deps.gemini.analyzeVideo(file, deps.geminiModel, deps.geminiProcessingMode);
+      text = result.text;
+      usage = result.usage;
     } catch (err) {
       throw new PipelineError(
         `Gemini analysis failed: ${err instanceof Error ? err.message : "unknown error"}`,
@@ -203,7 +234,7 @@ export async function analyzeLesson(
     );
   }
 
-  return { analysis: validation.data };
+  return { analysis: validation.data, usage };
 }
 
 // Re-exported so backend/tests can build a signed-URL–free happy path

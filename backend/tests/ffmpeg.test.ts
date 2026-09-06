@@ -1,14 +1,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { remuxToMp4, FfmpegRemuxError } from "../src/ffmpeg/remux.js";
+import { remuxToMp4, probeDurationSeconds, FfmpegRemuxError, type RemuxProgress } from "../src/ffmpeg/remux.js";
 import { createSecretRedactor } from "../src/lib/redact.js";
 
 function makeFakeChild() {
   const child = new EventEmitter() as EventEmitter & {
     stderr: EventEmitter;
+    stdout: EventEmitter;
     kill: (signal: string) => void;
   };
   child.stderr = new EventEmitter();
+  child.stdout = new EventEmitter();
   child.kill = vi.fn();
   return child;
 }
@@ -101,5 +103,105 @@ describe("remuxToMp4", () => {
     await expect(
       remuxToMp4("https://stream.mux.com/pb.m3u8?token=x", "/tmp/out.mp4", {}, { spawn, redactor: createSecretRedactor() }),
     ).rejects.toThrow(/Failed to start ffmpeg/);
+  });
+
+  describe("real progress reporting (PR2)", () => {
+    it("parses out_time_us lines from -progress pipe:1 and reports elapsed/total seconds", async () => {
+      const child = makeFakeChild();
+      const spawn = vi.fn((_cmd: string, args: string[]) => {
+        expect(args).toContain("-progress");
+        queueMicrotask(() => {
+          child.stdout.emit("data", Buffer.from("out_time_us=5000000\nprogress=continue\n"));
+          child.stdout.emit("data", Buffer.from("out_time_us=10000000\nprogress=continue\n"));
+          child.emit("close", 0);
+        });
+        return child as never;
+      });
+
+      const progressEvents: RemuxProgress[] = [];
+      await remuxToMp4(
+        "https://stream.mux.com/pb.m3u8?token=secret",
+        "/tmp/out.mp4",
+        { knownDurationSeconds: 100, onProgress: (p) => progressEvents.push(p) },
+        { spawn, redactor: createSecretRedactor() },
+      );
+
+      expect(progressEvents).toEqual([
+        { elapsedSeconds: 5, totalSeconds: 100 },
+        { elapsedSeconds: 10, totalSeconds: 100 },
+      ]);
+    });
+
+    it("does not add -progress args or read stdout when no onProgress callback is given (unchanged default behavior)", async () => {
+      const child = makeFakeChild();
+      const spawn = vi.fn((_cmd: string, args: string[]) => {
+        expect(args).not.toContain("-progress");
+        queueMicrotask(() => child.emit("close", 0));
+        return child as never;
+      });
+
+      await remuxToMp4("https://stream.mux.com/pb.m3u8?token=secret", "/tmp/out.mp4", {}, { spawn, redactor: createSecretRedactor() });
+    });
+
+    it("falls back to ffprobe for total duration when knownDurationSeconds is not given", async () => {
+      const remuxChild = makeFakeChild();
+      const probeChild = makeFakeChild();
+      const spawn = vi.fn((cmd: string) => {
+        if (cmd === "ffprobe") {
+          queueMicrotask(() => {
+            probeChild.stdout.emit("data", Buffer.from("120.5\n"));
+            probeChild.emit("close", 0);
+          });
+          return probeChild as never;
+        }
+        queueMicrotask(() => {
+          remuxChild.stdout.emit("data", Buffer.from("out_time_us=1000000\n"));
+          remuxChild.emit("close", 0);
+        });
+        return remuxChild as never;
+      });
+
+      const progressEvents: RemuxProgress[] = [];
+      await remuxToMp4(
+        "https://stream.mux.com/pb.m3u8?token=secret",
+        "/tmp/out.mp4",
+        { onProgress: (p) => progressEvents.push(p) },
+        { spawn, redactor: createSecretRedactor() },
+      );
+
+      expect(progressEvents).toEqual([{ elapsedSeconds: 1, totalSeconds: 121 }]);
+    });
+  });
+});
+
+describe("probeDurationSeconds", () => {
+  it("returns the rounded duration on success", async () => {
+    const child = makeFakeChild();
+    const spawn = vi.fn(() => {
+      queueMicrotask(() => {
+        child.stdout.emit("data", Buffer.from("43.6\n"));
+        child.emit("close", 0);
+      });
+      return child as never;
+    });
+    await expect(probeDurationSeconds("https://x/pb.m3u8", "ffprobe", { spawn, redactor: createSecretRedactor() })).resolves.toBe(44);
+  });
+
+  it("resolves null (never throws) when ffprobe fails", async () => {
+    const child = makeFakeChild();
+    const spawn = vi.fn(() => {
+      queueMicrotask(() => child.emit("close", 1));
+      return child as never;
+    });
+    await expect(probeDurationSeconds("https://x/pb.m3u8", "ffprobe", { spawn, redactor: createSecretRedactor() })).resolves.toBeNull();
+  });
+
+  it("resolves null when the ffprobe binary fails to start", async () => {
+    const child = makeFakeChild();
+    const spawn = vi.fn(() => {
+      queueMicrotask(() => child.emit("error", new Error("ENOENT")));
+      return child as never;
+    });
+    await expect(probeDurationSeconds("https://x/pb.m3u8", "ffprobe", { spawn, redactor: createSecretRedactor() })).resolves.toBeNull();
   });
 });

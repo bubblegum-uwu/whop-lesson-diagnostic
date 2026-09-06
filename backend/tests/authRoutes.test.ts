@@ -71,6 +71,55 @@ describe("POST /api/auth/session", () => {
     expect(session?.whopUserId).toBe(OPERATOR_ID);
   });
 
+  it("PR2: a successful reconnect resumes AUTH_REQUIRED jobs and triggers a worker execution", async () => {
+    const { upsertCourse } = await import("../src/db/coursesRepo.js");
+    const { syncLessons, listLessons } = await import("../src/db/lessonsRepo.js");
+    const course = await upsertCourse(pool, {
+      whopCourseId: `cors_${Math.random().toString(36).slice(2)}`,
+      whopExperienceId: "exp_1",
+      slug: "scarface-trades-mastermind",
+      title: "Scarface Trades Mastermind",
+    });
+    await syncLessons(pool, course.id, [
+      {
+        whopLessonId: `lesn_${Math.random().toString(36).slice(2)}`,
+        title: "Lesson",
+        lessonType: "video",
+        visibility: "visible",
+        chapterWhopId: null,
+        chapterTitle: null,
+        chapterOrder: null,
+        courseOrder: 1,
+        durationSeconds: 600,
+        videoAssetStatus: "ready",
+        videoAvailable: true,
+        sourceUrl: "https://whop.com/x/lessons/y/",
+      },
+    ]);
+    const [lesson] = await listLessons(pool, course.id);
+    await pool.query(`INSERT INTO analysis_jobs (lesson_id, analysis_fingerprint, status) VALUES ($1, 'fp', 'AUTH_REQUIRED')`, [
+      lesson.id,
+    ]);
+
+    const jobTrigger = { triggerRun: vi.fn(async () => undefined) };
+    const handler = createEstablishSessionHandler(makeDeps({ jobTrigger }));
+    const { res, statusCode } = makeResponse();
+    await handler({ body: { access_token: "a", refresh_token: "r", expires_in: 3600 } } as Request, res);
+
+    expect(statusCode()).toBe(200);
+    expect(jobTrigger.triggerRun).toHaveBeenCalledOnce();
+    const job = await pool.query(`SELECT status FROM analysis_jobs WHERE lesson_id = $1`, [lesson.id]);
+    expect(job.rows[0].status).toBe("QUEUED");
+  });
+
+  it("PR2: does not trigger a worker execution when there was nothing to resume", async () => {
+    const jobTrigger = { triggerRun: vi.fn(async () => undefined) };
+    const handler = createEstablishSessionHandler(makeDeps({ jobTrigger }));
+    const { res } = makeResponse();
+    await handler({ body: { access_token: "a", refresh_token: "r", expires_in: 3600 } } as Request, res);
+    expect(jobTrigger.triggerRun).not.toHaveBeenCalled();
+  });
+
   it("empty database + wrong verified Whop user => 403, and nothing is persisted", async () => {
     const verifyAccessToken = vi.fn(async () => ({ sub: "user_someone_else" }));
     const handler = createEstablishSessionHandler(makeDeps({ oauthClient: makeOAuthClient({ verifyAccessToken }) }));

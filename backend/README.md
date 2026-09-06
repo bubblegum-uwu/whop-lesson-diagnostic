@@ -112,6 +112,16 @@ userinfo verification and the same `WHOP_OPERATOR_USER_ID` check inline: a
 verified identity that isn't the configured operator is a 403, and nothing
 is persisted. `GET /healthz` stays public and returns only `{ok: true}`.
 
+**PR2 adds a second, entirely separate identity boundary** for
+`POST /internal/ensure-worker-running` (the Cloud Scheduler safety net): a
+real Google-signed OIDC identity token, verified server-side
+(`src/lib/googleOidc.ts`) against **both** its signature/audience and an
+exact match to `SCHEDULER_SERVICE_ACCOUNT_EMAIL`. Same principle as
+above — CORS, `Origin`, and a shared query-string secret are explicitly
+never acceptable substitutes for this either. This route also never
+promotes a job out of `AUTH_REQUIRED`; only a successful, operator-verified
+`POST /api/auth/session` reconnect does that.
+
 Refreshing the backend's own stored session (independent of the
 per-request caller-identity check above) is concurrency-safe: the
 check-then-maybe-refresh sequence runs inside one Postgres transaction
@@ -202,22 +212,103 @@ npm run migrate        # apply all pending migrations
 npm run migrate:down   # roll back the most recent one
 ```
 
-Tables (see `migrations/*_init-schema.sql` for the authoritative definition):
-`courses`, `lessons`, `auth_sessions`. Batch-processing tables
-(`analysis_jobs`, `lesson_analyses`, …) are intentionally not part of this
-migration — they land in PR2.
+Tables (see `migrations/*_init-schema.sql` for PR1, and
+`migrations/*_pr2-analysis-jobs.sql` for PR2): `courses`, `lessons`,
+`auth_sessions`, `analysis_jobs`, `job_events`, `lesson_analyses`,
+`strategy_instances`, `usage_records`.
 
 The new course/auth modules are tested against a **real local PostgreSQL**
 (not a mock) — see "Tests" below.
 
+## Phase 3 PR2: durable batch processing
+
+Turns the read-only Course table into an operational dashboard that can
+analyze many lessons unattended — queue a batch, close the browser, and come
+back to find it done. See §5 below for the concrete architecture; this
+section covers what changed and why.
+
+### Why not Cloud Tasks
+
+An earlier design used Cloud Tasks → a long-running HTTP request on a private
+Cloud Run **service**. Two real problems ruled it out:
+
+1. **The 30-minute Cloud Tasks HTTP dispatch deadline.** Lessons run
+   30–45+ minutes; a single request held open for the whole pipeline could
+   be retried by Cloud Tasks while the original attempt was still running,
+   causing duplicate Gemini spend.
+2. **Cloud Tasks task-name tombstones.** A deterministic task name derived
+   from `job_id` (for dedupe) can't be immediately reused after that task
+   completes or is deleted, which broke the planned same-`job_id` retry.
+
+### The actual architecture: Postgres queue + Cloud Run Job
+
+```
+Browser → Public API (Cloud Run SERVICE, operator-gated)
+            │
+            ├─ enqueue: INSERT analysis_jobs (QUEUED) + trigger a Cloud Run
+            │  JOB execution via the Admin API (async — never awaited)
+            │
+Cloud Run JOB (whop-lesson-gemini-worker, private, SERVICE_ROLE=worker)
+            │
+            ├─ pg_try_advisory_lock — a second concurrent execution that
+            │  can't acquire it exits immediately (cheap, harmless)
+            ├─ loop: claim one eligible job (`FOR UPDATE SKIP LOCKED`,
+            │  including reclaiming any job whose lease expired — crash
+            │  recovery, not a "potentially stale" label) → run the SAME
+            │  analyzeLesson() pipeline PR1 already proved out → persist
+            │  lesson_analyses / strategy_instances / usage_records
+            │  → exit once no eligible work remains
+            │
+Cloud Scheduler (~every 5 min) → POST /internal/ensure-worker-running
+            (Google-signed OIDC only — never CORS/Origin/a shared secret)
+            → if a due retry or a lease-expired job exists and no execution
+              is currently running, trigger one. NEVER resumes AUTH_REQUIRED
+              jobs — only a successful POST /api/auth/session reconnect does.
+```
+
+Cloud Run **Jobs** (not a second Service) are the processor: no public or
+private HTTP endpoint exists for the worker at all — it's started only via
+the Cloud Run Admin API's `jobs.run`, gated purely by IAM
+(`roles/run.invoker` scoped to that one Job resource). Task timeout is
+`12h`, comfortably above any real lesson, with Cloud Run Job's own
+infrastructure-level retries disabled (`--max-retries=0`) — retry behavior
+is owned entirely by `analysis_jobs.attempt_count`/`next_retry_at`, not
+layered infrastructure retries.
+
+**Job leases, not just status.** `analysis_jobs.lease_owner` +
+`lease_expires_at` let a later execution safely reclaim a job whose worker
+crashed mid-processing, and every lease-guarded write (`renewLease`,
+`markSucceeded`, …) is fenced: an execution that has been reclaimed gets
+`false` back and MUST NOT persist a result. The final `lesson_analyses`
+insert happens in the same transaction as that fencing check, so a
+reclaimed/duplicate worker can never write a second result for one job
+(`lesson_analyses.job_id` is also `UNIQUE` as defense in depth).
+
+**Retries.** Transient failures (429/500/502/503/504, network/timeout) go
+back to `QUEUED` with a bounded-exponential `next_retry_at` and release
+their lease so the loop moves on to the next lesson — never a blocking
+sleep. Permanent failures (400/403/404, schema validation, a non-timeout
+ffmpeg failure) are terminal (`FAILED`). A Whop refresh failure is
+`AUTH_REQUIRED`, parked until reconnect.
+
+**Idempotency.** An `analysis_fingerprint` (lesson id + Gemini model +
+prompt/schema/extractor version) is checked before any Gemini spend — an
+identical successful analysis is never redone. `[ Re-analyze ]` explicitly
+opts out of that check and creates a **new** job/analysis row rather than
+overwriting the old one.
+
+**Cancellation is QUEUED-only.** Once a job has been claimed and started
+processing, there is no reliable way to abort an in-flight ffmpeg/Gemini
+call from a Cloud Run Job — `[ Cancel ]` is only offered while `QUEUED`.
+This is a documented limitation, not a bug.
+
 ## Out of scope (intentionally not implemented yet)
 
-- Cloud Tasks / a background worker / batch analysis of multiple lessons
-- Real-time processing progress beyond the existing single-lesson SSE stream
-- Strategy clustering, canonical synthesis, the course Playbook
+- Strategy clustering across lessons, canonical synthesis, the course Playbook
 - Discord, YouTube, real-time trading, or brokerage integration
+- Reliable cancellation of in-flight (already-claimed) processing
 
-See the Phase 3 architecture proposal for the full PR2–PR4 plan.
+See the Phase 3 architecture proposal for the full PR3–PR4 plan.
 
 ## Project layout
 
@@ -258,10 +349,31 @@ src/
       operatorAuth.ts          requireOperator — verified-identity gate on every sensitive route
     routes/
       analyzeLesson.ts         POST /api/analyze-lesson handler (gated; pipeline itself unchanged)
-      auth.ts                    /api/auth/{session,status,disconnect}
+      auth.ts                    /api/auth/{session,status,disconnect} (+ PR2 AUTH_REQUIRED resume)
       courseSync.ts               POST /api/course/sync
-      courseLessons.ts             GET /api/course/lessons
-  server.ts                Entrypoint
+      courseLessons.ts             GET /api/course/lessons (+ PR2 job/analysis join)
+      lessonAnalysisDetail.ts       GET /api/course/lessons/:id/analysis — full validated JSON
+      analysisJobs.ts                POST /api/analysis/jobs{,/​:id/retry,/​:id/cancel}, GET /:id
+      analysisSummary.ts              GET /api/analysis/summary — dashboard counters
+      analysisEvents.ts                 GET /api/analysis/events — SSE notification layer
+      internal.ts                        POST /internal/ensure-worker-running (Scheduler, OIDC-gated)
+  worker/
+    advisoryLock.ts          pg_try_advisory_lock — the single-worker guard (PR2)
+    mainLoop.ts                Cloud Run Job entrypoint: claim → process → persist, until no work remains
+  jobs/
+    runJobTrigger.ts          Triggers a Cloud Run Job execution via the Admin API (fire-and-forget)
+  db/
+    analysisJobsRepo.ts       Claim/lease/retry/cancel — the durable queue (PR2)
+    jobEventsRepo.ts            Progress events for the SSE layer
+    lessonAnalysesRepo.ts        Terminal analysis results, fingerprint lookups
+    strategyInstancesRepo.ts      One row per extracted strategy
+    usageRecordsRepo.ts            Token usage / cost per analysis
+  pricing/
+    geminiPricing.ts          Versioned cost table — never a Gemini call to estimate
+  lib/
+    googleOidc.ts             Verifies the Scheduler's Google-signed identity token
+  server.ts                Entrypoint — branches on SERVICE_ROLE (api server vs. worker loop)
+  workerDeps.ts             Shared wiring for the worker entrypoint
 migrations/                node-pg-migrate SQL migrations
 tests/                     Vitest test suite (see "Tests" below)
 Dockerfile                 Node 22 + ffmpeg, multi-stage build
@@ -291,6 +403,12 @@ Dockerfile                 Node 22 + ffmpeg, multi-stage build
 | `DB_NAME` | Yes | — | e.g. `whop_lesson_platform`. |
 | `INSTANCE_CONNECTION_NAME` | Yes in Cloud Run | — | e.g. `scarface-video-ai:us-central1:whop-lesson-db`. Selects the Cloud SQL unix-socket connection; omit for local dev (uses `DB_HOST`/`DB_PORT`, default `localhost:5432`). |
 | `REFRESH_TOKEN_ENCRYPTION_KEY` | Yes | — | **Secret.** Base64-encoded 32 random bytes, e.g. `openssl rand -base64 32`. Encrypts the stored Whop refresh token at rest. |
+| `SERVICE_ROLE` | No | `api` | `api` mounts the public HTTP routes (the Cloud Run **service**); `worker` runs the PR2 batch-processing claim loop and mounts no HTTP routes at all (the Cloud Run **Job**). Same image, same env-var surface, different role. |
+| `GCP_PROJECT_ID` | Yes for `api` role | — | Used to build the Cloud Run Job's resource name when triggering an execution. |
+| `GCP_REGION` | No | `us-central1` | Region of the Cloud Run Job. |
+| `CLOUD_RUN_JOB_NAME` | Yes for `api` role | — | `whop-lesson-gemini-worker`. |
+| `SCHEDULER_SERVICE_ACCOUNT_EMAIL` | Yes for `api` role | — | The **only** identity `POST /internal/ensure-worker-running` trusts — verified via a real Google-signed OIDC token, never CORS/Origin/a shared secret. |
+| `PUBLIC_API_BASE_URL` | Yes for `api` role | — | This service's own Cloud Run URL — the expected `aud` claim on the Scheduler's OIDC token. |
 
 ## Running locally
 
@@ -384,9 +502,17 @@ request — no production secrets involved, and it never deploys anything
   matched to the persisted operator (see "Security model" below) — but
   nothing stops the one legitimate operator from calling `/api/analyze-lesson`
   in a tight loop. Fine for a single-operator PoC; revisit before wider use.
-- Stage progress is delivered via a single long-lived SSE response, not a
-  separate job-status endpoint. Good enough for one lesson; would need a
-  job queue for concurrent multi-lesson use (explicitly out of scope now).
+- The original single-lesson SSE flow (`POST /api/analyze-lesson`, still
+  fully intact and used by the standalone "Whop Lesson Media Diagnostic"
+  section) delivers progress via one long-lived response — fine for one
+  lesson at a time. PR2's batch flow uses a durable Postgres queue instead
+  (see "Phase 3 PR2" above) specifically so it doesn't depend on the
+  browser or the connection staying open.
+- **Cancellation only works while a job is `QUEUED`.** Once a Cloud Run Job
+  execution has claimed a lesson and started processing it, there is no
+  reliable way to abort the in-flight ffmpeg/Gemini call — `[ Cancel ]` is
+  not offered past that point. This is a deliberate, documented limitation,
+  not an oversight.
 - `auth_sessions` is a genuine singleton — this is a **single-operator**
   system by design (one Whop identity drives the whole course). The schema
   captures `whop_user_id` specifically so a later migration to multiple
@@ -576,3 +702,87 @@ VITE_WHOP_CLIENT_ID=<the same client_id already used for WHOP_CLIENT_ID above>
 Then re-run the Pages deploy workflow so the new build picks it up. If it's
 unset, the frontend shows "Whop OAuth is not configured." instead of the
 sign-in screen.
+
+### 9. PR2: one-time setup for durable batch processing (not automated — run these yourself)
+
+These commands are **not** run by CI and are not part of the existing
+`gcloud run deploy` step above — provision them once, manually, after the
+API service already exists (step 5).
+
+```bash
+# Dedicated least-privilege identity for the worker (separate from the API's
+# own runtime service account):
+gcloud iam service-accounts create whop-lesson-worker-sa \
+  --display-name="whop-lesson-gemini-worker runtime identity"
+
+gcloud projects add-iam-policy-binding "$(gcloud config get-value project)" \
+  --member="serviceAccount:whop-lesson-worker-sa@$(gcloud config get-value project).iam.gserviceaccount.com" \
+  --role="roles/cloudsql.client"
+gcloud secrets add-iam-policy-binding GEMINI_API_KEY \
+  --member="serviceAccount:whop-lesson-worker-sa@$(gcloud config get-value project).iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding DB_PASSWORD \
+  --member="serviceAccount:whop-lesson-worker-sa@$(gcloud config get-value project).iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+gcloud secrets add-iam-policy-binding REFRESH_TOKEN_ENCRYPTION_KEY \
+  --member="serviceAccount:whop-lesson-worker-sa@$(gcloud config get-value project).iam.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor"
+
+# The Cloud Run JOB itself — same image as the API service, no public/private
+# HTTP endpoint at all (Jobs are only ever started via the Admin API):
+gcloud run jobs create whop-lesson-gemini-worker \
+  --image=<the same image URL the API service is currently running — see `gcloud run services describe whop-lesson-gemini-backend --format='value(spec.template.spec.containers[0].image)'`> \
+  --region us-central1 \
+  --service-account="whop-lesson-worker-sa@$(gcloud config get-value project).iam.gserviceaccount.com" \
+  --add-cloudsql-instances="$INSTANCE_CONNECTION_NAME" \
+  --set-env-vars SERVICE_ROLE=worker,ALLOWED_ORIGIN=https://bubblegum-uwu.github.io,GEMINI_MODEL=gemini-3.8-flash,GEMINI_VIDEO_PROCESSING_MODE=agentic,WHOP_CLIENT_ID=YOUR_WHOP_APP_CLIENT_ID,WHOP_OPERATOR_USER_ID=YOUR_WHOP_USER_ID,WHOP_COURSE_ID=cors_4lb7N3oassoZwHJvrufOYy,WHOP_EXPERIENCE_ID=exp_gdmood6JIzSsE7,WHOP_COURSE_SLUG=scarface-trades-mastermind,DB_USER=app_user,DB_NAME=whop_lesson_platform,INSTANCE_CONNECTION_NAME="$INSTANCE_CONNECTION_NAME" \
+  --set-secrets GEMINI_API_KEY=GEMINI_API_KEY:latest,DB_PASSWORD=DB_PASSWORD:latest,REFRESH_TOKEN_ENCRYPTION_KEY=REFRESH_TOKEN_ENCRYPTION_KEY:latest \
+  --tasks=1 --parallelism=1 \
+  --task-timeout=12h \
+  --max-retries=0
+
+# Let the EXISTING API service trigger executions of this Job (least
+# privilege: scoped to this one Job resource, not the project):
+API_SERVICE_ACCOUNT=$(gcloud run services describe whop-lesson-gemini-backend --region us-central1 --format='value(spec.template.spec.serviceAccountName)')
+gcloud run jobs add-iam-policy-binding whop-lesson-gemini-worker \
+  --region=us-central1 \
+  --member="serviceAccount:$API_SERVICE_ACCOUNT" \
+  --role="roles/run.invoker"
+
+# Redeploy the API service itself with the new PR2 env vars it needs to
+# trigger that Job (GCP_PROJECT_ID/CLOUD_RUN_JOB_NAME/etc. — add these to
+# the SAME --set-env-vars list already used in step 5's gcloud run deploy):
+#   SERVICE_ROLE=api (or omit — it's the default)
+#   GCP_PROJECT_ID=$(gcloud config get-value project)
+#   GCP_REGION=us-central1
+#   CLOUD_RUN_JOB_NAME=whop-lesson-gemini-worker
+#   SCHEDULER_SERVICE_ACCOUNT_EMAIL=<created below>
+#   PUBLIC_API_BASE_URL=<the API service's own URL from step 5's output>
+
+# The Cloud Scheduler safety net — the ONLY way a due retry or a
+# lease-expired job gets picked up when nobody's browser is open:
+gcloud services enable cloudscheduler.googleapis.com
+gcloud iam service-accounts create whop-lesson-scheduler-sa \
+  --display-name="Cloud Scheduler -> ensure-worker-running"
+gcloud run services add-iam-policy-binding whop-lesson-gemini-backend \
+  --region=us-central1 \
+  --member="serviceAccount:whop-lesson-scheduler-sa@$(gcloud config get-value project).iam.gserviceaccount.com" \
+  --role="roles/run.invoker"
+gcloud scheduler jobs create http ensure-lesson-worker-running \
+  --location=us-central1 \
+  --schedule="*/5 * * * *" \
+  --uri="<PUBLIC_API_BASE_URL>/internal/ensure-worker-running" \
+  --http-method=POST \
+  --oidc-service-account-email="whop-lesson-scheduler-sa@$(gcloud config get-value project).iam.gserviceaccount.com" \
+  --oidc-token-audience="<PUBLIC_API_BASE_URL>"
+```
+
+Set `SCHEDULER_SERVICE_ACCOUNT_EMAIL` on the API service to
+`whop-lesson-scheduler-sa@<project>.iam.gserviceaccount.com` — that route
+rejects every identity except this exact one, regardless of Origin/CORS.
+
+**Cost**: Cloud Run Jobs bill only for actual execution time (no
+`min-instances`, no idle charge), and Cloud Scheduler's first 3 jobs/month
+are free. Expect **~$0 additional fixed monthly cost** — the only new spend
+is the variable Gemini/compute cost of however many lessons you actually
+batch-analyze, which you already control via manual selection.

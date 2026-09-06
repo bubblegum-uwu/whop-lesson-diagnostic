@@ -46,6 +46,23 @@ export interface AppConfig {
   db: DbConfig;
   /** Base64-encoded 32-byte key used to encrypt the stored Whop refresh token at rest. */
   refreshTokenEncryptionKey: string;
+  /**
+   * "api" mounts the public, operator-gated HTTP routes (default — the
+   * existing whop-lesson-gemini-backend Cloud Run SERVICE). "worker" runs
+   * the PR2 batch-analysis claim loop and mounts NO HTTP routes at all —
+   * this is the Cloud Run JOB entrypoint (see workerMain.ts). Both roles
+   * ship in the same container image; the image never exposes the worker's
+   * code as a public route.
+   */
+  serviceRole: "api" | "worker";
+  /** Only required for serviceRole "api" — used to trigger Cloud Run Job executions and verify the Scheduler's OIDC identity. */
+  gcpProjectId: string | undefined;
+  gcpRegion: string;
+  cloudRunJobName: string | undefined;
+  /** The Google service account Cloud Scheduler uses to call POST /internal/ensure-worker-running — the ONLY identity that route trusts. */
+  schedulerServiceAccountEmail: string | undefined;
+  /** This service's own public URL — the expected `aud` claim on the Scheduler's OIDC token. */
+  publicApiBaseUrl: string | undefined;
 }
 
 function requireEnv(name: string): string {
@@ -114,5 +131,32 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     },
     refreshTokenEncryptionKey:
       env.REFRESH_TOKEN_ENCRYPTION_KEY || requireEnv("REFRESH_TOKEN_ENCRYPTION_KEY"),
+    serviceRole: env.SERVICE_ROLE === "worker" ? "worker" : "api",
+    gcpProjectId: env.GCP_PROJECT_ID,
+    gcpRegion: env.GCP_REGION || "us-central1",
+    cloudRunJobName: env.CLOUD_RUN_JOB_NAME,
+    schedulerServiceAccountEmail: env.SCHEDULER_SERVICE_ACCOUNT_EMAIL,
+    publicApiBaseUrl: env.PUBLIC_API_BASE_URL,
+  };
+}
+
+/** Only the "api" role needs these — called from app.ts before wiring the batch-processing routes. */
+export function requireApiRoleEnv(config: AppConfig): {
+  gcpProjectId: string;
+  cloudRunJobName: string;
+  schedulerServiceAccountEmail: string;
+  publicApiBaseUrl: string;
+} {
+  if (!config.gcpProjectId) throw new Error("Missing required environment variable: GCP_PROJECT_ID");
+  if (!config.cloudRunJobName) throw new Error("Missing required environment variable: CLOUD_RUN_JOB_NAME");
+  if (!config.schedulerServiceAccountEmail) {
+    throw new Error("Missing required environment variable: SCHEDULER_SERVICE_ACCOUNT_EMAIL");
+  }
+  if (!config.publicApiBaseUrl) throw new Error("Missing required environment variable: PUBLIC_API_BASE_URL");
+  return {
+    gcpProjectId: config.gcpProjectId,
+    cloudRunJobName: config.cloudRunJobName,
+    schedulerServiceAccountEmail: config.schedulerServiceAccountEmail,
+    publicApiBaseUrl: config.publicApiBaseUrl,
   };
 }

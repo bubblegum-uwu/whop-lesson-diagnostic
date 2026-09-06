@@ -4,6 +4,7 @@ import { DiagnosticResult } from "./components/DiagnosticResult";
 import { ErrorResult } from "./components/ErrorResult";
 import { AnalyzeLesson } from "./components/AnalyzeLesson";
 import { CourseTable } from "./components/CourseTable";
+import { DashboardSummary } from "./components/DashboardSummary";
 import { FindWhopUserId, type FindWhopUserIdState } from "./components/FindWhopUserId";
 import {
   startWhopOAuth,
@@ -24,7 +25,14 @@ import {
   disconnectAuthSession,
   syncCourse,
   getCourseLessons,
+  getAnalysisSummary,
+  enqueueAnalysisJobs,
+  retryAnalysisJob,
+  cancelAnalysisJob,
+  getLessonAnalysisJson,
+  subscribeAnalysisEvents,
   type CourseLessonSummary,
+  type AnalysisSummary,
 } from "./lib/courseApi";
 
 type AppState =
@@ -54,6 +62,7 @@ interface CourseViewState {
   courseTitle: string | null;
   lastSyncedAt: string | null;
   lessons: CourseLessonSummary[];
+  summary: AnalysisSummary | null;
   errorMessage: string | null;
 }
 
@@ -66,6 +75,7 @@ const INITIAL_COURSE_STATE: CourseViewState = {
   courseTitle: null,
   lastSyncedAt: null,
   lessons: [],
+  summary: null,
   errorMessage: null,
 };
 
@@ -91,9 +101,10 @@ export default function App() {
   async function refreshCourseState(accessToken: string) {
     if (!backendUrl) return;
     try {
-      const [authStatus, courseLessons] = await Promise.all([
+      const [authStatus, courseLessons, summary] = await Promise.all([
         getAuthStatus(backendUrl, accessToken),
         getCourseLessons(backendUrl, accessToken),
+        getAnalysisSummary(backendUrl, accessToken).catch(() => null),
       ]);
       setCourseState((prev) => ({
         ...prev,
@@ -102,6 +113,7 @@ export default function App() {
         courseTitle: courseLessons.course?.title ?? null,
         lastSyncedAt: courseLessons.course?.lastSyncedAt ?? null,
         lessons: courseLessons.lessons,
+        summary,
       }));
     } catch (err) {
       setCourseState((prev) => ({
@@ -110,6 +122,19 @@ export default function App() {
       }));
     }
   }
+
+  // Live-notification layer only (PR2): on any event, reload full state from
+  // Postgres via refreshCourseState — the SSE stream never carries the
+  // record of what happened on its own. Reconnects safely on drop.
+  useEffect(() => {
+    if (!backendUrl || !courseState.accessToken || !courseState.connected) return undefined;
+    const accessToken = courseState.accessToken;
+    const unsubscribe = subscribeAnalysisEvents(backendUrl, accessToken, () => {
+      void refreshCourseState(accessToken);
+    });
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendUrl, courseState.accessToken, courseState.connected]);
 
   useEffect(() => {
     const search = window.location.search;
@@ -285,8 +310,44 @@ export default function App() {
     setCourseState(INITIAL_COURSE_STATE);
   }
 
-  function handleAnalyzeLessonFromTable(sourceUrl: string) {
-    void handleSubmit(sourceUrl);
+  async function handleEnqueue(lessonIds: number[], force = false) {
+    if (!backendUrl || !courseState.accessToken) return;
+    const accessToken = courseState.accessToken;
+    try {
+      await enqueueAnalysisJobs(backendUrl, accessToken, lessonIds, force);
+      await refreshCourseState(accessToken);
+    } catch (err) {
+      setCourseState((prev) => ({
+        ...prev,
+        errorMessage: err instanceof Error ? err.message : "Failed to queue analysis.",
+      }));
+    }
+  }
+
+  async function handleRetry(jobId: string) {
+    if (!backendUrl || !courseState.accessToken) return;
+    const accessToken = courseState.accessToken;
+    try {
+      await retryAnalysisJob(backendUrl, accessToken, jobId);
+      await refreshCourseState(accessToken);
+    } catch (err) {
+      setCourseState((prev) => ({
+        ...prev,
+        errorMessage: err instanceof Error ? err.message : "Failed to retry job.",
+      }));
+    }
+  }
+
+  async function handleCancel(jobId: string) {
+    if (!backendUrl || !courseState.accessToken) return;
+    const accessToken = courseState.accessToken;
+    await cancelAnalysisJob(backendUrl, accessToken, jobId);
+    await refreshCourseState(accessToken);
+  }
+
+  async function handleLoadAnalysis(lessonId: number): Promise<unknown | null> {
+    if (!backendUrl || !courseState.accessToken) return null;
+    return getLessonAnalysisJson(backendUrl, courseState.accessToken, lessonId);
   }
 
   function handleReset() {
@@ -309,18 +370,25 @@ export default function App() {
       <FindWhopUserId state={identifyState} onStart={handleFindUserId} />
 
       {backendUrl && (
-        <CourseTable
-          courseTitle={courseState.courseTitle}
-          lessons={courseState.lessons}
-          connected={courseState.connected}
-          syncing={courseState.syncing}
-          authRequired={courseState.authRequired}
-          lastSyncedAt={courseState.lastSyncedAt}
-          onSignIn={handleCourseSignIn}
-          onSync={handleCourseSync}
-          onDisconnect={handleCourseDisconnect}
-          onAnalyzeLesson={handleAnalyzeLessonFromTable}
-        />
+        <>
+          <DashboardSummary summary={courseState.summary} />
+          <CourseTable
+            courseTitle={courseState.courseTitle}
+            lessons={courseState.lessons}
+            connected={courseState.connected}
+            syncing={courseState.syncing}
+            authRequired={courseState.authRequired}
+            lastSyncedAt={courseState.lastSyncedAt}
+            summary={courseState.summary}
+            onSignIn={handleCourseSignIn}
+            onSync={handleCourseSync}
+            onDisconnect={handleCourseDisconnect}
+            onEnqueue={handleEnqueue}
+            onRetry={handleRetry}
+            onCancel={handleCancel}
+            onLoadAnalysis={handleLoadAnalysis}
+          />
+        </>
       )}
       {courseState.errorMessage && <div className="error-box">{courseState.errorMessage}</div>}
 
