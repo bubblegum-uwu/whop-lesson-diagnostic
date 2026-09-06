@@ -336,4 +336,143 @@ describe("runSynthesisLoop", () => {
     const afterAnalyses = await getByAnalysisIds(pool, run.sourceAnalysisIds);
     expect(afterAnalyses).toEqual(beforeAnalyses);
   });
+
+  it("persists real stage transitions and countable progress in Postgres as the pipeline advances, then clears them at the VALIDATING/finalize step", async () => {
+    const { run } = await seedRunReadyToClaim();
+    let resolveCanonicalGate!: (v: { text: string; usage: { inputTokens: number; outputTokens: number; thinkingTokens: number } }) => void;
+    const canonicalGate = new Promise<{ text: string; usage: { inputTokens: number; outputTokens: number; thinkingTokens: number } }>((resolve) => {
+      resolveCanonicalGate = resolve;
+    });
+    const usage = { inputTokens: 1, outputTokens: 1, thinkingTokens: 0 };
+    const gemini: GeminiClient = {
+      uploadFile: vi.fn(),
+      waitUntilActive: vi.fn(),
+      analyzeVideo: vi.fn(),
+      deleteFile: vi.fn(),
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("clustering trading-strategy instances")) {
+          return {
+            text: JSON.stringify({ clusters: [{ clusterKey: "br", proposedCanonicalName: "Break & Retest", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" }] }),
+            usage,
+          };
+        }
+        if (prompt.includes("synthesizing ONE canonical trading strategy")) return canonicalGate; // block here so we can inspect mid-flight progress
+        if (prompt.includes("Core Trading Framework")) return { text: JSON.stringify({ sections: [] }), usage };
+        if (prompt.includes("Comprehensive Trading Playbook")) return { text: JSON.stringify({ title: "Playbook", sections: [], conflictsAndAmbiguities: [] }), usage };
+        return { text: JSON.stringify({ nodes: [], readableSteps: [] }), usage };
+      }),
+    };
+
+    const runPromise = runSynthesisLoop(makeDeps(gemini, 20));
+    try {
+      const deadline = Date.now() + 5000;
+      let mid = await getSynthesisRun(pool, run.runId);
+      while (mid?.currentStage !== "CANONICALIZING" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+        mid = await getSynthesisRun(pool, run.runId);
+      }
+      // Countable progress persisted mid-stage — never fabricated, matches
+      // exactly what the pipeline has actually completed so far (0 of 1
+      // clusters), and current_item names the cluster in flight (never
+      // prompt content).
+      expect(mid?.currentStage).toBe("CANONICALIZING");
+      expect(mid?.completedItems).toBe(0);
+      expect(mid?.totalItems).toBe(1);
+      expect(mid?.currentItem).toBe("Break & Retest");
+    } finally {
+      resolveCanonicalGate({ text: validCanonicalStrategyJson(), usage });
+      await runPromise;
+    }
+
+    const finalRun = await getSynthesisRun(pool, run.runId);
+    expect(finalRun?.status).toBe("COMPLETED");
+    // VALIDATING's progress event unconditionally clears the previous
+    // stage's stale item counts/currentItem rather than leaving them
+    // COALESCEd forward — see updateSynthesisProgress's doc comment.
+    expect(finalRun?.currentStage).toBe("VALIDATING");
+    expect(finalRun?.completedItems).toBeNull();
+    expect(finalRun?.totalItems).toBeNull();
+    expect(finalRun?.currentItem).toBeNull();
+  });
+
+  it("stops writing to Postgres once the run is COMPLETED — no further heartbeat/progress activity after the terminal transition", async () => {
+    const { run } = await seedRunReadyToClaim();
+    const gemini = makeFakeGemini();
+    await runSynthesisLoop(makeDeps(gemini, 20));
+
+    const finalRun = await getSynthesisRun(pool, run.runId);
+    expect(finalRun?.status).toBe("COMPLETED");
+    const updatedAtAfterCompletion = finalRun!.updatedAt.getTime();
+
+    await new Promise((r) => setTimeout(r, 100)); // several heartbeat intervals' worth of time, run already finished
+    const later = await getSynthesisRun(pool, run.runId);
+    expect(later!.updatedAt.getTime()).toBe(updatedAtAfterCompletion); // no write happened after completion
+    expect(later?.leaseOwner).toBeNull();
+    expect(later?.leaseExpiresAt).toBeNull();
+  });
+
+  it("stops writing to Postgres once the run is FAILED — no further heartbeat/progress activity after the terminal transition", async () => {
+    const { run } = await seedRunReadyToClaim();
+    const gemini: GeminiClient = {
+      uploadFile: vi.fn(),
+      waitUntilActive: vi.fn(),
+      analyzeVideo: vi.fn(),
+      deleteFile: vi.fn(),
+      generateStructured: vi.fn(async () => ({ text: "not json", usage: { inputTokens: 1, outputTokens: 1, thinkingTokens: 0 } })),
+    };
+    await runSynthesisLoop(makeDeps(gemini, 20));
+
+    const finalRun = await getSynthesisRun(pool, run.runId);
+    expect(finalRun?.status).toBe("FAILED");
+    const updatedAtAfterFailure = finalRun!.updatedAt.getTime();
+
+    await new Promise((r) => setTimeout(r, 100));
+    const later = await getSynthesisRun(pool, run.runId);
+    expect(later!.updatedAt.getTime()).toBe(updatedAtAfterFailure);
+    expect(later?.leaseOwner).toBeNull();
+    expect(later?.leaseExpiresAt).toBeNull();
+  });
+
+  it("stops renewing once ownership/lease is lost mid-run to another execution", async () => {
+    const { run } = await seedRunReadyToClaim();
+    let resolveGate!: (v: { text: string; usage: { inputTokens: number; outputTokens: number; thinkingTokens: number } }) => void;
+    const gate = new Promise<{ text: string; usage: { inputTokens: number; outputTokens: number; thinkingTokens: number } }>((resolve) => {
+      resolveGate = resolve;
+    });
+    const gemini: GeminiClient = {
+      uploadFile: vi.fn(),
+      waitUntilActive: vi.fn(),
+      analyzeVideo: vi.fn(),
+      deleteFile: vi.fn(),
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("clustering trading-strategy instances")) return gate;
+        throw new Error(`Unexpected prompt: ${prompt.slice(0, 40)}`);
+      }),
+    };
+
+    const runPromise = runSynthesisLoop(makeDeps(gemini, 20));
+    try {
+      const deadline = Date.now() + 5000;
+      let claimedRun = await getSynthesisRun(pool, run.runId);
+      while (claimedRun?.status !== "RUNNING" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+        claimedRun = await getSynthesisRun(pool, run.runId);
+      }
+      expect(claimedRun?.status).toBe("RUNNING");
+
+      // Simulate another execution reclaiming the lease outright (e.g. an
+      // operator forcibly resetting it, or a crash-recovery race) —
+      // renewSynthesisLease/updateSynthesisProgress are fenced on
+      // lease_owner, so this execution's next write is silently rejected
+      // and it must stop trying rather than keep hammering the DB.
+      await pool.query(`UPDATE synthesis_runs SET lease_owner = 'someone-else' WHERE run_id = $1`, [run.runId]);
+      await new Promise((r) => setTimeout(r, 60)); // a couple of heartbeat ticks, all of which should now fail fencing silently
+
+      const reclaimed = await getSynthesisRun(pool, run.runId);
+      expect(reclaimed?.leaseOwner).toBe("someone-else"); // this execution never overwrote it back
+    } finally {
+      resolveGate({ text: JSON.stringify({ clusters: [] }), usage: { inputTokens: 1, outputTokens: 1, thinkingTokens: 0 } });
+      await runPromise; // abandons cleanly once it discovers the lease was lost (see LeaseLostError handling)
+    }
+  });
 });

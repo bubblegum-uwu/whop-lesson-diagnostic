@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import {
   claimNextEligibleSynthesisRun,
   renewSynthesisLease,
+  updateSynthesisProgress,
   markSynthesisCompleted,
   markSynthesisFailed,
   type SynthesisRun,
@@ -11,7 +12,7 @@ import { createStrategyCluster } from "../db/strategyClustersRepo.js";
 import { createCanonicalStrategy } from "../db/canonicalStrategiesRepo.js";
 import { createCoursePlaybook } from "../db/coursePlaybooksRepo.js";
 import { gatherSynthesisInput } from "../synthesis/sourceData.js";
-import { runSynthesis, type SynthesisResult } from "../synthesis/runSynthesis.js";
+import { runSynthesis, type SynthesisResult, type SynthesisProgressEvent } from "../synthesis/runSynthesis.js";
 import type { SynthesisStageDeps } from "../synthesis/geminiStage.js";
 import { startHeartbeat } from "./heartbeat.js";
 import { estimateCost } from "../pricing/geminiPricing.js";
@@ -76,12 +77,31 @@ async function processOneSynthesisRun(run: SynthesisRun, leaseOwner: string, dep
   const redactor = deps.redactor ?? globalRedactor;
   const log = deps.logger ?? defaultLogger;
 
+  // A single chain both the pure heartbeat timer and every real progress
+  // event serialize through — this is what guarantees no two DB writes for
+  // this run's lease/progress ever overlap (a heartbeat tick landing mid-
+  // stage-transition, or two progress events firing back to back, both
+  // wait their turn instead of racing).
   let leaseLost = false;
   let renewChain: Promise<boolean> = Promise.resolve(true);
-  function renewNow(currentStage?: string): Promise<boolean> {
+
+  /** Pure heartbeat: renews the lease/last_heartbeat_at only, touching no progress column — the independent timer below calls this on its own schedule, never tied to a Gemini callback or stage transition. */
+  function renewNow(): Promise<boolean> {
     const next = renewChain.then(async () => {
       if (leaseLost) return false;
-      const ok = await renewSynthesisLease(deps.pool, run.runId, leaseOwner, currentStage);
+      const ok = await renewSynthesisLease(deps.pool, run.runId, leaseOwner);
+      if (!ok) leaseLost = true;
+      return ok;
+    });
+    renewChain = next.catch(() => false);
+    return next;
+  }
+
+  /** A real progress event (stage transition or item-count increment) — also renews the lease/heartbeat as part of the same write, chained through the same renewChain as the pure heartbeat above. */
+  function reportProgress(update: { currentStage: string; completedItems: number | null; totalItems: number | null; currentItem: string | null }): Promise<boolean> {
+    const next = renewChain.then(async () => {
+      if (leaseLost) return false;
+      const ok = await updateSynthesisProgress(deps.pool, run.runId, leaseOwner, update);
       if (!ok) leaseLost = true;
       return ok;
     });
@@ -99,10 +119,18 @@ async function processOneSynthesisRun(run: SynthesisRun, leaseOwner: string, dep
 
     const input = await gatherSynthesisInput(deps.pool, courseTitle, run.sourceAnalysisIds);
 
-    const result: SynthesisResult = await runSynthesis({ gemini: deps.gemini, model: deps.model }, input, (stage) => {
-      void renewNow(stage);
+    const result: SynthesisResult = await runSynthesis({ gemini: deps.gemini, model: deps.model }, input, (event: SynthesisProgressEvent) => {
+      void reportProgress({ currentStage: event.stage, completedItems: event.completedItems, totalItems: event.totalItems, currentItem: event.currentItem });
     });
 
+    if (leaseLost) throw new LeaseLostError();
+
+    // Awaited (unlike every other reportProgress call above, which are
+    // fire-and-forget so they never slow down the actual Gemini calls) —
+    // this is a deliberate checkpoint that must land before the
+    // persistence transaction below begins, or a completed run could show
+    // stale mid-pipeline progress instead of VALIDATING.
+    await reportProgress({ currentStage: "VALIDATING", completedItems: null, totalItems: null, currentItem: null });
     if (leaseLost) throw new LeaseLostError();
 
     const completedAt = new Date();

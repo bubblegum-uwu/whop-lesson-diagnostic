@@ -10,6 +10,19 @@ function authHeaders(accessToken: string): HeadersInit {
 
 export type SynthesisRunStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
 
+/** Mirrors backend/src/synthesis/progress.ts's PROGRESS_STAGE_ORDER exactly. */
+export type SynthesisProgressStage =
+  | "NORMALIZING"
+  | "CLUSTERING"
+  | "CANONICALIZING"
+  | "CORE_FRAMEWORK"
+  | "PLAYBOOK"
+  | "DECISION_FRAMEWORK"
+  | "VALIDATING";
+
+/** "none" = fresh, no warning. "waiting_for_update"/"no_recent_heartbeat" = the browser just hasn't heard from the worker in a while — never means failure. "waiting_for_recovery" = the worker's lease itself expired (a crashed execution) and another worker still needs to pick the run back up. */
+export type HeartbeatTier = "none" | "waiting_for_update" | "no_recent_heartbeat" | "waiting_for_recovery";
+
 export interface SynthesisRunSummary {
   runId: string;
   status: SynthesisRunStatus;
@@ -26,6 +39,26 @@ export interface SynthesisRunSummary {
   errorType: string | null;
   sanitizedError: string | null;
   createdAt: string;
+  updatedAt: string;
+  /** 1-based, out of totalStages — "Stage 3 of 7". */
+  stageIndex: number;
+  totalStages: number;
+  stageLabel: string;
+  /** 0-100, deterministic stage-weighted — never a fabricated per-second estimate. */
+  overallProgress: number;
+  /** 0-100 within the current stage, or null when that stage has no countable work (see isIndeterminate). */
+  stageProgress: number | null;
+  /** True when the current stage has real completed/total counts to show (e.g. "2 of 4 complete"). */
+  isCountable: boolean;
+  /** True when the current stage is a single indeterminate Gemini call — never show a fabricated percentage for it. */
+  isIndeterminate: boolean;
+  completedItems: number | null;
+  totalItems: number | null;
+  /** A short display label only (e.g. a canonical strategy's name) — never prompt content. */
+  currentItem: string | null;
+  lastHeartbeatAt: string | null;
+  leaseExpiresAt: string | null;
+  heartbeatTier: HeartbeatTier;
 }
 
 export interface NoStandaloneSetupLesson {

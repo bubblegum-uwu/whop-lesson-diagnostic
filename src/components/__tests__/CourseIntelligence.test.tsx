@@ -1,7 +1,42 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { CourseIntelligence } from "../CourseIntelligence";
-import type { SynthesisStatus, CourseSynthesisData } from "../../lib/synthesisApi";
+import type { SynthesisStatus, SynthesisRunSummary, CourseSynthesisData } from "../../lib/synthesisApi";
+
+function baseRunSummary(overrides: Partial<SynthesisRunSummary> = {}): SynthesisRunSummary {
+  return {
+    runId: "run_1",
+    status: "COMPLETED",
+    currentStage: null,
+    sourceAnalysisHash: "hash",
+    model: "gemini-3.8-flash",
+    startedAt: "2026-01-01T00:00:00Z",
+    completedAt: "2026-01-01T00:05:00Z",
+    inputTokens: 1000,
+    outputTokens: 200,
+    thinkingTokens: 10,
+    estimatedCost: 0.42,
+    processingDurationSeconds: 300,
+    errorType: null,
+    sanitizedError: null,
+    createdAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T00:05:00Z",
+    stageIndex: 7,
+    totalStages: 7,
+    stageLabel: "Completed",
+    overallProgress: 100,
+    stageProgress: 100,
+    isCountable: false,
+    isIndeterminate: false,
+    completedItems: null,
+    totalItems: null,
+    currentItem: null,
+    lastHeartbeatAt: null,
+    leaseExpiresAt: null,
+    heartbeatTier: "none",
+    ...overrides,
+  };
+}
 
 const BACKEND_URL = "https://backend.example.com";
 const TOKEN = "operator-token";
@@ -29,23 +64,7 @@ function baseStatus(overrides: Partial<SynthesisStatus> = {}): SynthesisStatus {
 
 function baseSynthesisData(overrides: Partial<CourseSynthesisData> = {}): CourseSynthesisData {
   return {
-    run: {
-      runId: "run_1",
-      status: "COMPLETED",
-      currentStage: null,
-      sourceAnalysisHash: "hash",
-      model: "gemini-3.8-flash",
-      startedAt: "2026-01-01T00:00:00Z",
-      completedAt: "2026-01-01T00:05:00Z",
-      inputTokens: 1000,
-      outputTokens: 200,
-      thinkingTokens: 10,
-      estimatedCost: 0.42,
-      processingDurationSeconds: 300,
-      errorType: null,
-      sanitizedError: null,
-      createdAt: "2026-01-01T00:00:00Z",
-    },
+    run: baseRunSummary(),
     clusters: [
       {
         clusterId: 1,
@@ -204,13 +223,18 @@ describe("CourseIntelligence", () => {
   it("shows the last failed synthesis attempt's error", async () => {
     const status = baseStatus({
       canSynthesizeNow: true,
-      latestRun: {
+      latestRun: baseRunSummary({
         runId: "run_2",
         status: "FAILED",
-        currentStage: null,
+        currentStage: "CANONICALIZING",
+        stageLabel: "Building Canonical Strategies",
+        overallProgress: 38,
+        stageProgress: 50,
+        isCountable: true,
+        completedItems: 2,
+        totalItems: 4,
         sourceAnalysisHash: "h",
         model: "m",
-        startedAt: "2026-01-01T00:00:00Z",
         completedAt: "2026-01-01T00:01:00Z",
         inputTokens: null,
         outputTokens: null,
@@ -219,12 +243,164 @@ describe("CourseIntelligence", () => {
         processingDurationSeconds: null,
         errorType: "permanent",
         sanitizedError: "Gemini output failed schema validation.",
-        createdAt: "2026-01-01T00:00:00Z",
-      },
+      }),
     });
     stubFetch(status);
 
     render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
     expect(await screen.findByText(/schema validation/)).toBeInTheDocument();
+    expect(screen.getByText("Synthesis failed")).toBeInTheDocument();
+    expect(screen.getByText(/Building Canonical Strategies/)).toBeInTheDocument();
+    expect(screen.getByText(/38%/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry Synthesis" })).toBeInTheDocument();
+  });
+
+  it("shows the active progress card for a RUNNING synthesis with real countable stage progress and current item", async () => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({
+        status: "RUNNING",
+        currentStage: "CANONICALIZING",
+        stageIndex: 3,
+        totalStages: 7,
+        stageLabel: "Building Canonical Strategies",
+        overallProgress: 29,
+        stageProgress: 25,
+        isCountable: true,
+        isIndeterminate: false,
+        completedItems: 1,
+        totalItems: 4,
+        currentItem: "Break & Retest",
+        completedAt: null,
+      }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+
+    expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
+    expect(screen.getByText("Stage 3 of 7")).toBeInTheDocument();
+    expect(screen.getByText("Building Canonical Strategies")).toBeInTheDocument();
+    expect(screen.getByText("1 of 4 complete")).toBeInTheDocument();
+    expect(screen.getByText("29%")).toBeInTheDocument();
+    expect(screen.getByText("Break & Retest")).toBeInTheDocument();
+    expect(screen.getByText(/Elapsed:/)).toBeInTheDocument();
+    expect(screen.getByText(/You may close this page safely/)).toBeInTheDocument();
+  });
+
+  it("renders the full 7-stage timeline with done/active/pending markers reflecting the current stage", async () => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({ status: "RUNNING", currentStage: "CANONICALIZING", stageIndex: 3, completedAt: null }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    await screen.findByText("Synthesizing Course");
+
+    const items = screen.getAllByRole("listitem").filter((li) => li.className.startsWith("synthesis-stage-"));
+    expect(items.map((li) => li.textContent)).toEqual(["✓Normalize", "✓Cluster", "●Canonical Strategies", "○Core Framework", "○Playbook", "○Decision Framework", "○Finalizing"]);
+    expect(items[0].className).toContain("synthesis-stage-done");
+    expect(items[2].className).toContain("synthesis-stage-active");
+    expect(items[3].className).toContain("synthesis-stage-pending");
+  });
+
+  it("shows 'Gemini is working…' with no fabricated percentage for a single indeterminate Gemini-call stage", async () => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({
+        status: "RUNNING",
+        currentStage: "PLAYBOOK",
+        stageIndex: 5,
+        stageLabel: "Building Comprehensive Playbook",
+        overallProgress: 70,
+        stageProgress: null,
+        isCountable: false,
+        isIndeterminate: true,
+        completedItems: null,
+        totalItems: null,
+        currentItem: null,
+        completedAt: null,
+      }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    expect(await screen.findByText("Gemini is working…")).toBeInTheDocument();
+    expect(screen.queryByText(/of .* complete/)).not.toBeInTheDocument();
+  });
+
+  it("reconstructs an in-progress run entirely from the reloaded status — no synthesis is re-triggered on mount", async () => {
+    const status = baseStatus({
+      canSynthesizeNow: false,
+      latestRun: baseRunSummary({ status: "RUNNING", currentStage: "CLUSTERING", stageIndex: 2, overallProgress: 12, completedAt: null }),
+    });
+    const synthesizeCalls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/api/course/synthesize")) {
+          synthesizeCalls.push(url);
+          return jsonResponse(202, { created: true, run: status.latestRun });
+        }
+        if (url.includes("/api/course/synthesis-status")) return jsonResponse(200, status);
+        return jsonResponse(200, { run: null });
+      }),
+    );
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
+    expect(synthesizeCalls).toHaveLength(0); // reloaded purely from GET /synthesis-status — no POST /synthesize fired
+  });
+
+  it.each([
+    ["none", null],
+    ["waiting_for_update", "Waiting for update…"],
+    ["no_recent_heartbeat", /No recent worker heartbeat/],
+    ["waiting_for_recovery", /Waiting for recovery/],
+  ] as const)("shows the correct non-alarming heartbeat message for tier %s", async (tier, expectedText) => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({ status: "RUNNING", currentStage: "PLAYBOOK", heartbeatTier: tier, completedAt: null }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    await screen.findByText("Synthesizing Course");
+
+    if (expectedText === null) {
+      expect(screen.queryByText(/Waiting for update|No recent worker heartbeat|Waiting for recovery/)).not.toBeInTheDocument();
+    } else {
+      expect(screen.getByText(expectedText)).toBeInTheDocument();
+    }
+    // A heartbeat gap must never render as "FAILED" — the run's actual status still governs that.
+    expect(screen.queryByText("Synthesis failed")).not.toBeInTheDocument();
+  });
+
+  it("shows the compact completed summary (duration, canonical strategy count, cost, coverage) once synthesis reaches 100%, and never the progress card", async () => {
+    const data = baseSynthesisData({ run: baseRunSummary({ status: "COMPLETED", overallProgress: 100, processingDurationSeconds: 313, estimatedCost: 1.23 }) });
+    const status = baseStatus({ latestRun: data.run, latestCompletedRun: data.run });
+    stubFetch(status, data);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+
+    expect(await screen.findByText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Duration: 5 min")).toBeInTheDocument();
+    expect(screen.getByText("Canonical Strategies: 1")).toBeInTheDocument();
+    expect(screen.getByText("Synthesis Cost: $1.23")).toBeInTheDocument();
+    expect(screen.getByText("Coverage: COMPLETE")).toBeInTheDocument();
+    expect(screen.queryByText("Synthesizing Course")).not.toBeInTheDocument();
+  });
+
+  it("never advances the displayed percentage on its own between polls — only the elapsed clock ticks locally", async () => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({ status: "RUNNING", currentStage: "PLAYBOOK", overallProgress: 42, isIndeterminate: true, isCountable: false, completedAt: null }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    await screen.findByText("42%");
+
+    // Real time passes (several of the component's 1s ticks) with no new
+    // fetch response — the stubbed run object never changes, so the
+    // percentage must not drift, even though the elapsed-time text does.
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(screen.getByText("42%")).toBeInTheDocument();
   });
 });

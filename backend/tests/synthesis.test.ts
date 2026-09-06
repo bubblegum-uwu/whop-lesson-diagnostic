@@ -167,6 +167,30 @@ describe("synthesis/cluster", () => {
     expect(result.clusters[0].memberInstanceIds).toEqual([1, 2, 3]);
   });
 
+  it("reports real 'Batch N of M' progress for each map-step chunk, and never for the reduce/merge call", async () => {
+    const signatures = Array.from({ length: 3 }, (_, i) => buildStrategySignature(makeInstance({ strategyInstanceId: i + 1 })));
+    let call = 0;
+    const generateStructured = vi.fn(async () => {
+      call++;
+      if (call <= 3) return { text: clusterResponse([{ memberInstanceIds: [call] }]), usage };
+      return { text: clusterResponse([{ memberInstanceIds: [1, 2, 3] }]), usage };
+    });
+    const gemini = makeGemini({ generateStructured });
+    const batchProgress: { completedBatches: number; totalBatches: number }[] = [];
+
+    await clusterStrategyInstances({ gemini, model: "m" }, signatures, 1, (p) => batchProgress.push(p));
+
+    // One "0 of 3" event up front, then "1 of 3", "2 of 3", "3 of 3" — one
+    // per completed map-step chunk. The single reduce/merge call afterward
+    // never fires its own batch-progress event (it isn't itself a batch).
+    expect(batchProgress).toEqual([
+      { completedBatches: 0, totalBatches: 3 },
+      { completedBatches: 1, totalBatches: 3 },
+      { completedBatches: 2, totalBatches: 3 },
+      { completedBatches: 3, totalBatches: 3 },
+    ]);
+  });
+
   it("falls back to a singleton cluster for any instance Gemini fails to place", async () => {
     const signatures = [
       buildStrategySignature(makeInstance({ strategyInstanceId: 1 })),
@@ -355,7 +379,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     });
     const gemini = makeGemini({ generateStructured });
 
-    const stagesSeen: string[] = [];
+    const progressEvents: { stage: string; completedItems: number | null; totalItems: number | null }[] = [];
     const result = await runSynthesis(
       { gemini, model: "m" },
       {
@@ -367,18 +391,20 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
         ],
         noStandaloneSetupLessonIds: [11],
       },
-      (stage) => stagesSeen.push(stage),
+      (event) => progressEvents.push({ stage: event.stage, completedItems: event.completedItems, totalItems: event.totalItems }),
     );
 
     expect(calls).toEqual(["cluster", "canonical", "core_framework", "playbook", "decision_framework"]);
-    expect(stagesSeen).toEqual([
-      "normalizing",
-      "clustering",
-      "synthesizing_canonical_strategies",
-      "extracting_core_framework",
-      "synthesizing_playbook",
-      "synthesizing_decision_framework",
-    ]);
+    // Every distinct stage fires in order — NORMALIZING and CANONICALIZING
+    // also fire intermediate countable-progress events (see the dedicated
+    // "reports countable progress" tests below), so this only checks the
+    // de-duplicated stage sequence, not every individual event.
+    const stagesSeen = [...new Set(progressEvents.map((e) => e.stage))];
+    expect(stagesSeen).toEqual(["NORMALIZING", "CLUSTERING", "CANONICALIZING", "CORE_FRAMEWORK", "PLAYBOOK", "DECISION_FRAMEWORK"]);
+    // Terminal NORMALIZING/CLUSTERING/CANONICALIZING events report real completed==total counts — never fabricated mid-stage.
+    expect(progressEvents.at(-1)).toEqual({ stage: "DECISION_FRAMEWORK", completedItems: null, totalItems: null });
+    const finalCanonicalizing = [...progressEvents].reverse().find((e) => e.stage === "CANONICALIZING");
+    expect(finalCanonicalizing).toEqual({ stage: "CANONICALIZING", completedItems: 1, totalItems: 1 });
     // 5 Gemini calls (single-chunk clustering, one cluster, core framework, playbook, decision framework), each contributing the same usage.
     expect(result.usage).toEqual({ inputTokens: 500, outputTokens: 250, thinkingTokens: 50 });
     expect(result.clusters).toHaveLength(1);
@@ -402,6 +428,34 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     expect(result.playbook.frameworkCoverage.missingSupportingKnowledgeLessonIds).toEqual([11]);
     expect(result.playbook.frameworkCoverage.missingSupportingKnowledgeLessonTitles).toEqual(["Sizing & Scaling Trades"]);
     expect(result.playbook.frameworkCoverage.coverageNote).toContain("partial");
+  });
+
+  it("never fabricates progress during a single long indeterminate Gemini call (core framework, playbook, decision framework)", async () => {
+    const clusterJson = JSON.stringify({
+      clusters: [{ clusterKey: "br", proposedCanonicalName: "Break & Retest", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" }],
+    });
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("clustering trading-strategy instances")) return { text: clusterJson, usage };
+        if (prompt.includes("synthesizing ONE canonical trading strategy")) return { text: validRawCanonicalStrategyJson(), usage };
+        if (prompt.includes("Core Trading Framework")) return { text: validCoreFrameworkJson(), usage };
+        if (prompt.includes("Comprehensive Trading Playbook")) return { text: validPlaybookJson(), usage };
+        return { text: validDecisionFrameworkJson(), usage };
+      }),
+    });
+
+    const events: { stage: string; completedItems: number | null; totalItems: number | null }[] = [];
+    await runSynthesis(
+      { gemini, model: "m" },
+      { courseTitle: "Trading Accelerator", instances: [makeInstance()], lessons: [{ id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" }], noStandaloneSetupLessonIds: [] },
+      (e) => events.push({ stage: e.stage, completedItems: e.completedItems, totalItems: e.totalItems }),
+    );
+
+    for (const stage of ["CORE_FRAMEWORK", "PLAYBOOK", "DECISION_FRAMEWORK"]) {
+      const stageEvents = events.filter((e) => e.stage === stage);
+      // Exactly one "stage started" event, never a growing count invented while the single Gemini call is in flight.
+      expect(stageEvents).toEqual([{ stage, completedItems: null, totalItems: null }]);
+    }
   });
 
   it("reports no coverage gap when every lesson taught a standalone setup", async () => {

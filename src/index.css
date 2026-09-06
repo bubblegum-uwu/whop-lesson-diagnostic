@@ -973,3 +973,152 @@ button:disabled {
   max-height: 350px;
   overflow: auto;
 }
+
+/* Synthesis progress card — real, persisted progress in place of a generic spinner (see CourseIntelligence.tsx's SynthesisProgressCard). */
+.synthesis-progress-card {
+  margin-top: 1rem;
+  padding: 1rem 1.1rem;
+  border-radius: 8px;
+  background: #171a21;
+  border: 1px solid #2b2f3a;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.synthesis-progress-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.synthesis-progress-header h3 {
+  margin: 0;
+}
+
+.synthesis-progress-stage-count {
+  color: #8b91a0;
+  font-size: 0.85rem;
+}
+
+.synthesis-progress-stage-label {
+  margin: 0;
+  font-weight: 600;
+}
+
+.synthesis-progress-count {
+  margin: 0;
+  color: #a7adba;
+  font-size: 0.9rem;
+}
+
+.synthesis-progress-bar-track {
+  position: relative;
+  height: 10px;
+  border-radius: 999px;
+  background: #23262f;
+  overflow: hidden;
+}
+
+.synthesis-progress-bar-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #4b7bec;
+  transition: width 0.4s ease;
+}
+
+.synthesis-progress-bar-label {
+  position: absolute;
+  right: 0;
+  top: 14px;
+  font-size: 0.78rem;
+  color: #8b91a0;
+}
+
+.synthesis-progress-meta {
+  display: flex;
+  gap: 1.25rem;
+  font-size: 0.85rem;
+  color: #a7adba;
+  margin-top: 0.75rem;
+}
+
+.synthesis-heartbeat-notice {
+  margin: 0;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.6rem;
+  border-radius: 6px;
+}
+
+.synthesis-heartbeat-waiting_for_update {
+  color: #8b91a0;
+  background: #1b1e26;
+}
+
+.synthesis-heartbeat-no_recent_heartbeat,
+.synthesis-heartbeat-waiting_for_recovery {
+  color: #e0c67f;
+  background: #1c1a10;
+}
+
+.synthesis-stage-timeline {
+  list-style: none;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+}
+
+.synthesis-stage-timeline li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.synthesis-stage-marker {
+  width: 1.1em;
+  text-align: center;
+}
+
+.synthesis-stage-done {
+  color: #7fe0a0;
+}
+
+.synthesis-stage-active {
+  color: #4b7bec;
+  font-weight: 600;
+}
+
+.synthesis-stage-pending {
+  color: #6b7180;
+}
+
+.synthesis-completed-summary {
+  margin-top: 1rem;
+  padding: 0.65rem 1rem;
+  border-radius: 8px;
+  background: #171f14;
+  border: 1px solid #3a4a2e;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1.25rem;
+  font-size: 0.88rem;
+}
+
+.synthesis-completed-summary strong {
+  color: #7fe0a0;
+}
+
+.synthesis-failed-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  align-items: flex-start;
+}
+
+.synthesis-failed-panel button {
+  margin-top: 0.5rem;
+}

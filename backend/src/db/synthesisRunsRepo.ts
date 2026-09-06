@@ -30,6 +30,12 @@ export interface SynthesisRun {
   errorType: string | null;
   sanitizedError: string | null;
   createdAt: Date;
+  updatedAt: Date;
+  /** Countable progress within `currentStage`, when that stage has countable work (see synthesis/progress.ts) — null for a stage that's a single indeterminate Gemini call. */
+  completedItems: number | null;
+  totalItems: number | null;
+  /** A short display label only (e.g. a canonical strategy's name) — never prompt content or raw course material. */
+  currentItem: string | null;
 }
 
 interface SynthesisRunRow {
@@ -56,6 +62,10 @@ interface SynthesisRunRow {
   error_type: string | null;
   sanitized_error: string | null;
   created_at: Date;
+  updated_at: Date;
+  completed_items: number | null;
+  total_items: number | null;
+  current_item: string | null;
 }
 
 function mapRow(row: SynthesisRunRow): SynthesisRun {
@@ -83,6 +93,10 @@ function mapRow(row: SynthesisRunRow): SynthesisRun {
     errorType: row.error_type,
     sanitizedError: row.sanitized_error,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedItems: row.completed_items,
+    totalItems: row.total_items,
+    currentItem: row.current_item,
   };
 }
 
@@ -90,7 +104,7 @@ const COLUMNS = `run_id, course_id, status, current_stage, source_analysis_hash,
   model, synthesis_prompt_version, synthesis_schema_version, synthesizer_version,
   lease_owner, lease_expires_at, last_heartbeat_at, started_at, completed_at,
   input_tokens, output_tokens, thinking_tokens, estimated_cost, processing_duration_seconds,
-  error_type, sanitized_error, created_at`;
+  error_type, sanitized_error, created_at, updated_at, completed_items, total_items, current_item`;
 
 export interface CreateSynthesisRunInput {
   courseId: number;
@@ -203,6 +217,50 @@ export async function renewSynthesisLease(
      WHERE run_id = $1 AND lease_owner = $2
      RETURNING run_id`,
     [runId, leaseOwner, currentStage ?? null],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+export interface SynthesisProgressUpdate {
+  currentStage: string;
+  /** Countable-work counters for this stage — pass null/null when the stage is a single indeterminate Gemini call (never fabricate a percentage for those). */
+  completedItems: number | null;
+  totalItems: number | null;
+  /** Short display label only (e.g. a canonical strategy's name) — never prompt content or raw course material. */
+  currentItem: string | null;
+}
+
+/**
+ * Records a real progress event (a stage transition, or a countable-item
+ * increment within a stage) and — since this is just another authenticated
+ * write against the same row — renews the lease/heartbeat in the same
+ * statement, fenced by lease_owner exactly like renewSynthesisLease. Unlike
+ * that function's COALESCE-based "leave unspecified fields alone" renewal
+ * (used by the plain periodic heartbeat, which has no progress to report),
+ * every field here is set unconditionally to the caller's given value —
+ * including explicit nulls — because a real progress event always knows
+ * the full current state, and a stage transition must be able to clear a
+ * previous stage's stale item counts/currentItem rather than leave them
+ * COALESCEd forward.
+ */
+export async function updateSynthesisProgress(
+  db: Queryable,
+  runId: string,
+  leaseOwner: string,
+  update: SynthesisProgressUpdate,
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE synthesis_runs
+     SET lease_expires_at = now() + interval '${LEASE_DURATION}',
+         last_heartbeat_at = now(),
+         current_stage = $3,
+         completed_items = $4,
+         total_items = $5,
+         current_item = $6,
+         updated_at = now()
+     WHERE run_id = $1 AND lease_owner = $2
+     RETURNING run_id`,
+    [runId, leaseOwner, update.currentStage, update.completedItems, update.totalItems, update.currentItem],
   );
   return (result.rowCount ?? 0) > 0;
 }

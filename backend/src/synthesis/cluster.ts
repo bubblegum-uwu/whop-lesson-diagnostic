@@ -18,11 +18,18 @@ import { CLUSTER_BATCH_RESPONSE_JSON_SCHEMA, CLUSTER_MERGE_RESPONSE_JSON_SCHEMA,
  * rare) falls back to its own singleton cluster in code — no strategy
  * instance is ever silently dropped from the result.
  */
+export interface ClusterBatchProgress {
+  completedBatches: number;
+  totalBatches: number;
+}
+
 export async function clusterStrategyInstances(
   deps: SynthesisStageDeps,
   signatures: StrategySignature[],
   /** Test-only override — production always uses chunkSignatures' default budget. */
   maxEstimatedTokensPerChunk?: number,
+  /** Observability only — reports "Batch N of M" progress for the map step; never called for the single reduce/merge call, which isn't itself a countable batch. */
+  onBatchProgress?: (progress: ClusterBatchProgress) => void,
 ): Promise<{ clusters: ClusterProposal[]; usages: GeminiUsage[] }> {
   if (signatures.length === 0) return { clusters: [], usages: [] };
 
@@ -30,6 +37,7 @@ export async function clusterStrategyInstances(
   const usages: GeminiUsage[] = [];
   const chunkResults: ClusterProposal[][] = [];
 
+  onBatchProgress?.({ completedBatches: 0, totalBatches: chunks.length });
   for (const chunk of chunks) {
     const prompt = buildChunkClusterPrompt(chunk);
     const { data, usage } = await callStructuredStage(
@@ -41,6 +49,7 @@ export async function clusterStrategyInstances(
     );
     usages.push(usage);
     chunkResults.push(data.clusters);
+    onBatchProgress?.({ completedBatches: chunkResults.length, totalBatches: chunks.length });
   }
 
   let clusters: ClusterProposal[];

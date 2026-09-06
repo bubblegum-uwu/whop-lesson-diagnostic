@@ -4,10 +4,12 @@ import {
   synthesizeCourse,
   getCourseSynthesis,
   type SynthesisStatus,
+  type SynthesisRunSummary,
   type CourseSynthesisData,
   type CanonicalStrategyInfo,
   type SynthesizedRule,
   type SourceRef,
+  type SynthesisProgressStage,
 } from "../lib/synthesisApi";
 
 export interface CourseIntelligenceProps {
@@ -18,6 +20,129 @@ export interface CourseIntelligenceProps {
 
 const TABS = ["Overview", "Canonical Strategies", "Core Framework", "Playbook", "Decision Framework", "Conflicts", "Sources"] as const;
 type Tab = (typeof TABS)[number];
+
+/** Short timeline labels — mirrors backend/src/synthesis/progress.ts's PROGRESS_STAGE_ORDER exactly, in order. */
+const STAGE_TIMELINE: { stage: SynthesisProgressStage; label: string }[] = [
+  { stage: "NORMALIZING", label: "Normalize" },
+  { stage: "CLUSTERING", label: "Cluster" },
+  { stage: "CANONICALIZING", label: "Canonical Strategies" },
+  { stage: "CORE_FRAMEWORK", label: "Core Framework" },
+  { stage: "PLAYBOOK", label: "Playbook" },
+  { stage: "DECISION_FRAMEWORK", label: "Decision Framework" },
+  { stage: "VALIDATING", label: "Finalizing" },
+];
+
+function formatElapsed(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+}
+
+const HEARTBEAT_MESSAGES: Record<Exclude<SynthesisRunSummary["heartbeatTier"], "none">, string> = {
+  waiting_for_update: "Waiting for update…",
+  no_recent_heartbeat: "No recent worker heartbeat — this can happen briefly between Gemini calls.",
+  waiting_for_recovery: "Waiting for recovery — the worker will pick this run back up automatically.",
+};
+
+/**
+ * Real, persisted progress (see backend/src/synthesis/progress.ts) — every
+ * field here comes from `run`, itself freshly reloaded from Postgres on
+ * every poll (see CourseIntelligence's refresh()/polling effect below).
+ * The only thing kept in local component state is the once-a-second
+ * re-render that keeps the elapsed-time clock ticking; the elapsed value
+ * itself is always derived from `run.startedAt`/`run.createdAt`, never
+ * accumulated in memory, so a browser refresh reconstructs it exactly.
+ */
+function SynthesisProgressCard({ run }: { run: SynthesisRunSummary }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const startedAt = run.startedAt ?? run.createdAt;
+  const elapsedSeconds = (now - new Date(startedAt).getTime()) / 1000;
+  const stageTimelineIndex = STAGE_TIMELINE.findIndex((s) => s.stage === run.currentStage);
+
+  return (
+    <div className="synthesis-progress-card">
+      <div className="synthesis-progress-header">
+        <h3>Synthesizing Course</h3>
+        <span className="synthesis-progress-stage-count">
+          Stage {run.stageIndex} of {run.totalStages}
+        </span>
+      </div>
+      <p className="synthesis-progress-stage-label">{run.stageLabel}</p>
+
+      {run.isCountable && run.totalItems != null && (
+        <p className="synthesis-progress-count">
+          {run.completedItems ?? 0} of {run.totalItems} complete
+        </p>
+      )}
+      {run.isIndeterminate && (
+        <p className="synthesis-progress-count hint">Gemini is working…</p>
+      )}
+
+      <div className="synthesis-progress-bar-track" role="progressbar" aria-valuenow={run.overallProgress} aria-valuemin={0} aria-valuemax={100}>
+        <div className="synthesis-progress-bar-fill" style={{ width: `${run.overallProgress}%` }} />
+        <span className="synthesis-progress-bar-label">{run.overallProgress}%</span>
+      </div>
+
+      <div className="synthesis-progress-meta">
+        {run.currentItem && (
+          <span>
+            Current: <strong>{run.currentItem}</strong>
+          </span>
+        )}
+        <span>Elapsed: {formatElapsed(elapsedSeconds)}</span>
+      </div>
+
+      {run.heartbeatTier !== "none" && <p className={`synthesis-heartbeat-notice synthesis-heartbeat-${run.heartbeatTier}`}>{HEARTBEAT_MESSAGES[run.heartbeatTier]}</p>}
+
+      <ul className="synthesis-stage-timeline">
+        {STAGE_TIMELINE.map((entry, i) => {
+          const state = stageTimelineIndex === -1 ? "pending" : i < stageTimelineIndex ? "done" : i === stageTimelineIndex ? "active" : "pending";
+          return (
+            <li key={entry.stage} className={`synthesis-stage-${state}`}>
+              <span className="synthesis-stage-marker" aria-hidden="true">
+                {state === "done" ? "✓" : state === "active" ? "●" : "○"}
+              </span>
+              {entry.label}
+            </li>
+          );
+        })}
+      </ul>
+
+      <p className="hint">You may close this page safely — synthesis continues on the server.</p>
+    </div>
+  );
+}
+
+function SynthesisCompletedSummary({ run, canonicalStrategyCount, coverageStatus }: { run: SynthesisRunSummary; canonicalStrategyCount: number; coverageStatus: string | null }) {
+  const minutes = run.processingDurationSeconds != null ? Math.round(run.processingDurationSeconds / 60) : null;
+  return (
+    <div className="synthesis-completed-summary" role="status">
+      <strong>Completed</strong>
+      <span>Duration: {minutes != null ? `${minutes} min` : "—"}</span>
+      <span>Canonical Strategies: {canonicalStrategyCount}</span>
+      <span>Synthesis Cost: {formatCost(run.estimatedCost)}</span>
+      {coverageStatus && <span>Coverage: {coverageStatus}</span>}
+    </div>
+  );
+}
+
+function SynthesisFailedPanel({ run, onRetry }: { run: SynthesisRunSummary; onRetry: () => void }) {
+  return (
+    <div className="error-box synthesis-failed-panel">
+      <strong>Synthesis failed</strong>
+      <span>Stage: {run.stageLabel}</span>
+      <span>Safe error: {run.sanitizedError ?? "Unknown error."}</span>
+      <span>Progress reached: {run.overallProgress}%</span>
+      <button onClick={onRetry}>Retry Synthesis</button>
+    </div>
+  );
+}
 
 function formatCost(value: number | null): string {
   if (value == null) return "—";
@@ -279,16 +404,13 @@ export function CourseIntelligence({ backendUrl, accessToken, connected }: Cours
         </div>
       )}
 
-      {inFlight && (
-        <p className="hint">
-          Synthesizing course{status.latestRun?.currentStage ? ` — ${status.latestRun.currentStage.replace(/_/g, " ")}` : "…"}. This can take several
-          minutes; feel free to navigate away and come back.
-        </p>
-      )}
-      {status.latestRun?.status === "FAILED" && (
-        <div className="error-box">Last synthesis attempt failed: {status.latestRun.sanitizedError ?? "Unknown error."}</div>
-      )}
+      {inFlight && status.latestRun && <SynthesisProgressCard run={status.latestRun} />}
+      {status.latestRun?.status === "FAILED" && <SynthesisFailedPanel run={status.latestRun} onRetry={() => handleSynthesizeClick(false)} />}
       {errorMessage && <div className="error-box">{errorMessage}</div>}
+
+      {status.latestRun?.status === "COMPLETED" && data && (
+        <SynthesisCompletedSummary run={status.latestRun} canonicalStrategyCount={data.canonicalStrategies.length} coverageStatus={coverage?.status ?? null} />
+      )}
 
       {coverage && (
         <div className={`batch-confirm coverage-banner coverage-${coverage.status.toLowerCase()}`} role="status">
