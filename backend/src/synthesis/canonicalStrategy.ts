@@ -30,15 +30,20 @@ const STAGE = "canonical_strategy";
  * Gemini is constrained to a REDUCED response schema
  * (RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA) — this is by far the most
  * complex of the six stages (11 rule categories, each nesting two more
- * arrays of full provenance objects), which real-world testing found the
- * Gemini structured-output API can reject outright once a schema gets this
- * large/deeply nested. Every rule's `sources`/`conflictSources` only need
- * to name lessonId + timestamps + evidence; lessonTitle and
- * strategyInstanceId — which our own code already knows for every member
- * of this cluster — are filled in deterministically by enrichCanonicalStrategy
- * below. The final validated/persisted CanonicalStrategy is byte-for-byte
- * the same rich shape as before; only what Gemini itself has to restate
- * shrinks.
+ * arrays of full provenance objects). Gemini's own documentation warns that
+ * structured-output schemas can be rejected once they get this large/deeply
+ * nested; this is a precautionary reduction against a *plausible* risk
+ * factor, not a change made in response to a confirmed API rejection — the
+ * production 400 that motivated this file's changes lost its stage context
+ * before it could be diagnosed, so whether canonical_strategy specifically
+ * was ever rejected is unverified (see tests/synthesisRealApiSmoke.test.ts,
+ * which exists to verify this directly against the real API). Every rule's
+ * `sources`/`conflictSources` only need to name lessonId + timestamps +
+ * evidence; lessonTitle and strategyInstanceId — which our own code already
+ * knows for every member of this cluster — are filled in deterministically
+ * by enrichCanonicalStrategy below. The final validated/persisted
+ * CanonicalStrategy is byte-for-byte the same rich shape as before; only
+ * what Gemini itself has to restate shrinks.
  */
 export async function synthesizeCanonicalStrategy(
   deps: SynthesisStageDeps,

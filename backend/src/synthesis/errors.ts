@@ -12,10 +12,11 @@ export class SynthesisSchemaValidationError extends Error {
 /**
  * Wraps any failure from GeminiClient.generateStructured() with the stage
  * context it would otherwise lose entirely — before this existed, a real
- * Gemini API failure (e.g. a 400 from an oversized/invalid response_format
- * schema) propagated as a bare "Gemini structured-generation request
- * failed: 400 Request contains an invalid argument.", with no indication
- * of which of the six synthesis stages was even running. The message is a
+ * Gemini API failure (as happened in production: a bare "Gemini
+ * structured-generation request failed: 400 Request contains an invalid
+ * argument.") propagated with no indication of which of the six synthesis
+ * stages was even running, so the production failure's actual cause is
+ * still unknown. The message is a
  * flat key=value line (grep-able in logs) carrying only SAFE diagnostic
  * fields — stage, model, a short schema identifier, and prompt length in
  * characters — never prompt content (which can contain course-derived

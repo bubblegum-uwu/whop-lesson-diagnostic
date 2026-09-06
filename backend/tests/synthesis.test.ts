@@ -629,13 +629,14 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
   });
 });
 
-describe("synthesis response schemas — no Gemini-incompatible nullable type arrays", () => {
-  // The real Gemini API is documented to return a 400 when a JSON Schema
-  // node's `type` is an array (e.g. `["string", "null"]`), even though that's
-  // valid standard JSON Schema — see version.ts's v2 changelog. This is a
-  // permanent regression guard: every response_format schema we hand to
-  // Gemini must represent "nullable" by omitting the field from `required`
-  // instead, never by an array-valued `type`.
+describe("synthesis response schemas — no array-valued 'type' nodes", () => {
+  // NOT a confirmed Gemini incompatibility fix — Google's structured-output
+  // docs list `type: ["string", "null"]` as supported. This guards a
+  // deliberate simplification made after the production 400 (see version.ts's
+  // v2 changelog): every response_format schema we hand to Gemini represents
+  // "nullable" by omitting the field from `required` instead, purely because
+  // that form is simpler and semantically equivalent, not because the array
+  // form was shown to be rejected.
   function assertNoTypeArrays(node: unknown, path: string): void {
     if (Array.isArray(node)) {
       node.forEach((child, i) => assertNoTypeArrays(child, `${path}[${i}]`));

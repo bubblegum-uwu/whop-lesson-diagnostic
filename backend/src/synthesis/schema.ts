@@ -14,9 +14,14 @@ import { z } from "zod";
 // TS type exactly `T | null` (so nothing downstream needs to change) while
 // accepting a field Gemini omits entirely — see the matching JSON schema
 // below, which represents "nullable" by leaving the field out of
-// `required` rather than `type: [T, "null"]`. The real Gemini API is
-// documented to reject the latter with a 400 even though it's valid
-// standard JSON Schema; omission is the form Gemini actually supports.
+// `required` rather than `type: [T, "null"]`. Google's structured-output
+// docs do document `type: [T, "null"]` as supported, so this is NOT a
+// confirmed Gemini incompatibility fix — the production 400's actual
+// cause is still unknown (the original error handling lost which stage
+// even failed). This is kept as a harmless simplification/compatibility
+// hardening because omission-from-`required` is semantically equivalent
+// and strictly simpler for Gemini to satisfy, not because the array form
+// was shown to be rejected.
 const nullableString = () => z.string().nullable().optional().transform((v) => v ?? null);
 const nullableNumber = () => z.number().nullable().optional().transform((v) => v ?? null);
 
@@ -57,10 +62,10 @@ export const ConflictSchema = z.object({
 export type Conflict = z.infer<typeof ConflictSchema>;
 
 // Nullable fields are represented by omission from `required`, NOT
-// `type: [T, "null"]` — the real Gemini API (unlike our Zod validation,
-// which only ever sees data Gemini already returned) is documented to
-// reject the latter with "400 Request contains an invalid argument" even
-// though it's valid standard JSON Schema.
+// `type: [T, "null"]` — kept as a simplification/compatibility hardening
+// (semantically equivalent, strictly simpler), not because the array form
+// was confirmed to cause the production 400. Google's own docs list
+// `type: [T, "null"]` as supported, so it is not the confirmed root cause.
 const sourceRefJsonSchema = {
   type: "object",
   properties: {
@@ -234,19 +239,22 @@ export const CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA = {
 
 // ---- Stage 3 raw wire format ------------------------------------------------
 //
-// Gemini's own documentation warns that very large/deeply nested structured-
-// output schemas can be rejected outright (a 400 "invalid argument"), and
-// canonical-strategy is by far the most complex of the six stages: 11
-// separate arrays of SynthesizedRule, each of which nests TWO more arrays of
-// the full SourceRef shape. Rather than constrain Gemini to the entire final
-// shape in one request, it's asked for a smaller per-source shape here —
-// dropping `lessonTitle` and `strategyInstanceId`, which our own code
-// already knows for every lesson in this cluster's member list — and the
-// full, rich SourceRef (and therefore the full CanonicalStrategy, validated
-// unchanged against CanonicalStrategySchema above) is reconstructed
-// deterministically afterward; see canonicalStrategy.ts's enrichment step.
-// No provenance, conflict, or persisted field is dropped — only what Gemini
-// itself has to restate shrinks.
+// Gemini's documentation warns that very large/deeply nested structured-
+// output schemas *may* be rejected, and canonical-strategy is by far the
+// most complex of the six stages: 11 separate arrays of SynthesizedRule,
+// each of which nests TWO more arrays of the full SourceRef shape. This is
+// a plausible risk factor, not a confirmed cause of the production 400 —
+// the original error handling lost which stage even failed, so the actual
+// root cause is still unknown pending the real-API smoke test. As a
+// precautionary complexity reduction (validated by that smoke test),
+// Gemini is asked for a smaller per-source shape here — dropping
+// `lessonTitle` and `strategyInstanceId`, which our own code already knows
+// for every lesson in this cluster's member list — and the full, rich
+// SourceRef (and therefore the full CanonicalStrategy, validated unchanged
+// against CanonicalStrategySchema above) is reconstructed deterministically
+// afterward; see canonicalStrategy.ts's enrichment step. No provenance,
+// conflict, or persisted field is dropped — only what Gemini itself has to
+// restate shrinks.
 
 const rawSourceRefJsonSchema = {
   type: "object",
