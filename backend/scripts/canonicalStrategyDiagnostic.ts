@@ -63,6 +63,23 @@ const VALID_THINKING_LEVELS: ReadonlySet<string> = new Set<GeminiThinkingLevel>(
  * TARGET_CLUSTER_NAME still works as before and takes precedence if both
  * are set.
  *
+ * TARGET_MULTI_MEMBER_CLUSTER=1 selects the LARGEST cluster with more than
+ * one member instance (by memberInstanceIds.length) — useful for testing
+ * canonical_strategy (and any experimental thinking_level) against a case
+ * where Gemini must actually reconcile overlapping/conflicting evidence
+ * across multiple lesson instances, not just the single-member case:
+ *
+ *   TARGET_MULTI_MEMBER_CLUSTER=1 \
+ *     CANONICAL_STRATEGY_DIAGNOSTIC=1 npx tsx scripts/canonicalStrategyDiagnostic.ts
+ *
+ * Selection precedence when more than one of these is set: TARGET_CLUSTER_NAME,
+ * then TARGET_CLUSTER_INDEX, then TARGET_MULTI_MEMBER_CLUSTER, then the
+ * first cluster (the default). The selected cluster's generated name (and,
+ * for TARGET_MULTI_MEMBER_CLUSTER, its member count) is always printed
+ * before canonical_strategy runs, regardless of which selector was used —
+ * fails clearly (no cluster produced/index out of range/no cluster with
+ * more than one member) rather than silently falling back to the default.
+ *
  * Optional CANONICAL_STRATEGY_THINKING_LEVEL ("minimal" | "low" | "medium" |
  * "high") passes generation_config.thinking_level through for this run's
  * canonical_strategy call only — see gemini/client.ts's GeminiThinkingLevel.
@@ -141,6 +158,7 @@ async function main(): Promise<void> {
 
     const targetName = process.env.TARGET_CLUSTER_NAME;
     const rawTargetIndex = process.env.TARGET_CLUSTER_INDEX;
+    const targetMultiMember = process.env.TARGET_MULTI_MEMBER_CLUSTER === "1";
 
     let targetCluster: (typeof clusters)[number] | undefined;
     if (targetName) {
@@ -164,6 +182,19 @@ async function main(): Promise<void> {
       }
       targetCluster = clusters[targetIndex];
       console.log(`selected cluster at index ${targetIndex}: "${targetCluster.proposedCanonicalName}"`);
+    } else if (targetMultiMember) {
+      // Largest genuinely multi-member cluster (member count > 1) — for
+      // testing whether canonical_strategy (and any experimental
+      // thinking_level) still reconciles overlapping/conflicting evidence
+      // across multiple lesson instances, not just the single-member case.
+      const multiMemberClusters = clusters.filter((c) => c.memberInstanceIds.length > 1);
+      if (multiMemberClusters.length === 0) {
+        console.error("No multi-member cluster was produced (every cluster has exactly 1 member) — nothing to diagnose for TARGET_MULTI_MEMBER_CLUSTER=1.");
+        process.exitCode = 1;
+        return;
+      }
+      targetCluster = multiMemberClusters.reduce((largest, c) => (c.memberInstanceIds.length > largest.memberInstanceIds.length ? c : largest));
+      console.log(`selected largest multi-member cluster: "${targetCluster.proposedCanonicalName}" (member_count=${targetCluster.memberInstanceIds.length})`);
     } else {
       targetCluster = clusters[0];
     }
