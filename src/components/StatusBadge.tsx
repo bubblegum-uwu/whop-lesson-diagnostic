@@ -10,7 +10,13 @@ const STATUS_LABELS: Record<AnalysisJobStatus, string> = {
   ANALYZING: "Analyzing",
   VALIDATING: "Validating",
   COMPLETED: "Completed",
-  NO_STRATEGY: "No strategy",
+  // Persisted status/enum value is unchanged (NO_STRATEGY) — this is a
+  // display-only rename. "No standalone setup" is more accurate: a lesson
+  // can legitimately teach critical course knowledge (risk management,
+  // position sizing, psychology, trade management, ...) without teaching a
+  // standalone, clusterable trading setup — see synthesis/runSynthesis.ts's
+  // coverage-gap note for how Phase 3.4 surfaces this distinction.
+  NO_STRATEGY: "No standalone setup",
   FAILED: "Failed",
   AUTH_REQUIRED: "Auth required",
   CANCELLED: "Cancelled",

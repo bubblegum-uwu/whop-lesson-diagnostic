@@ -114,6 +114,7 @@ function makeGemini(overrides: Partial<GeminiClient> = {}): GeminiClient {
     waitUntilActive: vi.fn(async (f: GeminiFileRef) => f),
     analyzeVideo: vi.fn(async () => ({ text: validJson, usage: { inputTokens: 1000, outputTokens: 100, thinkingTokens: 10 } })),
     deleteFile: vi.fn(async () => undefined),
+    generateStructured: vi.fn(async () => ({ text: "{}", usage: { inputTokens: 0, outputTokens: 0, thinkingTokens: 0 } })),
     ...overrides,
   };
 }

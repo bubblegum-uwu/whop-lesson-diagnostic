@@ -286,6 +286,45 @@ button:disabled {
   color: #8b91a0;
 }
 
+/* ---- Phase 3.4: course strategy synthesis (Course Intelligence panel) ---- */
+
+.support-level {
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.68rem;
+  background: #1c2028;
+  color: #8b91a0;
+}
+
+.support-conflicting { background: #331717; color: #ff9b9b; }
+.support-variant { background: #332c17; color: #e0c67f; }
+.support-multi_source, .support-repeated_explicit { background: #17331f; color: #7fe0a0; }
+.support-single_source, .support-inferred { background: #17232f; color: #7fbfe0; }
+
+.coverage-banner {
+  border-color: #262a33;
+}
+
+.coverage-complete {
+  border-color: #3a4a2e;
+  background: #171f14;
+}
+
+.coverage-partial {
+  border-color: #4a3f1a;
+  background: #1c1a10;
+}
+
+.ci-tabs {
+  position: static;
+}
+
+.ci-tab-content {
+  margin-top: 0.75rem;
+}
+
 .rule-description {
   margin: 0 0 0.25rem;
 }

@@ -5,6 +5,7 @@ import { ErrorResult } from "./components/ErrorResult";
 import { AnalyzeLesson } from "./components/AnalyzeLesson";
 import { CourseTable } from "./components/CourseTable";
 import { DashboardSummary } from "./components/DashboardSummary";
+import { CourseIntelligence } from "./components/CourseIntelligence";
 import { FindWhopUserId, type FindWhopUserIdState } from "./components/FindWhopUserId";
 import {
   startWhopOAuth,
@@ -372,6 +373,7 @@ export default function App() {
       {backendUrl && (
         <>
           <DashboardSummary summary={courseState.summary} />
+          <CourseIntelligence backendUrl={backendUrl} accessToken={courseState.accessToken} connected={courseState.connected} />
           <CourseTable
             courseTitle={courseState.courseTitle}
             lessons={courseState.lessons}

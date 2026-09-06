@@ -52,6 +52,13 @@ export interface GeminiClient {
   waitUntilActive(file: GeminiFileRef, pollIntervalMs?: number): Promise<GeminiFileRef>;
   analyzeVideo(file: GeminiFileRef, model: string, processingMode: "agentic" | "static"): Promise<AnalyzeVideoResult>;
   deleteFile(file: GeminiFileRef): Promise<void>;
+  /**
+   * Text-only, schema-constrained generation — no file upload/wait/delete
+   * involved. Used by course-strategy synthesis (Phase 3.4), which
+   * processes already-extracted structured JSON, never raw video, so it
+   * deliberately never touches the video-specific methods above.
+   */
+  generateStructured(prompt: string, model: string, schema: object): Promise<AnalyzeVideoResult>;
 }
 
 /** Extracts token usage from `Interaction.usage` — never a second Gemini call. */
@@ -178,5 +185,27 @@ export function createGeminiClient(apiKey: string): GeminiClient {
     }
   }
 
-  return { uploadFile, waitUntilActive, analyzeVideo, deleteFile };
+  async function generateStructured(prompt: string, model: string, schema: object): Promise<AnalyzeVideoResult> {
+    try {
+      const textContent: Interactions.TextContent = { type: "text", text: prompt };
+      const interaction = await ai.interactions.create({
+        model,
+        input: [textContent],
+        response_format: { type: "text", mime_type: "application/json", schema },
+      });
+
+      const text = extractOutputText(interaction);
+      if (!text) {
+        throw new GeminiAnalysisError("Gemini returned an empty response.");
+      }
+      return { text, usage: extractUsage(interaction) };
+    } catch (err) {
+      if (err instanceof GeminiAnalysisError) throw err;
+      throw new GeminiAnalysisError(
+        `Gemini structured-generation request failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  return { uploadFile, waitUntilActive, analyzeVideo, deleteFile, generateStructured };
 }

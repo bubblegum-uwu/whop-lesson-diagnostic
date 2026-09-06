@@ -154,6 +154,20 @@ export async function getLatestByLessons(db: Queryable, lessonIds: number[]): Pr
   return map;
 }
 
+/**
+ * Fetches an EXACT, already-frozen set of analyses by id — used by course
+ * synthesis (Phase 3.4), which fixes its source analysis_ids at run-creation
+ * time (see synthesisRunsRepo.createSynthesisRun) rather than re-resolving
+ * "latest per lesson" again when the worker later picks the run up, so a
+ * lesson re-analyzed while a run sits QUEUED can never change what that run
+ * actually synthesizes from.
+ */
+export async function getByAnalysisIds(db: Queryable, analysisIds: number[]): Promise<LessonAnalysis[]> {
+  if (analysisIds.length === 0) return [];
+  const result = await db.query(`SELECT ${COLUMNS} FROM lesson_analyses WHERE analysis_id = ANY($1::bigint[])`, [analysisIds]);
+  return (result.rows as LessonAnalysisRow[]).map(mapRow);
+}
+
 export async function getByJobId(db: Queryable, jobId: string): Promise<LessonAnalysis | null> {
   const result = await db.query(`SELECT ${COLUMNS} FROM lesson_analyses WHERE job_id = $1`, [jobId]);
   return result.rows[0] ? mapRow(result.rows[0] as LessonAnalysisRow) : null;

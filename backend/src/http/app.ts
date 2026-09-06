@@ -19,6 +19,7 @@ import { createEnqueueJobsHandler, createRetryJobHandler, createCancelJobHandler
 import { createLessonAnalysisDetailHandler } from "./routes/lessonAnalysisDetail.js";
 import { createAnalysisSummaryHandler } from "./routes/analysisSummary.js";
 import { createAnalysisEventsHandler } from "./routes/analysisEvents.js";
+import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "./routes/courseSynthesis.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
 import { requireOperator } from "./middleware/operatorAuth.js";
 import { createJobTrigger } from "../jobs/runJobTrigger.js";
@@ -108,6 +109,15 @@ export function createApp(config: AppConfig): Express {
     createAnalysisSummaryHandler({ pool, whopCourseId: config.course.courseId }),
   );
   app.get("/api/analysis/events", operatorAuth, createAnalysisEventsHandler({ pool }));
+
+  // Phase 3.4: course-level strategy synthesis. Reuses the same jobTrigger
+  // as lesson-analysis enqueueing (analysisJobsDeps above) — one Cloud Run
+  // Job, one entrypoint, a second independent processing phase (see
+  // server.ts / worker/synthesisLoop.ts). No new infrastructure.
+  const courseSynthesisDeps = { pool, whopCourseId: config.course.courseId, geminiModel: config.geminiModel, jobTrigger };
+  app.get("/api/course/synthesis-status", operatorAuth, createSynthesisStatusHandler(courseSynthesisDeps));
+  app.post("/api/course/synthesize", operatorAuth, createSynthesizeHandler(courseSynthesisDeps));
+  app.get("/api/course/synthesis", operatorAuth, createGetSynthesisHandler(courseSynthesisDeps));
 
   const oidcVerifier = createGoogleOidcVerifier(publicApiBaseUrl, schedulerServiceAccountEmail);
   app.post("/internal/ensure-worker-running", createEnsureWorkerRunningHandler({ pool, jobTrigger, oidcVerifier }));

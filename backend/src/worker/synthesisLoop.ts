@@ -1,0 +1,194 @@
+import { randomUUID } from "node:crypto";
+import type { Pool, PoolClient } from "pg";
+import {
+  claimNextEligibleSynthesisRun,
+  renewSynthesisLease,
+  markSynthesisCompleted,
+  markSynthesisFailed,
+  type SynthesisRun,
+} from "../db/synthesisRunsRepo.js";
+import { createStrategyCluster } from "../db/strategyClustersRepo.js";
+import { createCanonicalStrategy } from "../db/canonicalStrategiesRepo.js";
+import { createCoursePlaybook } from "../db/coursePlaybooksRepo.js";
+import { gatherSynthesisInput } from "../synthesis/sourceData.js";
+import { runSynthesis, type SynthesisResult } from "../synthesis/runSynthesis.js";
+import type { SynthesisStageDeps } from "../synthesis/geminiStage.js";
+import { startHeartbeat } from "./heartbeat.js";
+import { estimateCost } from "../pricing/geminiPricing.js";
+import { classifyError } from "../pipeline/errorClassification.js";
+import { globalRedactor, type SecretRedactor } from "../lib/redact.js";
+import { logger as defaultLogger, type SafeLogger } from "../lib/logger.js";
+
+export interface SynthesisWorkerDeps {
+  pool: Pool;
+  gemini: SynthesisStageDeps["gemini"];
+  model: string;
+  redactor?: SecretRedactor;
+  logger?: SafeLogger;
+  /** Overridable only for tests — production always uses the default. */
+  heartbeatIntervalMs?: number;
+}
+
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
+
+/**
+ * A SEPARATE session-level advisory lock key from advisoryLock.ts's
+ * WORKER_LOCK_KEY, deliberately not sharing that function/key — synthesis
+ * runs are rare, user-initiated, and independent of the continuous
+ * lesson-analysis queue; giving them their own lock means a synthesis run
+ * in progress never blocks (or is blocked by) lesson-job claiming, and vice
+ * versa. This never touches worker/advisoryLock.ts or mainLoop.ts.
+ */
+const SYNTHESIS_LOCK_KEY = 5_902_331_005;
+
+interface SynthesisLock {
+  acquired: boolean;
+  release(): Promise<void>;
+}
+
+async function acquireSynthesisLock(pool: Pool): Promise<SynthesisLock> {
+  const client: PoolClient = await pool.connect();
+  client.on("error", () => undefined);
+  const result = await client.query<{ pg_try_advisory_lock: boolean }>("SELECT pg_try_advisory_lock($1)", [SYNTHESIS_LOCK_KEY]);
+  const acquired = result.rows[0]?.pg_try_advisory_lock === true;
+
+  if (!acquired) {
+    client.release();
+    return { acquired: false, release: async () => undefined };
+  }
+
+  let released = false;
+  return {
+    acquired: true,
+    release: async () => {
+      if (released) return;
+      released = true;
+      try {
+        await client.query("SELECT pg_advisory_unlock($1)", [SYNTHESIS_LOCK_KEY]);
+      } finally {
+        client.release();
+      }
+    },
+  };
+}
+
+async function processOneSynthesisRun(run: SynthesisRun, leaseOwner: string, deps: SynthesisWorkerDeps): Promise<void> {
+  const redactor = deps.redactor ?? globalRedactor;
+  const log = deps.logger ?? defaultLogger;
+
+  let leaseLost = false;
+  let renewChain: Promise<boolean> = Promise.resolve(true);
+  function renewNow(currentStage?: string): Promise<boolean> {
+    const next = renewChain.then(async () => {
+      if (leaseLost) return false;
+      const ok = await renewSynthesisLease(deps.pool, run.runId, leaseOwner, currentStage);
+      if (!ok) leaseLost = true;
+      return ok;
+    });
+    renewChain = next.catch(() => false);
+    return next;
+  }
+
+  const heartbeatIntervalMs = deps.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
+  const heartbeat = startHeartbeat({ intervalMs: heartbeatIntervalMs, renew: () => renewNow() });
+
+  const startedAt = new Date();
+  try {
+    const courseTitleResult = await deps.pool.query<{ title: string }>(`SELECT title FROM courses WHERE id = $1`, [run.courseId]);
+    const courseTitle = courseTitleResult.rows[0]?.title ?? "Course";
+
+    const input = await gatherSynthesisInput(deps.pool, courseTitle, run.sourceAnalysisIds);
+
+    const result: SynthesisResult = await runSynthesis({ gemini: deps.gemini, model: deps.model }, input, (stage) => {
+      void renewNow(stage);
+    });
+
+    if (leaseLost) throw new LeaseLostError();
+
+    const completedAt = new Date();
+    const estimatedCost = estimateCost(result.usage);
+
+    const client = await deps.pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const { cluster, canonicalStrategy } of result.clusters) {
+        const clusterRow = await createStrategyCluster(client, run.runId, cluster);
+        await createCanonicalStrategy(client, run.runId, clusterRow.clusterId, canonicalStrategy);
+      }
+      await createCoursePlaybook(client, {
+        runId: run.runId,
+        title: result.playbook.title,
+        coreFramework: result.coreFramework,
+        playbook: result.playbook,
+        decisionFramework: result.decisionFramework,
+      });
+
+      const succeeded = await markSynthesisCompleted(client, run.runId, leaseOwner, {
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        thinkingTokens: result.usage.thinkingTokens,
+        estimatedCost,
+        processingDurationSeconds: Math.round((completedAt.getTime() - startedAt.getTime()) / 1000),
+      });
+      if (!succeeded) {
+        await client.query("ROLLBACK");
+        log.warn("Discarding synthesis result — lease was reclaimed before completion.", { runId: run.runId });
+        return;
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    if (err instanceof LeaseLostError) {
+      log.warn("Abandoning synthesis run — lease was reclaimed mid-processing.", { runId: run.runId });
+      return;
+    }
+    const classification = classifyError(err);
+    const sanitizedMessage = redactor.redact(err instanceof Error ? err.message : "Unknown synthesis worker error.");
+    log.error("Course synthesis run failed", { runId: run.runId, classification, message: sanitizedMessage });
+    await markSynthesisFailed(deps.pool, run.runId, leaseOwner, classification, sanitizedMessage);
+  } finally {
+    heartbeat.stop();
+  }
+}
+
+class LeaseLostError extends Error {
+  constructor() {
+    super("Synthesis lease was reclaimed by another worker execution.");
+    this.name = "LeaseLostError";
+  }
+}
+
+/**
+ * The Cloud Run Job entrypoint's SECOND phase — called after runWorkerLoop
+ * (lesson analysis) has already drained, from the SAME container/execution
+ * (see server.ts). Claims and processes eligible synthesis_runs one at a
+ * time until none remain, exactly like runWorkerLoop's shape but scoped to
+ * its own advisory lock, so it can never interact with or be blocked by
+ * the lesson-analysis queue's own lock/claim loop.
+ */
+export async function runSynthesisLoop(deps: SynthesisWorkerDeps): Promise<void> {
+  const log = deps.logger ?? defaultLogger;
+  const lock = await acquireSynthesisLock(deps.pool);
+  if (!lock.acquired) {
+    log.info("Another synthesis worker execution already holds the lock — exiting.", {});
+    return;
+  }
+
+  const leaseOwner = `${process.env.CLOUD_RUN_EXECUTION ?? "local"}:${process.env.CLOUD_RUN_TASK_INDEX ?? "0"}:${randomUUID()}`;
+
+  try {
+    for (;;) {
+      const run = await claimNextEligibleSynthesisRun(deps.pool, leaseOwner);
+      if (!run) break;
+      log.info("Claimed synthesis run", { runId: run.runId, courseId: run.courseId });
+      await processOneSynthesisRun(run, leaseOwner, deps);
+    }
+  } finally {
+    await lock.release();
+  }
+}
