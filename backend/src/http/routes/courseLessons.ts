@@ -63,6 +63,7 @@ export function createCourseLessonsHandler(deps: CourseLessonsRouteDeps) {
                 stageProgress: job.stageProgress,
                 overallProgress: job.overallProgress,
                 lastHeartbeatAt: job.lastHeartbeatAt,
+                leaseExpiresAt: job.leaseExpiresAt,
                 attemptCount: job.attemptCount,
                 sanitizedError: job.sanitizedError,
                 errorType: job.errorType,

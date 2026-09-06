@@ -13,10 +13,28 @@ body {
   color: #e7e9ee;
 }
 
+/* #root is body's flex item; without an explicit width it shrink-wraps to
+   its content's preferred size instead of filling the row, which silently
+   caps .app-shell's max-width below (and, in turn, the Course table) to
+   whatever narrow width happens to fit — the real mechanism behind the
+   reported table clipping, independent of any single column's own CSS. */
+#root {
+  width: 100%;
+}
+
 .app-shell {
   width: 100%;
   max-width: 720px;
   padding: 2.5rem 1.5rem 4rem;
+}
+
+/* The Course table needs real desktop width to stay scannable without
+   horizontal scrolling (Lesson/Result columns, the docked drawer) — the
+   720px cap above is sized for the single-column diagnostic form, not a
+   10-column data table. Applied only once a backend is configured, which is
+   exactly when the Course table/dashboard can render at all. */
+.app-shell-wide {
+  max-width: 1400px;
 }
 
 .config-form {
@@ -497,9 +515,24 @@ button:disabled {
 .status-success { background: #17331f; color: #7fe0a0; }
 .status-error { background: #331717; color: #ff9b9b; }
 
-.stale-hint {
-  color: #e0c67f;
+.heartbeat-hint {
   font-size: 0.72rem;
+}
+
+/* Soft "still working" hint — 30-90s since the last heartbeat. */
+.heartbeat-waiting {
+  color: #8b91a0;
+}
+
+/* No heartbeat in 90s+ but the job isn't terminal — never implies failure. */
+.heartbeat-no_heartbeat {
+  color: #e0c67f;
+}
+
+/* The lease itself has actually expired — a stronger, but still non-failure, signal. */
+.heartbeat-recovery {
+  color: #e0a37f;
+  font-weight: 600;
 }
 
 .progress-cell {
@@ -578,20 +611,41 @@ button:disabled {
   background: #262a33;
 }
 
-/* Lesson column gets the most width and up to two lines before truncating. */
-.col-lesson {
+/* Lesson/Result/Chapter columns: bounded width, up to two lines before
+   ellipsizing. The line-clamp lives on an INNER <span> (`.clamp-2-lines`),
+   never on the <td> itself — a <td> needs to stay `display: table-cell` to
+   take part in the table's column grid at all; overriding that to
+   `display: -webkit-box` (required for -webkit-line-clamp) knocks it out of
+   table layout entirely, and adjacent cells like this end up stacking
+   vertically instead of sitting side by side as columns.
+   Also scoped as `.course-table td.col-*` (not a bare `.col-*` class)
+   because `.course-table td` below sets `white-space: nowrap` at
+   equal-or-higher specificity — a bare class here would silently lose that
+   fight and force the inner span onto one unwrapped, clipped line. */
+.course-table td.col-lesson {
   min-width: 220px;
   max-width: 420px;
   white-space: normal;
+}
+
+.course-table td.col-result {
+  min-width: 180px;
+  max-width: 300px;
+  white-space: normal;
+}
+
+/* Chapter may wrap to a couple of lines but must never grow to consume
+   excessive width — it's a secondary column. */
+.course-table td.col-chapter {
+  max-width: 160px;
+  white-space: normal;
+}
+
+.clamp-2-lines {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-}
-
-th.col-lesson {
-  white-space: nowrap;
-  display: table-cell;
 }
 
 /* Table = summary only. Scrolls its own body; the sticky header/toolbar
@@ -713,9 +767,33 @@ th.col-lesson {
   }
 }
 
-/* Keep these columns visible on narrow-but-still-desktop screens; secondary
-   columns (#, chapter, duration, cost) move into the detail drawer instead. */
-@media (max-width: 1000px) {
+/* ---- Table area + detail drawer live side by side as real flex children,
+   not an overlay on top of the table — so opening the drawer narrows
+   .course-main instead of hiding columns underneath it. .course-main is its
+   own container-query context so secondary columns respond to ITS width
+   (shrunk by a docked drawer), not the full viewport, which a media query
+   can't express. Collapses back to the old full-screen overlay only below
+   the same breakpoint the table itself collapses to cards (see
+   useIsNarrow(NARROW_BREAKPOINT) in CourseTable.tsx) — a docked sidebar
+   makes no sense once the table beside it is gone. ---- */
+.course-layout {
+  display: flex;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.course-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  container-type: inline-size;
+  container-name: course-main;
+}
+
+/* Keep these columns visible until .course-main itself gets this narrow —
+   whether that's the viewport shrinking or a docked drawer eating the
+   width. Secondary columns (#, chapter, duration, cost) move into the
+   detail drawer instead. */
+@container course-main (max-width: 1000px) {
   .hide-narrow {
     display: none;
   }
@@ -725,24 +803,36 @@ th.col-lesson {
    Opening a lesson never changes the table's own dimensions. ---- */
 
 .drawer-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(5, 6, 9, 0.55);
-  z-index: 90;
+  display: none;
 }
 
 .lesson-drawer {
-  position: fixed;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: min(480px, 100vw);
+  flex: 0 0 min(480px, 38vw);
   background: #14161b;
   border-left: 1px solid #262a33;
-  z-index: 91;
   display: flex;
   flex-direction: column;
-  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+}
+
+@media (max-width: 720px) {
+  .drawer-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(5, 6, 9, 0.55);
+    z-index: 90;
+  }
+
+  .lesson-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    flex-basis: auto;
+    width: min(480px, 100vw);
+    z-index: 91;
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.35);
+  }
 }
 
 @media (max-width: 640px) {

@@ -366,7 +366,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={backendUrl ? "app-shell app-shell-wide" : "app-shell"}>
       <FindWhopUserId state={identifyState} onStart={handleFindUserId} />
 
       {backendUrl && (
