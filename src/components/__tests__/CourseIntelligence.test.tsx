@@ -403,4 +403,40 @@ describe("CourseIntelligence", () => {
     await new Promise((r) => setTimeout(r, 1200));
     expect(screen.getByText("42%")).toBeInTheDocument();
   });
+
+  it("shows the full diagnostic snapshot on failure — progress within stage, current item, duration, last heartbeat, and cost so far — for retrying a failed synthesis", async () => {
+    const status = baseStatus({
+      canSynthesizeNow: true,
+      latestRun: baseRunSummary({
+        status: "FAILED",
+        currentStage: "CANONICALIZING",
+        stageLabel: "Building Canonical Strategies",
+        overallProgress: 38,
+        isCountable: true,
+        completedItems: 1,
+        totalItems: 2,
+        currentItem: "Order Block Sweep",
+        startedAt: "2026-01-01T00:00:00Z",
+        completedAt: "2026-01-01T00:03:00Z",
+        lastHeartbeatAt: "2026-01-01T00:02:50Z",
+        processingDurationSeconds: 180,
+        estimatedCost: 0.07,
+        errorType: "permanent",
+        sanitizedError: 'Gemini did not return valid JSON for stage "canonical_strategy".',
+      }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+
+    expect(await screen.findByText("Synthesis failed")).toBeInTheDocument();
+    expect(screen.getByText("Progress within stage: 1 of 2")).toBeInTheDocument();
+    expect(screen.getByText("Order Block Sweep")).toBeInTheDocument();
+    expect(screen.getByText("Duration: 3 min")).toBeInTheDocument();
+    expect(screen.getByText("Last heartbeat: 10s before failure")).toBeInTheDocument();
+    expect(screen.getByText("Cost so far: $0.07")).toBeInTheDocument();
+    expect(screen.getByText(/canonical_strategy/)).toBeInTheDocument();
+    // Never the raw Gemini output or prompt content — only the safe, already-redacted message.
+    expect(screen.queryByText(/synthesizing ONE canonical trading strategy/)).not.toBeInTheDocument();
+  });
 });

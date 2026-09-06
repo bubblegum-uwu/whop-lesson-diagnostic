@@ -27,12 +27,22 @@ export type SynthesisStage = "NORMALIZING" | "CLUSTERING" | "CANONICALIZING" | "
  * call with nothing to count sub-progress against; see progress.ts, which
  * treats a null total as "indeterminate" and never fabricates a
  * percentage for it).
+ *
+ * `cumulativeUsage` is the sum of every Gemini call that has actually
+ * completed so far in THIS run (across all stages, not just the current
+ * one) — reads directly off the same `usages` array this function already
+ * accumulates for the final result, so it can never drift from the
+ * authoritative total. Exists so a run that fails partway through still
+ * has an accurate "cost so far" persisted (see worker/synthesisLoop.ts),
+ * instead of losing all completed-call usage the moment the function
+ * throws before returning its final SynthesisResult.
  */
 export interface SynthesisProgressEvent {
   stage: SynthesisStage;
   completedItems: number | null;
   totalItems: number | null;
   currentItem: string | null;
+  cumulativeUsage: GeminiUsage;
 }
 
 export interface SourceIndexEntry {
@@ -89,46 +99,57 @@ export interface SynthesisResult {
  * core framework/playbook/decision framework each fire exactly one
  * "stage started" event with null counts, since each is a single Gemini
  * call with nothing to count sub-progress against.
+ *
+ * Every `onProgress` call is AWAITED before the next unit of work begins —
+ * this is deliberate, not an oversight: it's what guarantees that "cluster
+ * i complete" is durably persisted before cluster i+1 is even attempted,
+ * so a failure on cluster i+1 can never race an unpersisted completion of
+ * cluster i. `onProgress` may return void or a Promise; the worker's
+ * implementation resolves once its DB write lands.
  */
 export async function runSynthesis(
   deps: SynthesisStageDeps,
   input: RunSynthesisInput,
-  onProgress?: (event: SynthesisProgressEvent) => void,
+  onProgress?: (event: SynthesisProgressEvent) => void | Promise<void>,
 ): Promise<SynthesisResult> {
   const usages: GeminiUsage[] = [];
-  const emit = (stage: SynthesisStage, completedItems: number | null, totalItems: number | null, currentItem: string | null) =>
-    onProgress?.({ stage, completedItems, totalItems, currentItem });
+  const emit = async (stage: SynthesisStage, completedItems: number | null, totalItems: number | null, currentItem: string | null) => {
+    await onProgress?.({ stage, completedItems, totalItems, currentItem, cumulativeUsage: sumUsages(usages) });
+  };
 
-  emit("NORMALIZING", 0, input.instances.length, null);
+  await emit("NORMALIZING", 0, input.instances.length, null);
   const signatures = input.instances.map(buildStrategySignature);
-  emit("NORMALIZING", input.instances.length, input.instances.length, null);
+  await emit("NORMALIZING", input.instances.length, input.instances.length, null);
 
-  emit("CLUSTERING", 0, null, null); // total batch count isn't known until chunking happens inside clusterStrategyInstances
+  await emit("CLUSTERING", 0, null, null); // total batch count isn't known until chunking happens inside clusterStrategyInstances
   const onBatchProgress = (p: ClusterBatchProgress) => emit("CLUSTERING", p.completedBatches, p.totalBatches, null);
   const { clusters, usages: clusterUsages } = await clusterStrategyInstances(deps, signatures, undefined, onBatchProgress);
   usages.push(...clusterUsages);
 
-  emit("CANONICALIZING", 0, clusters.length, clusters[0]?.proposedCanonicalName ?? null);
+  await emit("CANONICALIZING", 0, clusters.length, clusters[0]?.proposedCanonicalName ?? null);
   const instancesById = new Map(input.instances.map((i) => [i.strategyInstanceId, i]));
   const clustersWithStrategy: ClusterWithStrategy[] = [];
   for (let i = 0; i < clusters.length; i++) {
     const cluster = clusters[i];
-    emit("CANONICALIZING", i, clusters.length, cluster.proposedCanonicalName);
+    await emit("CANONICALIZING", i, clusters.length, cluster.proposedCanonicalName);
     const members = cluster.memberInstanceIds
       .map((id) => instancesById.get(id))
       .filter((m): m is StrategyInstanceRecord => m != null);
     const { canonicalStrategy, usage } = await synthesizeCanonicalStrategy(deps, cluster, members);
     usages.push(usage);
     clustersWithStrategy.push({ cluster, canonicalStrategy });
-    emit("CANONICALIZING", i + 1, clusters.length, cluster.proposedCanonicalName);
+    // Awaited: this cluster's completion (and its contribution to
+    // cumulativeUsage) is durably persisted before the loop even
+    // considers starting cluster i+1 — see the doc comment above.
+    await emit("CANONICALIZING", i + 1, clusters.length, cluster.proposedCanonicalName);
   }
   const canonicalStrategies = clustersWithStrategy.map((c) => c.canonicalStrategy);
 
-  emit("CORE_FRAMEWORK", null, null, null);
+  await emit("CORE_FRAMEWORK", null, null, null);
   const { coreFramework, usage: coreFrameworkUsage } = await extractCoreFramework(deps, canonicalStrategies, input.instances);
   usages.push(coreFrameworkUsage);
 
-  emit("PLAYBOOK", null, null, null);
+  await emit("PLAYBOOK", null, null, null);
   const { playbook: playbookWithoutSourceIndex, usage: playbookUsage } = await synthesizePlaybook(
     deps,
     input.courseTitle,
@@ -146,7 +167,7 @@ export async function runSynthesis(
     frameworkCoverage: buildFrameworkCoverage(input),
   };
 
-  emit("DECISION_FRAMEWORK", null, null, null);
+  await emit("DECISION_FRAMEWORK", null, null, null);
   const { decisionFramework, usage: decisionFrameworkUsage } = await synthesizeDecisionFramework(
     deps,
     canonicalStrategies,

@@ -132,13 +132,39 @@ function SynthesisCompletedSummary({ run, canonicalStrategyCount, coverageStatus
   );
 }
 
+/**
+ * Every field here is exactly what was last durably persisted before the
+ * failure (see backend/src/worker/synthesisLoop.ts's reportProgress —
+ * awaited after every completed canonical strategy, never batched) —
+ * never re-derived or guessed. Deliberately never renders run.sanitizedError
+ * as anything but plain text: it's already redacted server-side, but this
+ * component still never interpolates it into anything that could be
+ * mistaken for prompt/course content.
+ */
 function SynthesisFailedPanel({ run, onRetry }: { run: SynthesisRunSummary; onRetry: () => void }) {
+  const minutes = run.processingDurationSeconds != null ? Math.round(run.processingDurationSeconds / 60) : null;
+  const lastHeartbeatSecondsBeforeFailure =
+    run.lastHeartbeatAt && run.completedAt ? Math.max(0, Math.round((new Date(run.completedAt).getTime() - new Date(run.lastHeartbeatAt).getTime()) / 1000)) : null;
+
   return (
     <div className="error-box synthesis-failed-panel">
       <strong>Synthesis failed</strong>
       <span>Stage: {run.stageLabel}</span>
-      <span>Safe error: {run.sanitizedError ?? "Unknown error."}</span>
+      {run.isCountable && run.totalItems != null && (
+        <span>
+          Progress within stage: {run.completedItems ?? 0} of {run.totalItems}
+        </span>
+      )}
+      {run.currentItem && (
+        <span>
+          Current: <strong>{run.currentItem}</strong>
+        </span>
+      )}
       <span>Progress reached: {run.overallProgress}%</span>
+      <span>Duration: {minutes != null ? `${minutes} min` : "—"}</span>
+      {lastHeartbeatSecondsBeforeFailure != null && <span>Last heartbeat: {lastHeartbeatSecondsBeforeFailure}s before failure</span>}
+      {run.estimatedCost != null && <span>Cost so far: {formatCost(run.estimatedCost)}</span>}
+      <span>Safe error: {run.sanitizedError ?? "Unknown error."}</span>
       <button onClick={onRetry}>Retry Synthesis</button>
     </div>
   );

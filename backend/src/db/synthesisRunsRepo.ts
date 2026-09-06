@@ -228,6 +228,18 @@ export interface SynthesisProgressUpdate {
   totalItems: number | null;
   /** Short display label only (e.g. a canonical strategy's name) — never prompt content or raw course material. */
   currentItem: string | null;
+  /**
+   * Usage accumulated across every Gemini call that has actually completed
+   * so far in this run (not just the current stage) — reuses the same
+   * columns/formula markSynthesisCompleted already writes on success, just
+   * applied to a running total instead of only the final one. This is what
+   * lets a FAILED run still show "cost so far" instead of leaving these
+   * columns null forever, since markSynthesisFailed never overwrites them.
+   */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  thinkingTokens: number | null;
+  estimatedCost: number | null;
 }
 
 /**
@@ -242,6 +254,12 @@ export interface SynthesisProgressUpdate {
  * the full current state, and a stage transition must be able to clear a
  * previous stage's stale item counts/currentItem rather than leave them
  * COALESCEd forward.
+ *
+ * Callers MUST await this (never fire-and-forget it) for any checkpoint
+ * that must be durable before the next unit of work starts — e.g. after
+ * each completed canonical strategy — so that a failure immediately after
+ * is guaranteed to see the prior item's completion already persisted, not
+ * racing an in-flight write. See worker/synthesisLoop.ts's reportProgress.
  */
 export async function updateSynthesisProgress(
   db: Queryable,
@@ -257,10 +275,25 @@ export async function updateSynthesisProgress(
          completed_items = $4,
          total_items = $5,
          current_item = $6,
+         input_tokens = $7,
+         output_tokens = $8,
+         thinking_tokens = $9,
+         estimated_cost = $10,
          updated_at = now()
      WHERE run_id = $1 AND lease_owner = $2
      RETURNING run_id`,
-    [runId, leaseOwner, update.currentStage, update.completedItems, update.totalItems, update.currentItem],
+    [
+      runId,
+      leaseOwner,
+      update.currentStage,
+      update.completedItems,
+      update.totalItems,
+      update.currentItem,
+      update.inputTokens,
+      update.outputTokens,
+      update.thinkingTokens,
+      update.estimatedCost,
+    ],
   );
   return (result.rowCount ?? 0) > 0;
 }
@@ -293,20 +326,33 @@ export async function markSynthesisCompleted(
   return (result.rowCount ?? 0) > 0;
 }
 
+/**
+ * Fenced terminal transition to FAILED. Deliberately never touches
+ * input_tokens/output_tokens/thinking_tokens/estimated_cost/current_stage/
+ * completed_items/total_items/current_item — whatever updateSynthesisProgress
+ * last persisted before the failure is exactly the "progress reached"
+ * snapshot a failed run should keep showing (see progress.ts's
+ * computeSynthesisProgress, which reads a FAILED run's stage/items the
+ * same way as a RUNNING one). `processingDurationSeconds` is optional only
+ * for backward compatibility with existing callers that don't have a
+ * `startedAt` handy; production always passes it (see worker/synthesisLoop.ts).
+ */
 export async function markSynthesisFailed(
   db: Queryable,
   runId: string,
   leaseOwner: string,
   errorType: string,
   sanitizedError: string,
+  processingDurationSeconds: number | null = null,
 ): Promise<boolean> {
   const result = await db.query(
     `UPDATE synthesis_runs
      SET status = 'FAILED', completed_at = now(), error_type = $3, sanitized_error = $4,
+         processing_duration_seconds = COALESCE($5, processing_duration_seconds),
          lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
      WHERE run_id = $1 AND lease_owner = $2
      RETURNING run_id`,
-    [runId, leaseOwner, errorType, sanitizedError],
+    [runId, leaseOwner, errorType, sanitizedError, processingDurationSeconds],
   );
   return (result.rowCount ?? 0) > 0;
 }

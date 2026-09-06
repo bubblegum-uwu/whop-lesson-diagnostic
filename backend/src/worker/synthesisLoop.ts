@@ -7,6 +7,7 @@ import {
   markSynthesisCompleted,
   markSynthesisFailed,
   type SynthesisRun,
+  type SynthesisProgressUpdate,
 } from "../db/synthesisRunsRepo.js";
 import { createStrategyCluster } from "../db/strategyClustersRepo.js";
 import { createCanonicalStrategy } from "../db/canonicalStrategiesRepo.js";
@@ -97,8 +98,8 @@ async function processOneSynthesisRun(run: SynthesisRun, leaseOwner: string, dep
     return next;
   }
 
-  /** A real progress event (stage transition or item-count increment) — also renews the lease/heartbeat as part of the same write, chained through the same renewChain as the pure heartbeat above. */
-  function reportProgress(update: { currentStage: string; completedItems: number | null; totalItems: number | null; currentItem: string | null }): Promise<boolean> {
+  /** A real progress event (stage transition or item-count increment) — also renews the lease/heartbeat as part of the same write, chained through the same renewChain as the pure heartbeat above. Always awaited by its caller (never fire-and-forget) so a checkpoint like "cluster i complete" is guaranteed durable before the next unit of work starts. */
+  function reportProgress(update: SynthesisProgressUpdate): Promise<boolean> {
     const next = renewChain.then(async () => {
       if (leaseLost) return false;
       const ok = await updateSynthesisProgress(deps.pool, run.runId, leaseOwner, update);
@@ -119,22 +120,49 @@ async function processOneSynthesisRun(run: SynthesisRun, leaseOwner: string, dep
 
     const input = await gatherSynthesisInput(deps.pool, courseTitle, run.sourceAnalysisIds);
 
-    const result: SynthesisResult = await runSynthesis({ gemini: deps.gemini, model: deps.model }, input, (event: SynthesisProgressEvent) => {
-      void reportProgress({ currentStage: event.stage, completedItems: event.completedItems, totalItems: event.totalItems, currentItem: event.currentItem });
+    // Returning (not `void`-ing) reportProgress's promise here is what
+    // makes runSynthesis's internal `await onProgress?.(...)` actually
+    // wait for this write to land — see runSynthesis's doc comment on why
+    // that matters: it's what guarantees "cluster i complete" (and its
+    // contribution to cumulativeUsage) is durably persisted before cluster
+    // i+1 is even attempted, so a mid-pipeline failure can never race an
+    // unpersisted completion.
+    const result: SynthesisResult = await runSynthesis({ gemini: deps.gemini, model: deps.model }, input, async (event: SynthesisProgressEvent) => {
+      await reportProgress({
+        currentStage: event.stage,
+        completedItems: event.completedItems,
+        totalItems: event.totalItems,
+        currentItem: event.currentItem,
+        inputTokens: event.cumulativeUsage.inputTokens,
+        outputTokens: event.cumulativeUsage.outputTokens,
+        thinkingTokens: event.cumulativeUsage.thinkingTokens,
+        estimatedCost: estimateCost(event.cumulativeUsage),
+      });
     });
 
     if (leaseLost) throw new LeaseLostError();
 
-    // Awaited (unlike every other reportProgress call above, which are
-    // fire-and-forget so they never slow down the actual Gemini calls) —
-    // this is a deliberate checkpoint that must land before the
-    // persistence transaction below begins, or a completed run could show
-    // stale mid-pipeline progress instead of VALIDATING.
-    await reportProgress({ currentStage: "VALIDATING", completedItems: null, totalItems: null, currentItem: null });
-    if (leaseLost) throw new LeaseLostError();
-
     const completedAt = new Date();
     const estimatedCost = estimateCost(result.usage);
+
+    // Awaited (unlike a pure heartbeat tick, which never blocks the
+    // pipeline) — this is a deliberate checkpoint that must land before
+    // the persistence transaction below begins, or a completed run could
+    // show stale mid-pipeline progress instead of VALIDATING. Uses
+    // result.usage (the authoritative final total, already computed
+    // above) rather than re-deriving it — by this point they're the same
+    // value.
+    await reportProgress({
+      currentStage: "VALIDATING",
+      completedItems: null,
+      totalItems: null,
+      currentItem: null,
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+      thinkingTokens: result.usage.thinkingTokens,
+      estimatedCost,
+    });
+    if (leaseLost) throw new LeaseLostError();
 
     const client = await deps.pool.connect();
     try {
@@ -178,7 +206,15 @@ async function processOneSynthesisRun(run: SynthesisRun, leaseOwner: string, dep
     const classification = classifyError(err);
     const sanitizedMessage = redactor.redact(err instanceof Error ? err.message : "Unknown synthesis worker error.");
     log.error("Course synthesis run failed", { runId: run.runId, classification, message: sanitizedMessage });
-    await markSynthesisFailed(deps.pool, run.runId, leaseOwner, classification, sanitizedMessage);
+    // current_stage/completed_items/total_items/current_item/input_tokens/
+    // output_tokens/thinking_tokens/estimated_cost are deliberately NOT
+    // passed here — markSynthesisFailed never touches them, so whatever
+    // reportProgress last durably persisted (see above) stays exactly as
+    // the "progress reached" / "cost so far" snapshot at the point of
+    // failure. Only the duration needs computing fresh, since a failed run
+    // never reaches the success path's own duration calculation.
+    const processingDurationSeconds = Math.round((Date.now() - startedAt.getTime()) / 1000);
+    await markSynthesisFailed(deps.pool, run.runId, leaseOwner, classification, sanitizedMessage, processingDurationSeconds);
   } finally {
     heartbeat.stop();
   }
