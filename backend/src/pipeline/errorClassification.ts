@@ -3,6 +3,7 @@ import { AuthRequiredError } from "../whop/sessionService.js";
 import { FfmpegRemuxError } from "../ffmpeg/remux.js";
 import { GeminiUploadError, GeminiProcessingFailedError, GeminiAnalysisError } from "../gemini/client.js";
 import { SchemaValidationError, PipelineError } from "./analyzeLesson.js";
+import { SynthesisGeminiCallError } from "../synthesis/errors.js";
 
 export type ErrorClassification = "transient" | "permanent" | "auth_required";
 
@@ -22,6 +23,13 @@ export function classifyError(err: unknown): ErrorClassification {
   // the original error as `cause` — classify the real underlying error, not
   // the wrapper, or every pipeline failure would fall through to "permanent".
   if (err instanceof PipelineError && err.cause !== undefined) {
+    return classifyError(err.cause);
+  }
+  // Same unwrap for course-synthesis (Phase 3.4): SynthesisGeminiCallError
+  // wraps every generateStructured() failure with stage/model/schema/
+  // prompt-size context for diagnostics, but the underlying cause (e.g. a
+  // GeminiAnalysisError) is what actually determines transient vs permanent.
+  if (err instanceof SynthesisGeminiCallError) {
     return classifyError(err.cause);
   }
   if (err instanceof AuthRequiredError) {
