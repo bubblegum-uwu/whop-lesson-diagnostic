@@ -1,6 +1,6 @@
 import { loadConfig } from "../src/config.js";
 import { createPool } from "../src/db/pool.js";
-import { createGeminiClient, type GeminiClient } from "../src/gemini/client.js";
+import { createGeminiClient, type GeminiClient, type GeminiThinkingLevel } from "../src/gemini/client.js";
 import { getCourseByWhopId } from "../src/db/coursesRepo.js";
 import { listLessons } from "../src/db/lessonsRepo.js";
 import { getLatestByLessons } from "../src/db/lessonAnalysesRepo.js";
@@ -9,6 +9,9 @@ import { buildStrategySignature } from "../src/synthesis/normalize.js";
 import { clusterStrategyInstances } from "../src/synthesis/cluster.js";
 import { synthesizeCanonicalStrategy } from "../src/synthesis/canonicalStrategy.js";
 import { SYNTHESIS_MAX_OUTPUT_TOKENS } from "../src/synthesis/limits.js";
+import { estimateCost } from "../src/pricing/geminiPricing.js";
+
+const VALID_THINKING_LEVELS: ReadonlySet<string> = new Set<GeminiThinkingLevel>(["minimal", "low", "medium", "high"]);
 
 /**
  * READ-ONLY diagnostic for exactly ONE canonical-strategy cluster — built
@@ -46,11 +49,27 @@ import { SYNTHESIS_MAX_OUTPUT_TOKENS } from "../src/synthesis/limits.js";
  *   TARGET_CLUSTER_NAME="Key Level and Order Block Break and Retest" \
  *     CANONICAL_STRATEGY_DIAGNOSTIC=1 npx tsx scripts/canonicalStrategyDiagnostic.ts
  *
+ * Optional CANONICAL_STRATEGY_THINKING_LEVEL ("minimal" | "low" | "medium" |
+ * "high") passes generation_config.thinking_level through for this run's
+ * canonical_strategy call only — see gemini/client.ts's GeminiThinkingLevel.
+ * Omitted by default (server default — observed as "medium"). Exists to run
+ * the B/C variants of the wire-format-optimization test matrix, e.g.:
+ *
+ *   CANONICAL_STRATEGY_THINKING_LEVEL=low TARGET_CLUSTER_NAME="Break and Retest (B&R) with Key Levels and Order Blocks" \
+ *     CANONICAL_STRATEGY_DIAGNOSTIC=1 npx tsx scripts/canonicalStrategyDiagnostic.ts
+ *
+ * (Variant A — the OLD wire schema at medium thinking — already has a real
+ * data point from before this script's wire-format fix landed; there is no
+ * variant flag to reproduce the old schema, since it has been replaced
+ * outright, not made switchable.)
+ *
  * Logs only: cluster name/member count, prompt chars, configured
- * max_output_tokens, output chars, interaction status, input/output/
- * thinking tokens, JSON-parse PASS/FAIL, Zod-validation PASS/FAIL — never
- * prompt text, never the raw Gemini response, never course/lesson content,
- * never credentials.
+ * max_output_tokens, configured thinking_level (or "server_default"),
+ * output chars, interaction status, input/output/thinking tokens, an
+ * estimated cost (src/pricing/geminiPricing.ts, computed only from token
+ * counts Gemini itself reports), JSON-parse PASS/FAIL, Zod-validation
+ * PASS/FAIL — never prompt text, never the raw Gemini response, never
+ * course/lesson content, never credentials.
  */
 async function main(): Promise<void> {
   if (process.env.CANONICAL_STRATEGY_DIAGNOSTIC !== "1") {
@@ -58,6 +77,14 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+
+  const rawThinkingLevel = process.env.CANONICAL_STRATEGY_THINKING_LEVEL;
+  if (rawThinkingLevel != null && !VALID_THINKING_LEVELS.has(rawThinkingLevel)) {
+    console.error(`Invalid CANONICAL_STRATEGY_THINKING_LEVEL=${rawThinkingLevel} — must be one of: ${[...VALID_THINKING_LEVELS].join(", ")}.`);
+    process.exitCode = 1;
+    return;
+  }
+  const thinkingLevel = rawThinkingLevel as GeminiThinkingLevel | undefined;
 
   const config = loadConfig();
   const pool = createPool(config.db);
@@ -110,35 +137,48 @@ async function main(): Promise<void> {
     const members = targetCluster.memberInstanceIds.map((id) => instancesById.get(id)).filter((m) => m != null);
     console.log(`target cluster: "${targetCluster.proposedCanonicalName}" (${members.length} member instance(s))`);
 
+    type PartialUsage = { inputTokens: number | null; outputTokens: number | null; thinkingTokens: number | null };
+
     let promptChars = 0;
     let outputChars: number | null = null;
     let interactionStatus = "unknown";
+    let failureUsage: PartialUsage | null = null;
     const instrumented: GeminiClient = {
       ...gemini,
-      generateStructured: async (prompt, model, schema, maxOutputTokens) => {
+      generateStructured: async (prompt, model, schema, maxOutputTokens, callThinkingLevel) => {
         promptChars = prompt.length;
         try {
-          const result = await gemini.generateStructured(prompt, model, schema, maxOutputTokens);
+          const result = await gemini.generateStructured(prompt, model, schema, maxOutputTokens, callThinkingLevel);
           outputChars = result.diagnostics?.outputChars ?? result.text.length;
           interactionStatus = result.diagnostics?.interactionStatus ?? "unknown";
           return result;
         } catch (err) {
-          const diag = (err as { diagnostics?: { outputChars: number; interactionStatus: string } } | undefined)?.diagnostics;
+          const diag = (err as { diagnostics?: { outputChars: number; interactionStatus: string; usage?: PartialUsage } } | undefined)?.diagnostics;
           if (diag) {
             outputChars = diag.outputChars;
             interactionStatus = diag.interactionStatus;
+            failureUsage = diag.usage ?? null;
           }
           throw err;
         }
       },
     };
 
-    console.log(`invoking canonical_strategy generation for "${targetCluster.proposedCanonicalName}" (real Gemini call, configured max_output_tokens=${SYNTHESIS_MAX_OUTPUT_TOKENS.canonical_strategy})...`);
+    console.log(
+      `invoking canonical_strategy generation for "${targetCluster.proposedCanonicalName}" (real Gemini call, configured max_output_tokens=${SYNTHESIS_MAX_OUTPUT_TOKENS.canonical_strategy}, thinking_level=${thinkingLevel ?? "server_default"})...`,
+    );
     try {
-      const { canonicalStrategy, usage } = await synthesizeCanonicalStrategy({ gemini: instrumented, model: config.geminiModel }, targetCluster, members);
+      const { canonicalStrategy, usage } = await synthesizeCanonicalStrategy(
+        { gemini: instrumented, model: config.geminiModel },
+        targetCluster,
+        members,
+        { thinkingLevel },
+      );
+      const estimatedCostUsd = estimateCost(usage);
       console.log(
         `RESULT: PASS — prompt_chars=${promptChars} output_chars=${outputChars ?? "?"} interaction_status=${interactionStatus} ` +
           `input_tokens=${usage.inputTokens} output_tokens=${usage.outputTokens} thinking_tokens=${usage.thinkingTokens} ` +
+          `estimated_cost_usd=${estimatedCostUsd ?? "unknown"} ` +
           `json_parse=PASS zod_validation=PASS rule_categories_with_content=${
             [
               canonicalStrategy.marketContext,
@@ -159,8 +199,12 @@ async function main(): Promise<void> {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const jsonParseFailed = message.includes("did not return valid JSON");
+      const usageAtFailure: PartialUsage = failureUsage ?? { inputTokens: null, outputTokens: null, thinkingTokens: null };
+      const estimatedCostUsd = estimateCost(usageAtFailure);
       console.log(
         `RESULT: FAIL — prompt_chars=${promptChars} output_chars=${outputChars ?? "?"} interaction_status=${interactionStatus} ` +
+          `input_tokens=${usageAtFailure.inputTokens ?? "?"} output_tokens=${usageAtFailure.outputTokens ?? "?"} thinking_tokens=${usageAtFailure.thinkingTokens ?? "?"} ` +
+          `estimated_cost_usd=${estimatedCostUsd ?? "unknown"} ` +
           `json_parse=${jsonParseFailed ? "FAIL" : "PASS"} zod_validation=${jsonParseFailed ? "n/a" : "FAIL"}`,
       );
       // The thrown error's own message is already the safe, stage-tagged form (see synthesis/errors.ts) — never prompt content, never the raw response.

@@ -64,6 +64,20 @@ export interface GeminiUsage {
 }
 
 /**
+ * Mirrors `@google/genai`'s `ThinkingLevel` for the Interactions API's
+ * `generation_config.thinking_level` — confirmed present on the SDK's own
+ * `GenerationConfig` type (genai.d.ts). Optional and unset by default
+ * everywhere in this codebase (see synthesis/geminiStage.ts): omitting it
+ * preserves whatever the server-side default is (observed as "medium" for
+ * gemini-3.8-flash), so adding this plumbing does not by itself change any
+ * stage's behavior. Exists so canonical_strategy specifically can be
+ * experimentally run at a lower thinking level (see
+ * scripts/canonicalStrategyDiagnostic.ts's variant support) without
+ * globally lowering thinking for every synthesis stage.
+ */
+export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+/**
  * Safe, content-free shape signals about a structured-generation response —
  * enough to distinguish truncation/emptiness/non-JSON-content from a
  * genuine parse bug, without ever capturing the response text itself.
@@ -141,8 +155,19 @@ export interface GeminiClient {
    * budget per synthesis stage (see synthesis/limits.ts) rather than
    * leaving it unset and hoping the server default is enough for the
    * richest stages.
+   *
+   * `thinkingLevel`, when provided, is passed through as
+   * `generation_config.thinking_level` — see GeminiThinkingLevel's doc
+   * comment. Optional and unused by every stage today; exists for
+   * canonical_strategy's experimental low-thinking variant.
    */
-  generateStructured(prompt: string, model: string, schema: object, maxOutputTokens?: number): Promise<GenerateStructuredResult>;
+  generateStructured(
+    prompt: string,
+    model: string,
+    schema: object,
+    maxOutputTokens?: number,
+    thinkingLevel?: GeminiThinkingLevel,
+  ): Promise<GenerateStructuredResult>;
 }
 
 /** Extracts token usage from `Interaction.usage` — never a second Gemini call. */
@@ -269,14 +294,29 @@ export function createGeminiClient(apiKey: string): GeminiClient {
     }
   }
 
-  async function generateStructured(prompt: string, model: string, schema: object, maxOutputTokens?: number): Promise<GenerateStructuredResult> {
+  async function generateStructured(
+    prompt: string,
+    model: string,
+    schema: object,
+    maxOutputTokens?: number,
+    thinkingLevel?: GeminiThinkingLevel,
+  ): Promise<GenerateStructuredResult> {
     try {
       const textContent: Interactions.TextContent = { type: "text", text: prompt };
+      const generationConfig =
+        maxOutputTokens != null || thinkingLevel != null
+          ? {
+              generation_config: {
+                ...(maxOutputTokens != null ? { max_output_tokens: maxOutputTokens } : {}),
+                ...(thinkingLevel != null ? { thinking_level: thinkingLevel } : {}),
+              },
+            }
+          : {};
       const interaction = await ai.interactions.create({
         model,
         input: [textContent],
         response_format: { type: "text", mime_type: "application/json", schema },
-        ...(maxOutputTokens != null ? { generation_config: { max_output_tokens: maxOutputTokens } } : {}),
+        ...generationConfig,
       });
 
       const text = extractOutputText(interaction) ?? "";

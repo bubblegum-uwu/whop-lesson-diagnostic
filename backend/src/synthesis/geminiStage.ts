@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { GeminiClient, GeminiUsage, GeminiCompletionDiagnostics } from "../gemini/client.js";
+import type { GeminiClient, GeminiUsage, GeminiCompletionDiagnostics, GeminiThinkingLevel } from "../gemini/client.js";
 import { GeminiIncompleteInteractionError, GeminiAnalysisError } from "../gemini/client.js";
 import { SynthesisSchemaValidationError, SynthesisGeminiCallError } from "./errors.js";
 import { SYNTHESIS_SCHEMA_VERSION } from "./version.js";
@@ -39,16 +39,24 @@ function maxOutputTokensFor(stage: string): number | undefined {
  * GeminiIncompleteInteractionError's safe completion diagnostics into the
  * thrown SynthesisGeminiCallError when the underlying failure carried them
  * — never the response text itself.
+ *
+ * `thinkingLevel` is an optional passthrough (see GeminiThinkingLevel) —
+ * every current call site omits it, which preserves the server-side
+ * default exactly as before this parameter existed. It exists so
+ * canonical_strategy's experimental low-thinking variant (see
+ * canonicalStrategy.ts / scripts/canonicalStrategyDiagnostic.ts) can be
+ * tested without changing any other stage's behavior.
  */
 export async function callGeminiForStage(
   deps: SynthesisStageDeps,
   stage: string,
   prompt: string,
   jsonSchema: object,
+  thinkingLevel?: GeminiThinkingLevel,
 ): Promise<{ rawText: string; usage: GeminiUsage; diagnostics: GeminiCompletionDiagnostics | undefined }> {
   const maxOutputTokens = maxOutputTokensFor(stage);
   try {
-    const result = await deps.gemini.generateStructured(prompt, deps.model, jsonSchema, maxOutputTokens);
+    const result = await deps.gemini.generateStructured(prompt, deps.model, jsonSchema, maxOutputTokens, thinkingLevel);
     return { rawText: result.text, usage: result.usage, diagnostics: result.diagnostics };
   } catch (err) {
     const diagnostics =

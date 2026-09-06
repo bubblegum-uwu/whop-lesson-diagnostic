@@ -11,8 +11,14 @@
  * v2 (canonicalStrategy.ts's buildPrompt): updated to describe the v3
  * `sections`-grouped wire format below instead of the 11 named
  * top-level array fields it replaced.
+ *
+ * v3: updated again for the v4 wire-format change below — every source
+ * rule in the prompt's input is now tagged with a short reference "key",
+ * and the prompt instructs Gemini to cite those keys via
+ * "sourceKeys"/"conflictSourceKeys" instead of restating
+ * lessonId/timestamps/evidence text per source citation.
  */
-export const SYNTHESIS_PROMPT_VERSION = "v2";
+export const SYNTHESIS_PROMPT_VERSION = "v3";
 /**
  * v2: in response to a production 400 whose root cause was masked by
  * insufficient error handling (see SynthesisGeminiCallError), made two
@@ -50,9 +56,26 @@ export const SYNTHESIS_PROMPT_VERSION = "v2";
  * else) was actually responsible, independent of whether v3 turns out to
  * fully resolve it.
  *
- * Across all three versions, the final persisted CanonicalStrategy
+ * v4 (current): CONFIRMED via a real diagnostic run against the actual
+ * first production cluster ("Break and Retest (B&R) with Key Levels and
+ * Order Blocks", a ONE-MEMBER cluster) that v3's schema was itself
+ * producing abnormally large output — output_tokens=31032,
+ * thinking_tokens=17222 against a 32768-token budget, for a single
+ * lesson's already-known rules. Root cause: v3 still asked Gemini to
+ * RESTATE each source citation's lessonId + timestamps + evidence text
+ * (a quoted sentence, potentially tens of tokens), even though every one
+ * of those fields was ALREADY present verbatim in the prompt's own input
+ * (gemini/schema.ts's RuleSchema — every original Stage-1 rule already
+ * carries lessonId/timestamps/evidence). v4 assigns each original rule a
+ * short reference "key" in the prompt and has Gemini cite
+ * "sourceKeys"/"conflictSourceKeys" (short string arrays) instead —
+ * application code resolves each key back to the full provenance using
+ * data already known before the Gemini call. See schema.ts's v4 comment
+ * for the full mechanism and canonicalStrategy.ts's keySourceData.
+ *
+ * Across all four versions, the final persisted CanonicalStrategy
  * shape/Zod validation (CanonicalStrategySchema) is unchanged; only what
- * Gemini itself is asked to produce, and how that's grouped, changed.
+ * Gemini itself is asked to produce, and how that's grouped/cited, changed.
  */
-export const SYNTHESIS_SCHEMA_VERSION = "v3";
+export const SYNTHESIS_SCHEMA_VERSION = "v4";
 export const SYNTHESIZER_VERSION = "v1";
