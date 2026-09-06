@@ -16,7 +16,7 @@ const TILES: { key: keyof AnalysisSummary; label: string }[] = [
   { key: "totalLessons", label: "Total Lessons" },
   { key: "analyzed", label: "Analyzed" },
   { key: "strategyLessons", label: "Strategy Lessons" },
-  { key: "noStrategy", label: "No Strategy" },
+  { key: "noStrategy", label: "No Standalone Setup" },
   { key: "processing", label: "Processing" },
   { key: "queued", label: "Queued" },
   { key: "failed", label: "Failed" },

@@ -96,6 +96,7 @@ function makeDeps(overrides: Partial<AnalyzeLessonDeps> = {}, geminiOverrides: P
     waitUntilActive: vi.fn(async (f: GeminiFileRef) => f),
     analyzeVideo: vi.fn(async () => ({ text: validStrategyJson, usage: { inputTokens: 1000, outputTokens: 200, thinkingTokens: 50 } })),
     deleteFile: vi.fn(async () => undefined),
+    generateStructured: vi.fn(async () => ({ text: "{}", usage: { inputTokens: 0, outputTokens: 0, thinkingTokens: 0 } })),
     ...geminiOverrides,
   };
 

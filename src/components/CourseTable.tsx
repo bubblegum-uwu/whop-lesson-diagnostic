@@ -61,7 +61,7 @@ const STATUS_FILTER_OPTIONS: { value: string; label: string }[] = [
   { value: "QUEUED", label: "Queued" },
   { value: "PROCESSING", label: "Processing" },
   { value: "COMPLETED", label: "Completed" },
-  { value: "NO_STRATEGY", label: "No strategy" },
+  { value: "NO_STRATEGY", label: "No standalone setup" },
   { value: "FAILED", label: "Failed" },
   { value: "AUTH_REQUIRED", label: "Auth required" },
   { value: "CANCELLED", label: "Cancelled" },
@@ -84,10 +84,10 @@ function formatClock(totalSeconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-/** "Break & Retest" | "3 strategies" | "No strategy" | "—" — never the long summary (that lives in the drawer). */
+/** "Break & Retest" | "3 strategies" | "No standalone setup" | "—" — never the long summary (that lives in the drawer). */
 function resultLabel(analysis: CourseLessonSummary["analysis"]): string {
   if (!analysis) return "—";
-  if (!analysis.strategyFound) return "No strategy";
+  if (!analysis.strategyFound) return "No standalone setup";
   const match = analysis.extractedStrategiesLabel?.match(/\+(\d+) more$/);
   if (match) return `${1 + Number(match[1])} strategies`;
   return analysis.extractedStrategiesLabel ?? "Strategy found";
@@ -438,7 +438,7 @@ export function CourseTable({
               <select value={strategyFilter} onChange={(e) => setStrategyFilter(e.target.value)} aria-label="Filter by strategy found">
                 <option value="ALL">Strategy: all</option>
                 <option value="FOUND">Strategy found</option>
-                <option value="NOT_FOUND">No strategy</option>
+                <option value="NOT_FOUND">No standalone setup</option>
               </select>
             </div>
 

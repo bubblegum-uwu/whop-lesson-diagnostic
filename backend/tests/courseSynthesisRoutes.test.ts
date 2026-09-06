@@ -1,0 +1,373 @@
+import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
+import type { Request } from "express";
+import { upsertCourse } from "../src/db/coursesRepo.js";
+import { syncLessons, listLessons } from "../src/db/lessonsRepo.js";
+import { createLessonAnalysis } from "../src/db/lessonAnalysesRepo.js";
+import { createStrategyInstances } from "../src/db/strategyInstancesRepo.js";
+import { markSynthesisCompleted, claimNextEligibleSynthesisRun } from "../src/db/synthesisRunsRepo.js";
+import { createStrategyCluster } from "../src/db/strategyClustersRepo.js";
+import { createCanonicalStrategy } from "../src/db/canonicalStrategiesRepo.js";
+import { createCoursePlaybook } from "../src/db/coursePlaybooksRepo.js";
+import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "../src/http/routes/courseSynthesis.js";
+import type { JobTrigger } from "../src/jobs/runJobTrigger.js";
+import type { Strategy } from "../src/gemini/schema.js";
+import { createTestPool, randomId } from "./helpers/testDb.js";
+import { makeResponse } from "./helpers/httpMocks.js";
+
+const pool = createTestPool();
+const GEMINI_MODEL = "gemini-3.8-flash";
+
+afterAll(async () => {
+  await pool.end();
+});
+
+beforeEach(async () => {
+  await pool.query("TRUNCATE synthesis_runs, strategy_clusters, canonical_strategies, course_playbooks RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE analysis_jobs, lesson_analyses, strategy_instances, usage_records, job_events RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE courses, lessons RESTART IDENTITY CASCADE");
+});
+
+function makeStrategy(): Strategy {
+  return {
+    strategy_name: "Break & Retest",
+    market_or_instrument: ["ES"],
+    timeframes: ["5m"],
+    indicators: [],
+    setup_conditions: [],
+    entry_rules: [],
+    confirmation_rules: [],
+    stop_loss_rules: [],
+    profit_target_rules: [],
+    trade_management_rules: [],
+    invalidation_rules: [],
+    no_trade_conditions: [],
+    market_context_rules: [],
+    visual_discretionary_rules: [],
+    examples_shown: [],
+    ambiguities: [],
+  };
+}
+
+async function makeCourse(whopCourseId: string) {
+  return upsertCourse(pool, { whopCourseId, whopExperienceId: "exp_1", slug: "trading-accelerator", title: "The Trading Accelerator" });
+}
+
+/** syncLessons() archives any previously-synced lesson not present in THIS call's list, so every call here re-includes every lesson already synced for the course — a full sync of the current set, not an incremental add. */
+async function addAnalyzedLesson(courseId: number, opts: { strategyFound: boolean; title?: string }) {
+  const existing = await listLessons(pool, courseId);
+  await syncLessons(pool, courseId, [
+    ...existing.map((l) => ({
+      whopLessonId: l.whopLessonId,
+      title: l.title,
+      lessonType: l.lessonType,
+      visibility: l.visibility,
+      chapterWhopId: l.chapterWhopId,
+      chapterTitle: l.chapterTitle,
+      chapterOrder: l.chapterOrder,
+      courseOrder: l.courseOrder,
+      durationSeconds: l.durationSeconds,
+      videoAssetStatus: l.videoAssetStatus,
+      videoAvailable: l.videoAvailable,
+      sourceUrl: l.sourceUrl,
+    })),
+    {
+      whopLessonId: randomId("lesn"),
+      title: opts.title ?? (opts.strategyFound ? "Break and Retest" : "Sizing & Scaling Trades"),
+      lessonType: "video",
+      visibility: "visible",
+      chapterWhopId: null,
+      chapterTitle: null,
+      chapterOrder: null,
+      courseOrder: existing.length + 1,
+      durationSeconds: 600,
+      videoAssetStatus: "ready",
+      videoAvailable: true,
+      sourceUrl: "https://whop.com/x/lessons/y/",
+    },
+  ]);
+  const lessons = await listLessons(pool, courseId);
+  const lesson = lessons[lessons.length - 1];
+
+  const jobId = (
+    await pool.query(
+      `INSERT INTO analysis_jobs (lesson_id, analysis_fingerprint, status) VALUES ($1, $2, $3) RETURNING job_id`,
+      [lesson.id, randomId("fp"), opts.strategyFound ? "COMPLETED" : "NO_STRATEGY"],
+    )
+  ).rows[0].job_id;
+
+  const analysis = await createLessonAnalysis(pool, {
+    lessonId: lesson.id,
+    jobId,
+    status: opts.strategyFound ? "completed" : "no_strategy",
+    strategyFound: opts.strategyFound,
+    validatedJson: { lesson: { title: lesson.title, duration_seconds: 600 }, strategy_found: opts.strategyFound, strategies: opts.strategyFound ? [makeStrategy()] : [] },
+    analysisSummary: opts.strategyFound ? "Break & Retest" : "No concrete trading strategy taught.",
+    model: GEMINI_MODEL,
+    promptVersion: "v1",
+    extractorVersion: "v1",
+    schemaVersion: "v1",
+    analysisFingerprint: randomId("fp"),
+    startedAt: new Date(),
+    completedAt: new Date(),
+    processingDurationSeconds: 60,
+    inputTokens: 100,
+    outputTokens: 20,
+    thinkingTokens: 0,
+    estimatedCost: 0.01,
+  });
+  if (opts.strategyFound) {
+    await createStrategyInstances(pool, analysis.analysisId, lesson.id, [makeStrategy()]);
+  }
+  return lesson;
+}
+
+function makeJobTrigger(): JobTrigger {
+  return { triggerRun: vi.fn(async () => undefined) };
+}
+
+function deps(whopCourseId: string, jobTrigger = makeJobTrigger()) {
+  return { pool, whopCourseId, geminiModel: GEMINI_MODEL, jobTrigger };
+}
+
+describe("GET /api/course/synthesis-status", () => {
+  it("reports course: null when the course has never been synced", async () => {
+    const handler = createSynthesisStatusHandler(deps(randomId("cors")));
+    const { res, body } = makeResponse();
+    await handler({} as Request, res);
+    expect((body() as { course: unknown }).course).toBeNull();
+  });
+
+  it("reports counts and canSynthesizeNow once at least one lesson is analyzed", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+    await addAnalyzedLesson(course.id, { strategyFound: false });
+
+    const handler = createSynthesisStatusHandler(deps(whopCourseId));
+    const { res, body } = makeResponse();
+    await handler({} as Request, res);
+
+    const result = body() as { counts: { totalLessons: number; analyzed: number }; canSynthesizeNow: boolean; isOutOfDate: boolean; latestCompletedRun: unknown };
+    expect(result.counts.totalLessons).toBe(2);
+    expect(result.counts.analyzed).toBe(2);
+    expect(result.canSynthesizeNow).toBe(true);
+    expect(result.isOutOfDate).toBe(false); // no run exists yet at all
+    expect(result.latestCompletedRun).toBeNull();
+  });
+
+  it("lists lessons with no standalone setup for the frontend coverage banner", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: false, title: "Sizing & Scaling Trades" });
+
+    const handler = createSynthesisStatusHandler(deps(whopCourseId));
+    const { res, body } = makeResponse();
+    await handler({} as Request, res);
+
+    const result = body() as { noStandaloneSetupLessons: { title: string }[] };
+    expect(result.noStandaloneSetupLessons).toHaveLength(1);
+    expect(result.noStandaloneSetupLessons[0].title).toBe("Sizing & Scaling Trades");
+  });
+
+  it("flags an existing completed synthesis as OUT OF DATE once the underlying lesson-analysis set changes", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const jobTrigger = makeJobTrigger();
+    const synthesizeHandler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+    const statusHandler = createSynthesisStatusHandler(deps(whopCourseId));
+
+    await synthesizeHandler({ body: {} } as Request, makeResponse().res);
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+    await markSynthesisCompleted(pool, claimed!.runId, "owner-a", {
+      inputTokens: 1,
+      outputTokens: 1,
+      thinkingTokens: 0,
+      estimatedCost: 0.001,
+      processingDurationSeconds: 5,
+    });
+
+    const beforeNewLesson = makeResponse();
+    await statusHandler({} as Request, beforeNewLesson.res);
+    expect((beforeNewLesson.body() as { isOutOfDate: boolean }).isOutOfDate).toBe(false);
+
+    // A new lesson finishes analysis after the run completed — the source set has changed.
+    await addAnalyzedLesson(course.id, { strategyFound: true, title: "Order Blocks and Liquidity Sweeps" });
+
+    const afterNewLesson = makeResponse();
+    await statusHandler({} as Request, afterNewLesson.res);
+    const result = afterNewLesson.body() as { isOutOfDate: boolean; counts: { totalLessons: number } };
+    expect(result.counts.totalLessons).toBe(2);
+    expect(result.isOutOfDate).toBe(true);
+  });
+});
+
+describe("POST /api/course/synthesize", () => {
+  it("refuses to synthesize when nothing has finished analysis yet", async () => {
+    const whopCourseId = randomId("cors");
+    await makeCourse(whopCourseId);
+    const handler = createSynthesizeHandler(deps(whopCourseId));
+    const { res, statusCode } = makeResponse();
+    await handler({ body: {} } as Request, res);
+    expect(statusCode()).toBe(409);
+  });
+
+  it("creates a QUEUED run and triggers the worker Job when eligible", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+    const jobTrigger = makeJobTrigger();
+
+    const handler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+    const { res, statusCode, body } = makeResponse();
+    await handler({ body: {} } as Request, res);
+
+    expect(statusCode()).toBe(202);
+    const result = body() as { created: boolean; run: { status: string } };
+    expect(result.created).toBe(true);
+    expect(result.run.status).toBe("QUEUED");
+    expect(jobTrigger.triggerRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("is idempotent: a plain re-synthesize with an unchanged source returns the existing completed run instead of creating a new one", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const jobTrigger = makeJobTrigger();
+    const handler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+
+    const first = makeResponse();
+    await handler({ body: {} } as Request, first.res);
+    const firstRun = (first.body() as { run: { runId: string } }).run;
+
+    // Simulate the worker completing that run.
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+    await markSynthesisCompleted(pool, claimed!.runId, "owner-a", {
+      inputTokens: 1,
+      outputTokens: 1,
+      thinkingTokens: 0,
+      estimatedCost: 0.001,
+      processingDurationSeconds: 5,
+    });
+
+    const second = makeResponse();
+    await handler({ body: {} } as Request, second.res);
+    const secondResult = second.body() as { created: boolean; run: { runId: string } };
+    expect(secondResult.created).toBe(false);
+    expect(secondResult.run.runId).toBe(firstRun.runId);
+    expect(jobTrigger.triggerRun).toHaveBeenCalledTimes(1); // never called again for the no-op
+  });
+
+  it("force always creates a new run even when the source is unchanged", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const jobTrigger = makeJobTrigger();
+    const handler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+
+    const first = makeResponse();
+    await handler({ body: {} } as Request, first.res);
+    const firstRun = (first.body() as { run: { runId: string } }).run;
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+    await markSynthesisCompleted(pool, claimed!.runId, "owner-a", { inputTokens: 1, outputTokens: 1, thinkingTokens: 0, estimatedCost: 0.001, processingDurationSeconds: 5 });
+
+    const second = makeResponse();
+    await handler({ body: { force: true } } as Request, second.res);
+    const secondResult = second.body() as { created: boolean; run: { runId: string } };
+    expect(secondResult.created).toBe(true);
+    expect(secondResult.run.runId).not.toBe(firstRun.runId);
+  });
+});
+
+describe("GET /api/course/synthesis", () => {
+  it("returns run: null when no run has ever completed", async () => {
+    const whopCourseId = randomId("cors");
+    await makeCourse(whopCourseId);
+    const handler = createGetSynthesisHandler(deps(whopCourseId));
+    const { res, body } = makeResponse();
+    await handler({} as Request, res);
+    expect((body() as { run: unknown }).run).toBeNull();
+  });
+
+  it("returns the full completed run's clusters, canonical strategies, and playbook", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const jobTrigger = makeJobTrigger();
+    const synthesizeHandler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+    const created = makeResponse();
+    await synthesizeHandler({ body: {} } as Request, created.res);
+    const runId = (created.body() as { run: { runId: string } }).run.runId;
+
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+    const clusterRow = await createStrategyCluster(pool, claimed!.runId, {
+      clusterKey: "br",
+      proposedCanonicalName: "Break & Retest",
+      memberInstanceIds: [1],
+      similarityRationale: "r",
+      differencesNotes: "",
+    });
+    await createCanonicalStrategy(pool, claimed!.runId, clusterRow.clusterId, {
+      name: "Break & Retest",
+      purpose: "p",
+      markets: ["ES"],
+      timeframes: ["5m"],
+      marketContext: [],
+      prerequisites: [],
+      setup: [],
+      entryRules: [],
+      confirmationRules: [],
+      stopLossRules: [],
+      profitTargetRules: [],
+      tradeManagementRules: [],
+      invalidationRules: [],
+      noTradeConditions: [],
+      visualDiscretionaryRules: [],
+      variants: [],
+      examples: [],
+      ambiguities: [],
+      conflicts: [],
+      sourceLessonIds: [1],
+    });
+    await createCoursePlaybook(pool, {
+      runId: claimed!.runId,
+      title: "Playbook",
+      coreFramework: { sections: [] },
+      playbook: {
+        title: "Playbook",
+        sections: [],
+        conflictsAndAmbiguities: [],
+        frameworkCoverage: {
+          status: "COMPLETE",
+          standaloneStrategyLessonsAnalyzed: 1,
+          lessonsWithoutStandaloneSetup: 0,
+          lessonsMissingSupportingKnowledgeExtraction: 0,
+          missingSupportingKnowledgeLessonIds: [],
+          missingSupportingKnowledgeLessonTitles: [],
+          coverageNote: "current",
+        },
+      },
+      decisionFramework: { nodes: [], readableSteps: [] },
+    });
+    await markSynthesisCompleted(pool, claimed!.runId, "owner-a", { inputTokens: 1, outputTokens: 1, thinkingTokens: 0, estimatedCost: 0.001, processingDurationSeconds: 5 });
+    void runId;
+
+    const getHandler = createGetSynthesisHandler(deps(whopCourseId));
+    const { res, body } = makeResponse();
+    await getHandler({} as Request, res);
+    const result = body() as {
+      run: { runId: string };
+      clusters: { canonicalName: string }[];
+      canonicalStrategies: { name: string }[];
+      playbook: { frameworkCoverage: { status: string } };
+    };
+    expect(result.run.runId).toBe(claimed!.runId);
+    expect(result.clusters[0].canonicalName).toBe("Break & Retest");
+    expect(result.canonicalStrategies[0].name).toBe("Break & Retest");
+    expect(result.playbook.frameworkCoverage.status).toBe("COMPLETE");
+  });
+});
