@@ -620,3 +620,57 @@ describe("STRATEGY_EXTRACTION_PROMPT — Task A/Task B independence (regression 
     expect(matches.length).toBeGreaterThanOrEqual(3);
   });
 });
+
+// Final semantic-precision pass: three narrower issues found in the SAME
+// real diagnostic output that confirmed the Task A/B regression fix above.
+// All three are prompt-only clarifications (no schema change) — these are
+// deliberately non-brittle substring/keyword checks, never a full-prompt
+// snapshot, since we can't unit-test what the real Gemini API returns.
+describe("STRATEGY_EXTRACTION_PROMPT — scope/applicability vs. examples (test requirements 1-2)", () => {
+  it("explicitly instructs that scope arrays represent applicability restrictions, not every ticker/instrument demonstrated as an example", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/SCOPE ARRAYS REPRESENT APPLICABILITY, NOT EXAMPLES/);
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/does NOT apply outside this value/i);
+  });
+
+  it("gives the AAPL/AMD/AMZN/TSLA-style contamination as a concrete negative example for scope", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/AAPL, AMD, AMZN, and TSLA/);
+  });
+
+  it("explicitly clarifies Strategy.market_or_instrument/timeframes are applicability restrictions, not a list of every demonstrated instrument", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/APPLICABILITY RESTRICTIONS, not a list of every ticker/);
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/AMD\/NVDA belong in "examples_shown"/);
+  });
+});
+
+describe("STRATEGY_EXTRACTION_PROMPT — BETWEEN vs. GTE operator selection (test requirements 3-5)", () => {
+  it("instructs BETWEEN only for a true bounded range, both endpoints being genuine restrictions", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/BETWEEN is for a TRUE BOUNDED RANGE ONLY/);
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/risk between 1% and 5%/);
+  });
+
+  it("instructs an open-ended 'more is better' concept must use GTE with the true lower bound, never BETWEEN with a false upper bound", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/two to three touches establish a level, and more touches make it stronger/i);
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/must be GTE with value=2.*value2=null/);
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/NEVER BETWEEN with value2=3/);
+  });
+
+  it("still preserves 'at least N' as GTE (unaffected baseline behavior)", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/"at least"\/"minimum" is GTE/);
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/at least 6 months/);
+  });
+});
+
+describe("STRATEGY_EXTRACTION_PROMPT — atomicity across applicability regimes (test requirement 6)", () => {
+  it("explicitly instructs splitting materially different trader-profile/instrument/strategy/session regimes into separate scoped items", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/SPLIT ON MATERIALLY DIFFERENT APPLICABILITY/);
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/beginners should risk 1-5%.*experienced traders/i);
+  });
+
+  it("reserves exceptions for a true carve-out under one parent rule, distinct from a fundamentally different rule for a different population", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/Reserve "exceptions" for a TRUE exception to one parent rule/);
+  });
+
+  it("directs a genuine conflict between split regimes into conflictsAndAmbiguities", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/also add an entry to "conflictsAndAmbiguities"/);
+  });
+});
