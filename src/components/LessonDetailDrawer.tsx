@@ -147,12 +147,33 @@ function StrategyDetail({ strategy }: { strategy: Strategy }) {
   );
 }
 
+/** "at least 2R" / "1% to 5%" — falls back to a computed value+unit only for older data that lacks rawText. */
+function numericalValueLabel(n: KnowledgeItem["numericalValues"][number]): string {
+  return n.rawText || `${n.value}${n.value2 != null ? `–${n.value2}` : ""}${n.unit}`;
+}
+
+/** EXAMPLE/DERIVED_EXAMPLE numbers illustrate one instance and must never be read as a universal rule — flagged distinctly from RULE_THRESHOLD/GUIDELINE. */
+const ILLUSTRATIVE_NUMERICAL_ROLES = new Set<KnowledgeItem["numericalValues"][number]["role"]>(["EXAMPLE", "DERIVED_EXAMPLE"]);
+
+function scopeSummary(scope: KnowledgeItem["scope"]): string | null {
+  if (scope.level === "GLOBAL") return null;
+  const parts = [...scope.strategies, ...scope.marketsOrInstruments, ...scope.timeframes, ...scope.sessions, ...scope.traderProfiles];
+  return parts.length > 0 ? parts.join(", ") : "Scoped";
+}
+
 function KnowledgeItemCard({ item, showCategory = false }: { item: KnowledgeItem; showCategory?: boolean }) {
+  const scopeText = scopeSummary(item.scope);
   return (
     <li className="rule-item">
       <div className="rule-header">
         <span className={`badge badge-ruletype-${item.ruleType.toLowerCase()}`}>{RULE_TYPE_LABELS[item.ruleType]}</span>
+        <span className={`badge badge-${item.classification}`}>{item.classification}</span>
         {showCategory && <span className="badge badge-category">{item.category.replace(/_/g, " ")}</span>}
+        {scopeText && (
+          <span className="badge badge-scope-scoped" title={scopeText}>
+            Scoped: {scopeText}
+          </span>
+        )}
         <span className="confidence">{Math.round(item.confidence * 100)}% confidence</span>
         <span className="timestamp">
           {item.start_timestamp}
@@ -160,13 +181,15 @@ function KnowledgeItemCard({ item, showCategory = false }: { item: KnowledgeItem
         </span>
       </div>
       <p className="rule-description">{item.statement}</p>
-      {item.conditions && <p className="rule-conditions">Except: {item.conditions}</p>}
+      {item.conditions && <p className="rule-conditions">When: {item.conditions}</p>}
+      {item.exceptions.length > 0 && (
+        <p className="rule-conditions">Except: {item.exceptions.join("; ")}</p>
+      )}
       {item.numericalValues.length > 0 && (
         <p className="rule-numerical-values">
           {item.numericalValues.map((n, i) => (
-            <span key={i} className="mono-box">
-              {n.value}
-              {n.unit} — {n.context}
+            <span key={i} className={`mono-box${ILLUSTRATIVE_NUMERICAL_ROLES.has(n.role) ? " mono-box-illustrative" : ""}`} title={n.context}>
+              {numericalValueLabel(n)} ({n.metric}{ILLUSTRATIVE_NUMERICAL_ROLES.has(n.role) ? `, ${n.role === "DERIVED_EXAMPLE" ? "derived example" : "example"}` : ""})
             </span>
           ))}
         </p>
@@ -446,11 +469,11 @@ export function LessonDetailDrawer({ lesson, onClose, onLoadAnalysis }: LessonDe
                   {allNumericalValues.map(({ item, numericalValue }, i) => (
                     <li key={i} className="rule-item">
                       <div className="rule-header">
-                        <span className="mono-box">
-                          {numericalValue.value}
-                          {numericalValue.unit}
+                        <span className={`mono-box${ILLUSTRATIVE_NUMERICAL_ROLES.has(numericalValue.role) ? " mono-box-illustrative" : ""}`}>
+                          {numericalValueLabel(numericalValue)}
                         </span>
                         <span className="badge badge-category">{item.category.replace(/_/g, " ")}</span>
+                        <span className="badge badge-category">{numericalValue.role.replace(/_/g, " ").toLowerCase()}</span>
                       </div>
                       <p className="rule-description">{numericalValue.context}</p>
                     </li>

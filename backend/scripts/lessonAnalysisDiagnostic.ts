@@ -7,7 +7,13 @@ import { getValidAccessToken, AuthRequiredError } from "../src/whop/sessionServi
 import { analyzeLesson, PipelineError, SchemaValidationError } from "../src/pipeline/analyzeLesson.js";
 import { LESSON_ANALYSIS_MAX_OUTPUT_TOKENS } from "../src/pipeline/limits.js";
 import { PROMPT_VERSION, SCHEMA_VERSION, EXTRACTOR_VERSION } from "../src/pipeline/analysisVersion.js";
-import { knowledgeItemCounts } from "../src/pipeline/analysisSummary.js";
+import {
+  knowledgeItemCounts,
+  classificationCounts,
+  scopedKnowledgeItemCount,
+  knowledgeItemsWithExceptionsCount,
+  numericalValueCounts,
+} from "../src/pipeline/analysisSummary.js";
 import { estimateCost } from "../src/pricing/geminiPricing.js";
 import { createSecretRedactor } from "../src/lib/redact.js";
 import { createSafeLogger } from "../src/lib/logger.js";
@@ -186,6 +192,8 @@ async function main(): Promise<void> {
       const { analysis, usage } = result;
       const estimatedCostUsd = estimateCost(usage);
       const categoryCounts = knowledgeItemCounts(analysis);
+      const classCounts = classificationCounts(analysis);
+      const numCounts = numericalValueCounts(analysis);
 
       console.log("RESULT: PASS");
       console.log(`  lesson_title=${JSON.stringify(analysis.lesson.title)}`);
@@ -203,6 +211,12 @@ async function main(): Promise<void> {
       console.log(`  knowledge_categories_found=${categoryCounts.length > 0 ? categoryCounts.map((c) => `${c.label}:${c.count}`).join(", ") : "(none)"}`);
       console.log(`  example_count=${analysis.knowledge.examples.length}`);
       console.log(`  conflict_count=${analysis.knowledge.conflictsAndAmbiguities.length}`);
+      console.log(`  explicit_knowledge_count=${classCounts.explicit} inferred_knowledge_count=${classCounts.inferred} visual_knowledge_count=${classCounts.visual}`);
+      console.log(`  scoped_knowledge_count=${scopedKnowledgeItemCount(analysis)}`);
+      console.log(`  knowledge_items_with_exceptions=${knowledgeItemsWithExceptionsCount(analysis)}`);
+      console.log(`  numerical_value_count=${numCounts.total}`);
+      console.log(`  numerical_rule_threshold_count=${numCounts.ruleThreshold}`);
+      console.log(`  numerical_example_count=${numCounts.example} (derived_example=${numCounts.derivedExample} guideline=${numCounts.guideline} reference=${numCounts.reference})`);
       console.log("Nothing was persisted to analysis_jobs/lesson_analyses/strategy_instances/usage_records.");
 
       const outputFile = process.env.LESSON_ANALYSIS_DIAGNOSTIC_OUTPUT_FILE;

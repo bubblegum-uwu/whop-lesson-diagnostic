@@ -298,6 +298,19 @@ button:disabled {
   text-transform: capitalize;
 }
 
+/* Pre-merge fidelity refinement: a KnowledgeItem meaningfully limited to one
+   strategy/instrument/timeframe/session/trader-profile — shown only when
+   SCOPED (GLOBAL, the default, renders no badge at all, to avoid clutter). */
+.badge-scope-scoped {
+  background: #1c2028;
+  color: #e0c67f;
+  text-transform: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .confidence, .timestamp {
   color: #8b91a0;
 }
@@ -464,6 +477,14 @@ button:disabled {
   border-radius: 6px;
   padding: 0.35rem 0.6rem;
   color: #7fe0a0;
+}
+
+/* Pre-merge fidelity refinement: a numericalValue whose role is EXAMPLE or
+   DERIVED_EXAMPLE illustrates one instance only — must never read as a
+   binding rule threshold, so it's visually distinguished (amber, not green). */
+.mono-box-illustrative {
+  color: #e0c67f;
+  border-color: #3a331a;
 }
 
 /* ---- PR2/UX: batch processing dashboard ---- */

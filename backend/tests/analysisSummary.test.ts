@@ -6,6 +6,10 @@ import {
   extractedStrategiesLabel,
   knowledgeItemCounts,
   hasSupportingKnowledge,
+  classificationCounts,
+  scopedKnowledgeItemCount,
+  knowledgeItemsWithExceptionsCount,
+  numericalValueCounts,
 } from "../src/pipeline/analysisSummary.js";
 import type { LessonStrategyAnalysis, Rule, KnowledgeItem, LessonKnowledge } from "../src/gemini/schema.js";
 
@@ -48,9 +52,14 @@ function makeKnowledgeItem(overrides: Partial<KnowledgeItem> = {}): KnowledgeIte
     category: "risk_management",
     statement: "Never risk more than 1% of account equity on a single trade.",
     ruleType: "HARD_RULE",
+    classification: "explicit",
     confidence: 0.95,
     conditions: null,
-    numericalValues: [{ value: 1, unit: "%", context: "max risk per trade" }],
+    exceptions: [],
+    scope: { level: "GLOBAL", strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+    numericalValues: [
+      { metric: "max risk per trade", operator: "LTE", value: 1, value2: null, unit: "%", role: "RULE_THRESHOLD", rawText: "1%", context: "max risk per trade" },
+    ],
     start_timestamp: "02:15",
     end_timestamp: null,
     evidence: "Spoken instruction at 02:15.",
@@ -208,5 +217,102 @@ describe("hasSupportingKnowledge", () => {
       ),
     ).toBe(true);
     expect(hasSupportingKnowledge(noStrategyAnalysis({ summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: ["c"] }))).toBe(true);
+  });
+});
+
+describe("classificationCounts", () => {
+  it("counts explicit/inferred/visual across all knowledgeItems", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [
+        makeKnowledgeItem({ classification: "explicit" }),
+        makeKnowledgeItem({ classification: "explicit" }),
+        makeKnowledgeItem({ classification: "inferred" }),
+        makeKnowledgeItem({ classification: "visual" }),
+      ],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(classificationCounts(noStrategyAnalysis(knowledge))).toEqual({ explicit: 2, inferred: 1, visual: 1 });
+  });
+
+  it("returns all zeros when there are no knowledge items", () => {
+    expect(classificationCounts(noStrategyAnalysis())).toEqual({ explicit: 0, inferred: 0, visual: 0 });
+  });
+});
+
+describe("scopedKnowledgeItemCount", () => {
+  it("counts only SCOPED items, never GLOBAL ones", () => {
+    const scopedToOneContract = {
+      level: "SCOPED" as const,
+      strategies: [],
+      marketsOrInstruments: ["Apple options contract example"],
+      timeframes: [],
+      sessions: [],
+      traderProfiles: [],
+    };
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [makeKnowledgeItem({ scope: scopedToOneContract }), makeKnowledgeItem(), makeKnowledgeItem({ scope: scopedToOneContract })],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(2);
+  });
+
+  it("is zero when every item is GLOBAL (the default scope)", () => {
+    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem()], examples: [], conflictsAndAmbiguities: [] };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(0);
+  });
+});
+
+describe("knowledgeItemsWithExceptionsCount", () => {
+  it("counts items with at least one exception, ignoring items with none", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [
+        makeKnowledgeItem({ exceptions: ["on an opening dip-and-rip, HOD may occur inside the entry candle"] }),
+        makeKnowledgeItem({ exceptions: [] }),
+      ],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(knowledgeItemsWithExceptionsCount(noStrategyAnalysis(knowledge))).toBe(1);
+  });
+});
+
+describe("numericalValueCounts", () => {
+  it("breaks down every numericalValue across every knowledgeItem by role", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [
+        makeKnowledgeItem({
+          numericalValues: [
+            { metric: "reward-to-risk", operator: "GTE", value: 2, value2: null, unit: "R", role: "RULE_THRESHOLD", rawText: "at least 2R", context: "average outcome" },
+            { metric: "scale-out size", operator: "BETWEEN", value: 50, value2: 80, unit: "%", role: "GUIDELINE", rawText: "50%-80%", context: "scale out" },
+          ],
+        }),
+        makeKnowledgeItem({
+          numericalValues: [
+            { metric: "account risk", operator: "APPROX", value: 150, value2: null, unit: "USD", role: "EXAMPLE", rawText: "around $150", context: "one Apple contract example" },
+            { metric: "position size", operator: "EQ", value: 2500, value2: null, unit: "USD", role: "DERIVED_EXAMPLE", rawText: "$2,500", context: "10% of a $25,000 example account" },
+          ],
+        }),
+      ],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(numericalValueCounts(noStrategyAnalysis(knowledge))).toEqual({
+      total: 4,
+      ruleThreshold: 1,
+      guideline: 1,
+      example: 1,
+      reference: 0,
+      derivedExample: 1,
+    });
+  });
+
+  it("is all zero when there are no numericalValues at all", () => {
+    expect(numericalValueCounts(noStrategyAnalysis())).toEqual({ total: 0, ruleThreshold: 0, guideline: 0, example: 0, reference: 0, derivedExample: 0 });
   });
 });

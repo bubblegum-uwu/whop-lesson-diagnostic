@@ -48,9 +48,59 @@ import { z } from "zod";
  * from the existing RuleSchema (unchanged by this file): no rule/item ever
  * repeats lessonId/lessonTitle — that's attached once by the persisting
  * row's own context (see db/lessonAnalysesRepo.ts), never per-item.
+ *
+ * Pre-merge fidelity refinement (still v2 — see the version-number note
+ * below): two real read-only diagnostic runs against production lessons
+ * ("Sizing & Scaling Trades", "Support & Resistance, Key Levels & Market
+ * Trends") confirmed the v2 shape above works, but exposed four places
+ * where the extraction layer was still lossier than the eventual Phase
+ * 3.5B synthesis will need:
+ *
+ *   1. `classification` (explicit/inferred/visual) existed on Strategy's
+ *      `Rule` but not on `KnowledgeItem` — added, reusing the SAME
+ *      `RuleClassification` enum, not a second one. Deliberately kept
+ *      distinct from `ruleType`: classification is HOW a claim was
+ *      obtained, ruleType is WHAT KIND of statement it is (its normative
+ *      strength) — collapsing them would lose the "explicit HARD_RULE" vs
+ *      "inferred HARD_RULE" distinction a future audit needs.
+ *   2. Nothing recorded WHERE a rule applies, risking a scoped rule
+ *      ("with one Apple contract I'd risk ~$150") reading downstream as a
+ *      global one. Added `scope` (GLOBAL vs SCOPED, plus which
+ *      strategies/instruments/timeframes/sessions/trader-profiles it's
+ *      scoped to) as a required object on every KnowledgeItem.
+ *   3. `conditions` (a single nullable string) conflated "when this rule
+ *      applies" with "when the normally-applicable rule does NOT apply" —
+ *      genuinely different things for a future rule engine. Added a
+ *      separate `exceptions: string[]`, keeping `conditions` as-is.
+ *   4. `NumericalValue` (`{value, unit, context}`) could not represent a
+ *      comparison ("at least 2R"), a range ("1%-5%"), an approximation
+ *      ("around 20%"), or distinguish a hard threshold from one number
+ *      inside an instructor's dollar-amount example (which must never be
+ *      promoted into a universal rule). Upgraded to carry an explicit
+ *      `operator`/`value2`/`role`, plus `rawText` preserving the
+ *      instructor's original wording verbatim and a `metric` naming what's
+ *      being measured.
+ *
+ * None of this adds a new array-of-repeated-deep-shape dimension (the PR #9
+ * failure mode this file's `knowledgeItems` collapse already guards
+ * against) — `scope` is one more nested object per item, at the same
+ * nesting depth `numericalValues` already sits at, not a new sibling array.
+ *
+ * Version number: PROMPT_VERSION/SCHEMA_VERSION/EXTRACTOR_VERSION all stay
+ * "v2" for this refinement (see analysisVersion.ts) rather than bumping to
+ * "v3" — both real diagnostic runs that exercised the current v2 shape
+ * were the READ-ONLY diagnostic script, which never persists
+ * (`scripts/lessonAnalysisDiagnostic.ts` never calls createLessonAnalysis).
+ * No "v2"-shaped row has ever actually been written to `lesson_analyses`;
+ * the only real persisted rows are pre-Phase-3.5A "v1" ones. Bumping to
+ * "v3" now would create a version distinction with nothing real on either
+ * side of it. The version should bump the NEXT time this shape changes
+ * after a real "v2" analysis has been persisted.
  */
 
-export const RuleClassification = z.enum(["explicit", "inferred", "visual"]);
+/** Single source of truth for RuleClassification's values, reused by both Strategy's `Rule` and (v2 refinement) `KnowledgeItem` — HOW a claim was obtained, never conflated with `ruleType` (WHAT KIND of statement it is). */
+const RULE_CLASSIFICATION_VALUES = ["explicit", "inferred", "visual"] as const;
+export const RuleClassification = z.enum(RULE_CLASSIFICATION_VALUES);
 
 export const RuleSchema = z.object({
   description: z.string().min(1),
@@ -137,21 +187,84 @@ export const RuleType = z.enum([
 ]);
 export type RuleTypeValue = z.infer<typeof RuleType>;
 
-/** An explicit quantity — category 16, "VERY IMPORTANT" per the spec. Units are preserved exactly as stated, never normalized/converted. */
-export const NumericalValueSchema = z.object({
-  value: z.number(),
-  unit: z.string().min(1),
-  context: z.string().min(1),
-});
+/**
+ * Where a KnowledgeItem applies. Defaults to nothing scoped (GLOBAL, every
+ * array empty) — Gemini must actively narrow it, never the reverse. Guards
+ * against exactly the failure mode the refinement was built for: an
+ * instructor's one-contract dollar example reading downstream as a
+ * universal account-management rule. `level` is a redundant-but-explicit
+ * summary of "did narrowing actually happen" (enforced by the two
+ * `.refine()`s below) rather than something a synthesis stage has to
+ * re-derive by checking whether every array happens to be empty.
+ */
+export const ScopeLevel = z.enum(["GLOBAL", "SCOPED"]);
+export const KnowledgeItemScopeSchema = z
+  .object({
+    level: ScopeLevel,
+    /** Named strategy(ies) this rule is limited to, e.g. "Break & Retest" — empty if not strategy-specific. */
+    strategies: z.array(z.string()),
+    marketsOrInstruments: z.array(z.string()),
+    timeframes: z.array(z.string()),
+    /** e.g. "market-open", "premarket" — empty if not session-specific. */
+    sessions: z.array(z.string()),
+    /** e.g. "beginner", "experienced" — empty if not experience/profile-specific. */
+    traderProfiles: z.array(z.string()),
+  })
+  .refine(
+    (s) => s.level === "SCOPED" || [s.strategies, s.marketsOrInstruments, s.timeframes, s.sessions, s.traderProfiles].every((a) => a.length === 0),
+    { message: "GLOBAL scope must not carry any narrower scope arrays", path: ["level"] },
+  )
+  .refine(
+    (s) => s.level === "GLOBAL" || [s.strategies, s.marketsOrInstruments, s.timeframes, s.sessions, s.traderProfiles].some((a) => a.length > 0),
+    { message: "SCOPED scope must specify at least one narrowing dimension", path: ["level"] },
+  );
+export type KnowledgeItemScope = z.infer<typeof KnowledgeItemScopeSchema>;
+
+/**
+ * category 16, "VERY IMPORTANT" per the spec — the semantic upgrade over a
+ * bare {value, unit, context}: preserves comparison ("at least" -> GTE),
+ * range ("1%-5%" -> BETWEEN with value2), approximation ("around 20%" ->
+ * APPROX), and — critically — whether a number is a binding threshold, a
+ * loose guideline, or just one figure inside an instructor's illustrative
+ * example (which must never be promoted into a universal rule). Units are
+ * preserved exactly as stated, never normalized/converted; `rawText`
+ * preserves the instructor's original compact wording verbatim (e.g. "at
+ * least 2R", "$20-$40") — never rewritten into cleaner prose.
+ */
+export const NumericalOperator = z.enum(["EQ", "GT", "GTE", "LT", "LTE", "BETWEEN", "APPROX"]);
+export const NumericalRole = z.enum(["RULE_THRESHOLD", "GUIDELINE", "EXAMPLE", "REFERENCE", "DERIVED_EXAMPLE"]);
+export const NumericalValueSchema = z
+  .object({
+    /** What's being measured, e.g. "account risk per trade", "reward-to-risk", "scale-out size" — not the unit, the quantity's name. */
+    metric: z.string().min(1),
+    operator: NumericalOperator,
+    value: z.number(),
+    /** Only set (non-null) when operator is BETWEEN — the range's upper bound. */
+    value2: z.number().nullable(),
+    unit: z.string().min(1),
+    role: NumericalRole,
+    /** The instructor's original compact wording, verbatim — e.g. "at least 2R", "1% to 5%", "around 20%". Never rewritten. */
+    rawText: z.string().min(1),
+    context: z.string().min(1),
+  })
+  .refine((v) => (v.operator === "BETWEEN") === (v.value2 != null), {
+    message: "value2 must be set if and only if operator is BETWEEN",
+    path: ["value2"],
+  });
 export type NumericalValue = z.infer<typeof NumericalValueSchema>;
 
 export const KnowledgeItemSchema = z.object({
   category: KnowledgeCategory,
   statement: z.string().min(1),
   ruleType: RuleType,
+  /** HOW this claim was obtained — distinct from ruleType (WHAT KIND of statement it is). Same enum/meaning as Strategy's Rule.classification. */
+  classification: RuleClassification,
   confidence: z.number().min(0).max(1),
-  /** The qualifying exception ("normally X, except when Y") kept attached to its parent rule — null when the statement is unconditional. Never split into a separate, disconnected item. */
+  /** The qualifying condition under which the statement applies ("normally X, when Y") — null when unconditional. Distinct from `exceptions` below: this is WHEN the rule applies, not when it doesn't. */
   conditions: z.string().nullable(),
+  /** Cases where the normally-applicable rule should NOT be applied, or should be applied differently — semantically distinct from `conditions`. Empty array if none were stated. */
+  exceptions: z.array(z.string()),
+  scope: KnowledgeItemScopeSchema,
   numericalValues: z.array(NumericalValueSchema),
   start_timestamp: z.string().min(1),
   end_timestamp: z.string().nullable(),
@@ -222,7 +335,7 @@ const ruleJsonSchema = {
   type: "object",
   properties: {
     description: { type: "string" },
-    classification: { type: "string", enum: ["explicit", "inferred", "visual"] },
+    classification: { type: "string", enum: [...RULE_CLASSIFICATION_VALUES] },
     confidence: { type: "number", minimum: 0, maximum: 1 },
     start_timestamp: { type: "string", description: "MM:SS timestamp" },
     end_timestamp: { type: ["string", "null"], description: "MM:SS timestamp or null" },
@@ -299,14 +412,49 @@ const KNOWLEDGE_CATEGORY_VALUES = [
 
 const RULE_TYPE_VALUES = ["HARD_RULE", "GUIDELINE", "PREFERENCE", "WARNING", "PROHIBITION", "DEFINITION", "OBSERVATION"] as const;
 
+const SCOPE_LEVEL_VALUES = ["GLOBAL", "SCOPED"] as const;
+
+const knowledgeItemScopeJsonSchema = {
+  type: "object",
+  properties: {
+    level: {
+      type: "string",
+      enum: [...SCOPE_LEVEL_VALUES],
+      description: "SCOPED whenever the rule is meaningfully limited (to a strategy, instrument, timeframe, session, or trader profile) — GLOBAL only when genuinely course-wide. Default to nothing narrowed (GLOBAL) unless the source actually supports narrowing.",
+    },
+    strategies: { type: "array", items: { type: "string" }, description: "Named strategy(ies) this rule is limited to, e.g. \"Break & Retest\" — empty if not strategy-specific." },
+    marketsOrInstruments: { type: "array", items: { type: "string" }, description: "e.g. \"0-DTE options\", \"futures\", \"one specific ticker used only as an example\" — empty if not instrument-specific." },
+    timeframes: { type: "array", items: { type: "string" } },
+    sessions: { type: "array", items: { type: "string" }, description: "e.g. \"market-open\", \"premarket\" — empty if not session-specific." },
+    traderProfiles: { type: "array", items: { type: "string" }, description: "e.g. \"beginner\", \"experienced\" — empty if not experience/profile-specific." },
+  },
+  required: ["level", "strategies", "marketsOrInstruments", "timeframes", "sessions", "traderProfiles"],
+};
+
+const NUMERICAL_OPERATOR_VALUES = ["EQ", "GT", "GTE", "LT", "LTE", "BETWEEN", "APPROX"] as const;
+const NUMERICAL_ROLE_VALUES = ["RULE_THRESHOLD", "GUIDELINE", "EXAMPLE", "REFERENCE", "DERIVED_EXAMPLE"] as const;
+
 const numericalValueJsonSchema = {
   type: "object",
   properties: {
+    metric: { type: "string", description: "What is being measured, e.g. \"account risk per trade\", \"reward-to-risk\", \"scale-out size\" — the quantity's name, not its unit." },
+    operator: {
+      type: "string",
+      enum: [...NUMERICAL_OPERATOR_VALUES],
+      description: "EQ=exactly, GT/GTE/LT/LTE=comparison (\"at least\"=GTE, \"no more than\"=LTE), BETWEEN=a range (set value2), APPROX=an approximation (\"around 20%\").",
+    },
     value: { type: "number" },
-    unit: { type: "string", description: "Preserved exactly as stated — e.g. \"%\", \"R\", \"ticks\", \"points\", \"minutes\", \"candles\", \"trades\". Never converted or normalized." },
+    value2: { type: ["number", "null"], description: "Set ONLY when operator is BETWEEN — the range's upper bound. Null for every other operator." },
+    unit: { type: "string", description: "Preserved exactly as stated — e.g. \"%\", \"R\", \"USD\", \"ticks\", \"points\", \"minutes\", \"months\", \"days\", \"candles\", \"contracts\", \"shares\", \"trades\". Never converted or normalized, and never forced into a narrower unit enum." },
+    role: {
+      type: "string",
+      enum: [...NUMERICAL_ROLE_VALUES],
+      description: "RULE_THRESHOLD=a binding rule threshold. GUIDELINE=a numerical recommendation. EXAMPLE=one figure inside an instructor's illustrative example. REFERENCE=a factual number that is not itself a trading rule. DERIVED_EXAMPLE=a number produced by arithmetic FROM an example (e.g. a dollar amount computed from an example account size) — never promote this into a universal rule.",
+    },
+    rawText: { type: "string", description: "The instructor's original compact wording, verbatim — e.g. \"at least 2R\", \"1% to 5%\", \"$20-$40\", \"around 20%\", \"at least 6 months\". Never rewritten into cleaner prose." },
     context: { type: "string" },
   },
-  required: ["value", "unit", "context"],
+  required: ["metric", "operator", "value", "value2", "unit", "role", "rawText", "context"],
 };
 
 const knowledgeItemJsonSchema = {
@@ -315,17 +463,41 @@ const knowledgeItemJsonSchema = {
     category: { type: "string", enum: [...KNOWLEDGE_CATEGORY_VALUES] },
     statement: { type: "string" },
     ruleType: { type: "string", enum: [...RULE_TYPE_VALUES] },
+    classification: {
+      type: "string",
+      enum: [...RULE_CLASSIFICATION_VALUES],
+      description: "HOW this claim was obtained — distinct from ruleType (WHAT KIND of statement it is). Same meaning as a Strategy rule's classification.",
+    },
     confidence: { type: "number", minimum: 0, maximum: 1 },
     conditions: {
       type: ["string", "null"],
-      description: "The qualifying exception, e.g. \"except when price gaps through the level\" — null if the statement is unconditional.",
+      description: "The qualifying condition under which the statement applies (\"normally X, when Y\") — null if the statement is unconditional. Distinct from exceptions below: this is WHEN the rule applies, not when it doesn't.",
     },
+    exceptions: {
+      type: "array",
+      items: { type: "string" },
+      description: "Cases where the normally-applicable rule should NOT be applied, or should be applied differently — semantically distinct from conditions. Empty array if none were stated.",
+    },
+    scope: knowledgeItemScopeJsonSchema,
     numericalValues: { type: "array", items: numericalValueJsonSchema },
     start_timestamp: { type: "string", description: "MM:SS timestamp" },
     end_timestamp: { type: ["string", "null"], description: "MM:SS timestamp or null" },
     evidence: { type: "string" },
   },
-  required: ["category", "statement", "ruleType", "confidence", "conditions", "numericalValues", "start_timestamp", "end_timestamp", "evidence"],
+  required: [
+    "category",
+    "statement",
+    "ruleType",
+    "classification",
+    "confidence",
+    "conditions",
+    "exceptions",
+    "scope",
+    "numericalValues",
+    "start_timestamp",
+    "end_timestamp",
+    "evidence",
+  ],
 };
 
 const lessonExampleJsonSchema = {
@@ -380,7 +552,9 @@ This lesson may or may not teach a complete, standalone, executable trading stra
 
 2. LESSON KNOWLEDGE (always required, regardless of strategy_found): populate "knowledge" with every other piece of useful trading knowledge in this lesson, whether or not it is part of a standalone strategy:
    - summary: a concise description of what the lesson teaches, its major themes, and its primary learning objectives.
-   - knowledgeItems: every individual claim, rule, or observation worth preserving — including content that would otherwise be lost when strategy_found is false, such as risk management, position sizing, scaling in/out, trade management, execution/order-flow mechanics, higher-timeframe analysis, pre-market preparation/routine, psychology/discipline, no-trade conditions, warnings/common mistakes, and definitions/terminology. Tag each item with a "category" (market_context, risk_management, position_sizing, scaling_in, scaling_out, trade_management, execution, higher_timeframe, preparation, psychology, no_trade_conditions, warnings, or definitions) and a "ruleType" reflecting its ACTUAL strength exactly as stated — never conflate these:
+   - knowledgeItems: every individual claim, rule, or observation worth preserving — including content that would otherwise be lost when strategy_found is false, such as risk management, position sizing, scaling in/out, trade management, execution/order-flow mechanics, higher-timeframe analysis, pre-market preparation/routine, psychology/discipline, no-trade conditions, warnings/common mistakes, and definitions/terminology. Prefer MULTIPLE precise, atomic items over one broad summarized item when the lesson teaches materially different rules — never compress distinct entry/sizing/management/invalidation rules into one vague paragraph; keep concepts atomic enough that a later synthesis step can combine them without having already lost detail.
+
+     Tag each item with a "category" (market_context, risk_management, position_sizing, scaling_in, scaling_out, trade_management, execution, higher_timeframe, preparation, psychology, no_trade_conditions, warnings, or definitions) and a "ruleType" reflecting its ACTUAL strength exactly as stated — never conflate these:
        - HARD_RULE: an explicit, non-negotiable directive ("never risk more than 1% per trade", "always use a stop").
        - GUIDELINE: a recommended practice stated with some flexibility, not framed as an absolute.
        - PREFERENCE: the instructor's own personal habit, explicitly not universalized ("I usually...", "I like to...", "I look for...", "I avoid..." — never promote one of these into a HARD_RULE or GUIDELINE).
@@ -388,10 +562,22 @@ This lesson may or may not teach a complete, standalone, executable trading stra
        - PROHIBITION: an explicit "never/don't do this" instruction naming a forbidden action.
        - DEFINITION: a term or concept being explained.
        - OBSERVATION: a factual/descriptive statement about markets or behavior that is not itself a directive.
-     For every item also capture "conditions" (a qualifying exception stated for this specific rule, e.g. "except when price gaps through the level" — null if the rule is unconditional; keep the exception attached to its parent rule, never as a separate disconnected item) and "numericalValues" (every explicit quantity mentioned — percentages, R multiples, ticks/points, time windows, candle counts, stop distances, maximum trade counts, scale-out percentages — as {value, unit, context}, preserving each unit exactly as stated, never converted). Give each item a confidence score (0 to 1) using the same meaning as elsewhere: how directly it was stated versus reasonably inferred.
-   - examples: every concrete example or case study the instructor demonstrates on screen — the situation shown, which category it illustrates (or null if none fits), the outcome if one was shown, plus timestamp/evidence. Keep examples separate from knowledgeItems: an example is one specific instance, never a generalized rule.
-   - conflictsAndAmbiguities: apparently conflicting statements, qualified rules, or unclear/context-dependent statements made WITHIN this one lesson.
 
-For every individual rule/item/example, provide a start_timestamp (MM:SS), an end_timestamp (MM:SS or null if a single instant), and a short evidence explanation referencing what was said or shown. Never invent a rule, quantity, or example that is not supported by the video.
+     Also tag each item with a "classification" — this is a DIFFERENT dimension from ruleType (ruleType is WHAT KIND of statement it is; classification is HOW you obtained it):
+       - explicit: the instructor directly states or clearly teaches this.
+       - inferred: you reasonably infer this from context, but it is not explicitly stated — never turn inferred, visual behavior into an "explicit" claim.
+       - visual: materially derived from the chart/screen rather than verbal instruction alone.
+
+     Every item needs a "scope" describing WHERE it applies — never broaden a rule beyond what the source actually supports. Default to { level: "GLOBAL", strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] } (nothing narrowed) and switch to "SCOPED" with at least one non-empty array whenever the rule is meaningfully limited — to one strategy, one instrument type, one timeframe, one session, or one trader-experience level. Do NOT convert an example-specific rule into a universal course rule: if the instructor says "with one Apple contract I would risk around $150," that is SCOPED (marketsOrInstruments: ["Apple options contract example"]), never a GLOBAL max-risk rule. Distinguish beginners vs. experienced traders, options vs. futures, options vs. equities, 0-DTE vs. swing, one specific example contract/ticker, one specific setup (e.g. PMH/PML only, ORB only, opening-drive only), one timeframe only, and session-specific guidance (market-open only, premarket only) whenever the lesson draws that distinction.
+
+     Capture "conditions" (the qualifying condition under which THIS statement applies, e.g. "when price gaps through the level" — null if unconditional) and, SEPARATELY, "exceptions" (a string array of cases where the normally-applicable rule should NOT be applied, or should be applied differently — e.g. "on an opening dip-and-rip, HOD may occur inside the entry candle, so standard HOD scaling may not apply the same way"). These are different things — a condition says when a rule applies; an exception says when it doesn't. Do not bury a meaningful exception inside a generic conditions string, and do not silently normalize an exception away. Empty array if none were stated.
+
+     Capture EVERY meaningful numerical value mentioned for this item as "numericalValues" — do not return only one representative number if the instructor gives several. Each is: metric (what's measured, e.g. "account risk per trade"), operator (EQ for an exact figure; GT/GTE/LT/LTE for a stated comparison — "at least" is GTE, "no more than"/"max" is LTE; BETWEEN for a stated range, with value2 as the upper bound; APPROX for an approximation like "around 20%"), value, value2 (upper bound, ONLY when operator is BETWEEN, otherwise null), unit (preserved exactly as stated — %, R, USD, ticks, points, minutes, months, days, candles, contracts, shares, trades, etc. — never converted, never forced into a narrow unit set), role (RULE_THRESHOLD for a binding rule threshold; GUIDELINE for a numerical recommendation; EXAMPLE for one figure inside an instructor's illustrative example; REFERENCE for a factual number that is not itself a trading rule; DERIVED_EXAMPLE for a number produced by ARITHMETIC from an example, e.g. a dollar amount computed from a $25,000 example account — never promote a DERIVED_EXAMPLE or EXAMPLE into a universal RULE_THRESHOLD), rawText (the instructor's ORIGINAL compact wording verbatim, e.g. "at least 2R", "1% to 5%", "$20-$40", "around 20%", "at least 6 months" — never rewritten into cleaner prose), and context.
+
+     Give each item a confidence score (0 to 1): how directly it was stated versus reasonably inferred — this is independent of, and must not be collapsed into, classification or ruleType.
+   - examples: every concrete example or case study the instructor demonstrates on screen — the situation shown, which category it illustrates (or null if none fits), the outcome if one was shown, plus timestamp/evidence. Keep examples separate from knowledgeItems: an example is one specific instance, never a generalized rule. Do not manufacture a HARD_RULE knowledgeItem solely from an example unless the instructor explicitly presents it as a rule — but if the same concept genuinely appears BOTH as an explicit rule and as an example, it is fine to preserve both, since they serve different purposes.
+   - conflictsAndAmbiguities: apparently conflicting statements, qualified rules, or unclear/context-dependent statements made WITHIN this one lesson. Do not silently reconcile contradictory guidance — preserve the source-level uncertainty faithfully; a later synthesis stage decides how to resolve it, not you.
+
+For every individual rule/item/example, provide a start_timestamp (MM:SS), an end_timestamp (MM:SS or null if a single instant), and a short evidence explanation referencing what was said or shown. Never invent a rule, quantity, exception, or example that is not supported by the video. Preserve uncertainty, ambiguity, and strategy/timeframe/market/session/instrument/trader-experience-specific variation rather than generalizing it away — the goal of this extraction is MAXIMUM FIDELITY to what the source actually supports, not the shortest or prettiest output.
 
 Respond ONLY with JSON matching the required schema.`;

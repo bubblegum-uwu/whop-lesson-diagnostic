@@ -1,5 +1,20 @@
 import type { LessonStrategyAnalysis, Rule, Strategy, KnowledgeCategoryValue } from "../gemini/schema.js";
 
+export interface ClassificationCounts {
+  explicit: number;
+  inferred: number;
+  visual: number;
+}
+
+export interface NumericalValueCounts {
+  total: number;
+  ruleThreshold: number;
+  guideline: number;
+  example: number;
+  reference: number;
+  derivedExample: number;
+}
+
 /**
  * Everything here is derived deterministically from the already-validated
  * Gemini JSON — no additional Gemini call is ever made to produce a summary,
@@ -128,4 +143,57 @@ export function hasSupportingKnowledge(analysis: LessonStrategyAnalysis): boolea
     analysis.knowledge.conflictsAndAmbiguities.length > 0 ||
     analysis.knowledge.summary.trim().length > 0
   );
+}
+
+/**
+ * Pre-merge fidelity refinement: how each knowledgeItem was OBTAINED
+ * (explicit/inferred/visual) — distinct from ruleType (what kind of
+ * statement it is). Used by the diagnostic script and the lesson-detail UI
+ * to show, e.g., how much of a lesson's knowledge came from the chart
+ * versus was said out loud.
+ */
+export function classificationCounts(analysis: LessonStrategyAnalysis): ClassificationCounts {
+  const counts: ClassificationCounts = { explicit: 0, inferred: 0, visual: 0 };
+  for (const item of analysis.knowledge.knowledgeItems) {
+    counts[item.classification] += 1;
+  }
+  return counts;
+}
+
+/** Count of knowledgeItems whose scope.level is SCOPED (limited to a strategy/instrument/timeframe/session/trader-profile) rather than GLOBAL. */
+export function scopedKnowledgeItemCount(analysis: LessonStrategyAnalysis): number {
+  return analysis.knowledge.knowledgeItems.filter((item) => item.scope.level === "SCOPED").length;
+}
+
+/** Count of knowledgeItems that carry at least one exception (a case where the normally-applicable rule does NOT apply, distinct from `conditions`). */
+export function knowledgeItemsWithExceptionsCount(analysis: LessonStrategyAnalysis): number {
+  return analysis.knowledge.knowledgeItems.filter((item) => item.exceptions.length > 0).length;
+}
+
+/** Per-role breakdown of every numericalValue across every knowledgeItem — RULE_THRESHOLD/GUIDELINE are binding-ish, EXAMPLE/DERIVED_EXAMPLE are illustrative-only and must never be read as universal rules. */
+export function numericalValueCounts(analysis: LessonStrategyAnalysis): NumericalValueCounts {
+  const counts: NumericalValueCounts = { total: 0, ruleThreshold: 0, guideline: 0, example: 0, reference: 0, derivedExample: 0 };
+  for (const item of analysis.knowledge.knowledgeItems) {
+    for (const numericalValue of item.numericalValues) {
+      counts.total += 1;
+      switch (numericalValue.role) {
+        case "RULE_THRESHOLD":
+          counts.ruleThreshold += 1;
+          break;
+        case "GUIDELINE":
+          counts.guideline += 1;
+          break;
+        case "EXAMPLE":
+          counts.example += 1;
+          break;
+        case "REFERENCE":
+          counts.reference += 1;
+          break;
+        case "DERIVED_EXAMPLE":
+          counts.derivedExample += 1;
+          break;
+      }
+    }
+  }
+  return counts;
 }

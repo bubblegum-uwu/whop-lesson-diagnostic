@@ -41,14 +41,43 @@ function baseStrategy(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+function baseNumericalValue(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    metric: "max risk per trade",
+    operator: "LTE",
+    value: 1,
+    value2: null,
+    unit: "%",
+    role: "RULE_THRESHOLD",
+    rawText: "1%",
+    context: "max risk per trade",
+    ...overrides,
+  };
+}
+
+function baseScope(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    level: "GLOBAL",
+    strategies: [],
+    marketsOrInstruments: [],
+    timeframes: [],
+    sessions: [],
+    traderProfiles: [],
+    ...overrides,
+  };
+}
+
 function baseKnowledgeItem(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     category: "risk_management",
     statement: "Never risk more than 1% of account equity on a single trade.",
     ruleType: "HARD_RULE",
+    classification: "explicit",
     confidence: 0.95,
     conditions: null,
-    numericalValues: [{ value: 1, unit: "%", context: "max risk per trade" }],
+    exceptions: [],
+    scope: baseScope(),
+    numericalValues: [baseNumericalValue()],
     start_timestamp: "02:15",
     end_timestamp: null,
     evidence: "Spoken instruction at 02:15.",
@@ -237,18 +266,12 @@ describe("KnowledgeItemSchema — the normalized rich-knowledge rule shape", () 
   });
 
   it("preserves numericalValues' units exactly, without any implied conversion", () => {
-    const parsed = KnowledgeItemSchema.parse(
-      baseKnowledgeItem({
-        numericalValues: [
-          { value: 2, unit: "R", context: "minimum reward-to-risk" },
-          { value: 3, unit: "candles", context: "confirmation window" },
-        ],
-      }),
-    );
-    expect(parsed.numericalValues).toEqual([
-      { value: 2, unit: "R", context: "minimum reward-to-risk" },
-      { value: 3, unit: "candles", context: "confirmation window" },
-    ]);
+    const values = [
+      baseNumericalValue({ metric: "minimum reward-to-risk", operator: "GTE", value: 2, unit: "R", rawText: "at least 2R", context: "minimum reward-to-risk" }),
+      baseNumericalValue({ metric: "confirmation window", operator: "EQ", value: 3, unit: "candles", rawText: "3 candles", context: "confirmation window" }),
+    ];
+    const parsed = KnowledgeItemSchema.parse(baseKnowledgeItem({ numericalValues: values }));
+    expect(parsed.numericalValues).toEqual(values);
   });
 
   it("allows an item with zero numericalValues — not every rule has an explicit quantity", () => {
@@ -257,6 +280,170 @@ describe("KnowledgeItemSchema — the normalized rich-knowledge rule shape", () 
 
   it("rejects a confidence value out of the 0-1 range", () => {
     expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ confidence: 1.2 })).success).toBe(false);
+  });
+});
+
+// Pre-merge fidelity refinement, item A: classification (HOW a claim was
+// obtained) is a REQUIRED, DIFFERENT dimension from ruleType (WHAT KIND of
+// statement it is) — same enum/meaning as Strategy's Rule.classification.
+describe("KnowledgeItemSchema — classification (distinct from ruleType)", () => {
+  it.each(["explicit", "inferred", "visual"])("accepts classification %s", (classification) => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ classification })).success).toBe(true);
+  });
+
+  it("rejects an unknown classification", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ classification: "guessed" })).success).toBe(false);
+  });
+
+  it("rejects a payload missing classification entirely", () => {
+    const { classification: _omit, ...withoutClassification } = baseKnowledgeItem();
+    expect(KnowledgeItemSchema.safeParse(withoutClassification).success).toBe(false);
+  });
+
+  it("keeps classification and ruleType as independent axes — an explicit HARD_RULE and an inferred HARD_RULE both validate, distinctly", () => {
+    const explicitHardRule = KnowledgeItemSchema.parse(baseKnowledgeItem({ ruleType: "HARD_RULE", classification: "explicit" }));
+    const inferredHardRule = KnowledgeItemSchema.parse(baseKnowledgeItem({ ruleType: "HARD_RULE", classification: "inferred" }));
+    expect(explicitHardRule.ruleType).toBe(inferredHardRule.ruleType);
+    expect(explicitHardRule.classification).not.toBe(inferredHardRule.classification);
+  });
+});
+
+// Pre-merge fidelity refinement, item B: structured scope — guards against
+// an example-specific rule ("with one Apple contract I'd risk ~$150")
+// reading downstream as a universal one.
+describe("KnowledgeItemSchema — scope (GLOBAL vs SCOPED)", () => {
+  it("accepts a GLOBAL scope with every array empty", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope() })).success).toBe(true);
+  });
+
+  it("accepts a SCOPED item narrowed to one strategy", () => {
+    const scope = baseScope({ level: "SCOPED", strategies: ["Break & Retest"] });
+    const parsed = KnowledgeItemSchema.parse(baseKnowledgeItem({ scope }));
+    expect(parsed.scope).toEqual(scope);
+  });
+
+  it("accepts a SCOPED item narrowed to one instrument type (e.g. 0-DTE options vs. swing)", () => {
+    const scope = baseScope({ level: "SCOPED", marketsOrInstruments: ["0-DTE options"] });
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope })).success).toBe(true);
+  });
+
+  it("accepts a SCOPED item narrowed to one timeframe or session", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ level: "SCOPED", timeframes: ["5m"] }) })).success).toBe(true);
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ level: "SCOPED", sessions: ["market-open"] }) })).success).toBe(true);
+  });
+
+  it("accepts a SCOPED item narrowed to a trader profile (e.g. beginner vs. experienced)", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ level: "SCOPED", traderProfiles: ["beginner"] }) })).success).toBe(true);
+  });
+
+  it("rejects a GLOBAL scope that still carries a narrowing array — GLOBAL must mean genuinely course-wide", () => {
+    const scope = baseScope({ level: "GLOBAL", strategies: ["Break & Retest"] });
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope })).success).toBe(false);
+  });
+
+  it("rejects a SCOPED scope where every narrowing array is empty — SCOPED must specify at least one dimension", () => {
+    const scope = baseScope({ level: "SCOPED" });
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope })).success).toBe(false);
+  });
+
+  it("never broadens an example-specific rule into a global one — the one-contract dollar example stays SCOPED", () => {
+    const scoped = KnowledgeItemSchema.parse(
+      baseKnowledgeItem({
+        statement: "With one Apple contract I would risk around $150.",
+        ruleType: "OBSERVATION",
+        scope: baseScope({ level: "SCOPED", marketsOrInstruments: ["Apple options contract example"] }),
+      }),
+    );
+    expect(scoped.scope.level).toBe("SCOPED");
+  });
+});
+
+// Pre-merge fidelity refinement, item C: NumericalValue upgraded from a bare
+// {value, unit, context} to carry comparison/range/approximation semantics
+// and a role distinguishing a binding threshold from an illustrative example.
+describe("NumericalValueSchema (via KnowledgeItemSchema) — operator/value2/role semantics", () => {
+  it.each(["EQ", "GT", "GTE", "LT", "LTE", "APPROX"])("accepts operator %s with value2 null", (operator) => {
+    const value = baseNumericalValue({ operator, value2: null });
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ numericalValues: [value] })).success).toBe(true);
+  });
+
+  it("accepts operator BETWEEN with value2 set — '1% to 5%' is a real range, not one bare number", () => {
+    const value = baseNumericalValue({ metric: "account risk", operator: "BETWEEN", value: 1, value2: 5, unit: "%", role: "GUIDELINE", rawText: "1% to 5%", context: "account risk guidance" });
+    const parsed = KnowledgeItemSchema.parse(baseKnowledgeItem({ numericalValues: [value] }));
+    expect(parsed.numericalValues[0]).toEqual(value);
+  });
+
+  it("rejects operator BETWEEN with value2 null — a range must carry its upper bound", () => {
+    const value = baseNumericalValue({ operator: "BETWEEN", value2: null });
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ numericalValues: [value] })).success).toBe(false);
+  });
+
+  it("rejects a non-BETWEEN operator that still sets value2 — value2 must be set if and only if operator is BETWEEN", () => {
+    const value = baseNumericalValue({ operator: "GTE", value2: 5 });
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ numericalValues: [value] })).success).toBe(false);
+  });
+
+  it.each(["RULE_THRESHOLD", "GUIDELINE", "EXAMPLE", "REFERENCE", "DERIVED_EXAMPLE"])("accepts role %s", (role) => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ numericalValues: [baseNumericalValue({ role })] })).success).toBe(true);
+  });
+
+  it("rejects an unknown operator or role", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ numericalValues: [baseNumericalValue({ operator: "MAYBE" })] })).success).toBe(false);
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ numericalValues: [baseNumericalValue({ role: "MAYBE" })] })).success).toBe(false);
+  });
+
+  it("distinguishes a RULE_THRESHOLD from an EXAMPLE/DERIVED_EXAMPLE for the same account-size arithmetic — a derived example must never be promoted into a universal rule", () => {
+    const ruleThreshold = KnowledgeItemSchema.parse(
+      baseKnowledgeItem({ numericalValues: [baseNumericalValue({ metric: "account risk", role: "RULE_THRESHOLD", operator: "LTE", value: 1, unit: "%", rawText: "no more than 1%" })] }),
+    );
+    const derivedExample = KnowledgeItemSchema.parse(
+      baseKnowledgeItem({
+        numericalValues: [baseNumericalValue({ metric: "position size", role: "DERIVED_EXAMPLE", operator: "EQ", value: 2500, unit: "USD", rawText: "$2,500", context: "10% of a $25,000 example account" })],
+      }),
+    );
+    expect(ruleThreshold.numericalValues[0]?.role).toBe("RULE_THRESHOLD");
+    expect(derivedExample.numericalValues[0]?.role).toBe("DERIVED_EXAMPLE");
+    expect(ruleThreshold.numericalValues[0]?.role).not.toBe(derivedExample.numericalValues[0]?.role);
+  });
+
+  it("preserves the instructor's original wording verbatim in rawText — never rewritten into cleaner prose", () => {
+    const value = baseNumericalValue({ rawText: "at least 6 months" });
+    const parsed = KnowledgeItemSchema.parse(baseKnowledgeItem({ numericalValues: [value] }));
+    expect(parsed.numericalValues[0]?.rawText).toBe("at least 6 months");
+  });
+
+  it("captures multiple distinct numericalValues on one item — never collapsed to a single representative figure", () => {
+    const values = [
+      baseNumericalValue({ metric: "daily drawdown", role: "RULE_THRESHOLD", operator: "LTE", value: 10, unit: "%", rawText: "10%" }),
+      baseNumericalValue({ metric: "cumulative drawdown", role: "RULE_THRESHOLD", operator: "LTE", value: 20, unit: "%", rawText: "20%" }),
+    ];
+    const parsed = KnowledgeItemSchema.parse(baseKnowledgeItem({ numericalValues: values }));
+    expect(parsed.numericalValues).toHaveLength(2);
+  });
+});
+
+// Pre-merge fidelity refinement, item D: exceptions (cases where a rule does
+// NOT apply) are separate from conditions (when a rule DOES apply).
+describe("KnowledgeItemSchema — exceptions (distinct from conditions)", () => {
+  it("allows an empty exceptions array", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ exceptions: [] })).success).toBe(true);
+  });
+
+  it("accepts one or more exceptions, kept separate from `conditions`", () => {
+    const parsed = KnowledgeItemSchema.parse(
+      baseKnowledgeItem({
+        statement: "Scale out at HOD / first technical target.",
+        conditions: null,
+        exceptions: ["On an opening dip-and-rip, HOD may occur inside the entry candle, so standard HOD scaling may not apply the same way."],
+      }),
+    );
+    expect(parsed.exceptions).toHaveLength(1);
+    expect(parsed.conditions).toBeNull();
+  });
+
+  it("rejects a payload missing exceptions entirely", () => {
+    const { exceptions: _omit, ...withoutExceptions } = baseKnowledgeItem();
+    expect(KnowledgeItemSchema.safeParse(withoutExceptions).success).toBe(false);
   });
 });
 

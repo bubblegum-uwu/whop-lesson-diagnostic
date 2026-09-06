@@ -150,9 +150,34 @@ export type KnowledgeCategory =
 /** Mirrors backend RuleType — the item's stated STRENGTH, distinct from `classification` (how it was extracted). */
 export type RuleType = "HARD_RULE" | "GUIDELINE" | "PREFERENCE" | "WARNING" | "PROHIBITION" | "DEFINITION" | "OBSERVATION";
 
+/** How a knowledge item's claim was OBTAINED — same enum/meaning as a Strategy Rule's classification, distinct from ruleType (what kind of statement it is). */
+export type Classification = "explicit" | "inferred" | "visual";
+
+/** Where a knowledge item applies — GLOBAL unless the source actively supports narrowing (e.g. one strategy, one instrument type, one timeframe/session, or one trader-experience level). */
+export interface KnowledgeItemScope {
+  level: "GLOBAL" | "SCOPED";
+  strategies: string[];
+  marketsOrInstruments: string[];
+  timeframes: string[];
+  sessions: string[];
+  traderProfiles: string[];
+}
+
+export type NumericalOperator = "EQ" | "GT" | "GTE" | "LT" | "LTE" | "BETWEEN" | "APPROX";
+
+/** RULE_THRESHOLD/GUIDELINE are binding-ish; EXAMPLE/DERIVED_EXAMPLE are illustrative-only and must never be read as a universal rule. */
+export type NumericalRole = "RULE_THRESHOLD" | "GUIDELINE" | "EXAMPLE" | "REFERENCE" | "DERIVED_EXAMPLE";
+
 export interface NumericalValue {
+  metric: string;
+  operator: NumericalOperator;
   value: number;
+  /** Set only when operator is BETWEEN — the range's upper bound. */
+  value2: number | null;
   unit: string;
+  role: NumericalRole;
+  /** The instructor's original compact wording, verbatim — e.g. "at least 2R", "1% to 5%". Never rewritten. */
+  rawText: string;
   context: string;
 }
 
@@ -160,8 +185,13 @@ export interface KnowledgeItem {
   category: KnowledgeCategory;
   statement: string;
   ruleType: RuleType;
+  classification: Classification;
   confidence: number;
+  /** WHEN this rule applies — distinct from `exceptions` (when it does NOT). */
   conditions: string | null;
+  /** Cases where the normally-applicable rule should NOT be applied, or applies differently. */
+  exceptions: string[];
+  scope: KnowledgeItemScope;
   numericalValues: NumericalValue[];
   start_timestamp: string;
   end_timestamp: string | null;
