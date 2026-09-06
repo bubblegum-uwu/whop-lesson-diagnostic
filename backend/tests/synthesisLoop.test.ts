@@ -571,15 +571,18 @@ describe("runSynthesisLoop", () => {
               ],
             }),
             usage: clusterUsage,
-            diagnostics: computeCompletionDiagnostics("completed", "{}"),
+            diagnostics: computeCompletionDiagnostics("completed", "{}", clusterUsage),
           };
         }
         if (prompt.includes('clustered together as "Break & Retest"')) {
-          return { text: validCanonicalStrategyJson(), usage: usage1, diagnostics: computeCompletionDiagnostics("completed", validCanonicalStrategyJson()) };
+          return { text: validCanonicalStrategyJson(), usage: usage1, diagnostics: computeCompletionDiagnostics("completed", validCanonicalStrategyJson(), usage1) };
         }
         if (prompt.includes('clustered together as "Order Block Sweep"')) {
-          // Realistic production data hit the configured output-token budget mid-object.
-          throw new GeminiIncompleteInteractionError("budget_exceeded", computeCompletionDiagnostics("budget_exceeded", '{"name":"Order Block Sweep","sections":['));
+          // Realistic production data hit the configured output-token budget mid-object —
+          // most of the budget went to thinking (shared with visible output; see
+          // synthesis/limits.ts), leaving only a small truncated JSON fragment.
+          const budgetExceededUsage = { inputTokens: 2830, outputTokens: 20, thinkingTokens: 32748 };
+          throw new GeminiIncompleteInteractionError("budget_exceeded", computeCompletionDiagnostics("budget_exceeded", '{"name":"Order Block Sweep","sections":[', budgetExceededUsage));
         }
         throw new Error(`Unexpected prompt: ${prompt.slice(0, 40)}`);
       }),

@@ -65,8 +65,10 @@ describe("extractOutputText (Interactions API response shape)", () => {
 });
 
 describe("computeCompletionDiagnostics (safe, content-free response-shape signals)", () => {
+  const usage = { inputTokens: 10, outputTokens: 20, thinkingTokens: 3 };
+
   it("reports a well-formed complete JSON object accurately", () => {
-    const d = computeCompletionDiagnostics("completed", '{"a":1}');
+    const d = computeCompletionDiagnostics("completed", '{"a":1}', usage);
     expect(d).toEqual({
       interactionStatus: "completed",
       outputChars: 7,
@@ -74,33 +76,39 @@ describe("computeCompletionDiagnostics (safe, content-free response-shape signal
       startsWithOpenBrace: true,
       endsWithCloseBrace: true,
       hasMarkdownFence: false,
+      usage,
     });
   });
 
   it("flags an empty response", () => {
-    const d = computeCompletionDiagnostics("completed", "");
+    const d = computeCompletionDiagnostics("completed", "", usage);
     expect(d.isEmpty).toBe(true);
     expect(d.outputChars).toBe(0);
   });
 
   it("flags text wrapped in a Markdown code fence", () => {
-    const d = computeCompletionDiagnostics("completed", '```json\n{"a":1}\n```');
+    const d = computeCompletionDiagnostics("completed", '```json\n{"a":1}\n```', usage);
     expect(d.hasMarkdownFence).toBe(true);
   });
 
   it("detects a response that doesn't end with a closing brace — a truncation signal", () => {
-    const truncated = computeCompletionDiagnostics("incomplete", '{"a": [1, 2, 3,');
+    const truncated = computeCompletionDiagnostics("incomplete", '{"a": [1, 2, 3,', usage);
     expect(truncated.startsWithOpenBrace).toBe(true);
     expect(truncated.endsWithCloseBrace).toBe(false);
   });
 
   it("detects non-JSON content (doesn't start with an opening brace)", () => {
-    const notJson = computeCompletionDiagnostics("completed", "I cannot help with that.");
+    const notJson = computeCompletionDiagnostics("completed", "I cannot help with that.", usage);
     expect(notJson.startsWithOpenBrace).toBe(false);
   });
 
   it("never includes the response text itself anywhere in the diagnostics object", () => {
-    const d = computeCompletionDiagnostics("completed", "SECRET COURSE CONTENT that must never leak");
+    const d = computeCompletionDiagnostics("completed", "SECRET COURSE CONTENT that must never leak", usage);
     expect(JSON.stringify(d)).not.toContain("SECRET COURSE CONTENT");
+  });
+
+  it("carries the token usage through, including thinking tokens — the shared-budget signature", () => {
+    const d = computeCompletionDiagnostics("incomplete", '{"partial":', { inputTokens: 500, outputTokens: 400, thinkingTokens: 380 });
+    expect(d.usage).toEqual({ inputTokens: 500, outputTokens: 400, thinkingTokens: 380 });
   });
 });

@@ -57,10 +57,28 @@ const INCOMPLETE_INTERACTION_STATUSES: ReadonlySet<string> = new Set<GeminiIncom
   "budget_exceeded",
 ]);
 
+export interface GeminiUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  thinkingTokens: number | null;
+}
+
 /**
  * Safe, content-free shape signals about a structured-generation response —
  * enough to distinguish truncation/emptiness/non-JSON-content from a
  * genuine parse bug, without ever capturing the response text itself.
+ *
+ * `usage` is included here — not just on the success path's top-level
+ * result — specifically so it survives an INCOMPLETE/budget_exceeded
+ * failure too: Gemini's thinking tokens are billed as output and share the
+ * same max_output_tokens budget as the visible response (confirmed for
+ * this model family; see synthesis/limits.ts's changelog), so a truncated
+ * response with a small outputChars count but a large thinkingTokens count
+ * is exactly the signature of "the budget went almost entirely to
+ * thinking." Without usage on the failure path, that signature would be
+ * invisible — which is exactly what happened on the first real diagnostic
+ * run this repo saw: output_chars=1990 for a 4096-token budget, with no
+ * token counts to explain where the rest of the budget went.
  */
 export interface GeminiCompletionDiagnostics {
   /** The Interactions API's `status` field verbatim (e.g. "completed", "incomplete", "budget_exceeded"). */
@@ -70,6 +88,7 @@ export interface GeminiCompletionDiagnostics {
   startsWithOpenBrace: boolean;
   endsWithCloseBrace: boolean;
   hasMarkdownFence: boolean;
+  usage: GeminiUsage;
 }
 
 export class GeminiIncompleteInteractionError extends Error {
@@ -82,7 +101,7 @@ export class GeminiIncompleteInteractionError extends Error {
   }
 }
 
-export function computeCompletionDiagnostics(interactionStatus: string, text: string): GeminiCompletionDiagnostics {
+export function computeCompletionDiagnostics(interactionStatus: string, text: string, usage: GeminiUsage): GeminiCompletionDiagnostics {
   const trimmed = text.trim();
   return {
     interactionStatus,
@@ -91,13 +110,8 @@ export function computeCompletionDiagnostics(interactionStatus: string, text: st
     startsWithOpenBrace: trimmed.startsWith("{"),
     endsWithCloseBrace: trimmed.endsWith("}"),
     hasMarkdownFence: trimmed.startsWith("```") || trimmed.includes("\n```"),
+    usage,
   };
-}
-
-export interface GeminiUsage {
-  inputTokens: number | null;
-  outputTokens: number | null;
-  thinkingTokens: number | null;
 }
 
 export interface AnalyzeVideoResult {
@@ -266,20 +280,26 @@ export function createGeminiClient(apiKey: string): GeminiClient {
       });
 
       const text = extractOutputText(interaction) ?? "";
-      const diagnostics = computeCompletionDiagnostics(interaction.status, text);
+      const usage = extractUsage(interaction);
+      const diagnostics = computeCompletionDiagnostics(interaction.status, text, usage);
 
       // Checked BEFORE emptiness/parsing — an interaction in one of these
       // states can have partial, stale, or missing output_text; feeding it
       // to JSON.parse would misreport a completion-level failure as a
       // generic "invalid JSON" one, losing exactly the signal (status)
       // needed to tell truncation apart from a genuine malformed response.
+      // Usage is captured above BEFORE this check specifically so it's
+      // still visible even here — Gemini bills thinking tokens as output,
+      // sharing the same max_output_tokens budget as the visible response,
+      // so a truncated response's thinkingTokens count is often the real
+      // explanation for why outputChars looks small relative to the budget.
       if (INCOMPLETE_INTERACTION_STATUSES.has(interaction.status)) {
         throw new GeminiIncompleteInteractionError(interaction.status, diagnostics);
       }
       if (diagnostics.isEmpty) {
         throw new GeminiAnalysisError("Gemini returned an empty response.", diagnostics);
       }
-      return { text, usage: extractUsage(interaction), diagnostics };
+      return { text, usage, diagnostics };
     } catch (err) {
       if (err instanceof GeminiAnalysisError || err instanceof GeminiIncompleteInteractionError) throw err;
       throw new GeminiAnalysisError(

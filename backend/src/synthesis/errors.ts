@@ -1,11 +1,23 @@
 import type { GeminiCompletionDiagnostics } from "../gemini/client.js";
 
-/** A flat, grep-able, content-free rendering of completion diagnostics — never the response text itself. Shared by both error types below so a log line/persisted error always reads the same way regardless of which one fired. */
+/**
+ * A flat, grep-able, content-free rendering of completion diagnostics —
+ * never the response text itself. Shared by both error types below so a
+ * log line/persisted error always reads the same way regardless of which
+ * one fired. Includes token usage (input/output/thinking) even for a
+ * failed call — Gemini bills thinking tokens as output, sharing the same
+ * max_output_tokens budget as the visible response, so seeing a large
+ * thinking_tokens count alongside a small output_chars count is the
+ * concrete signature of "the budget went mostly to thinking, not to the
+ * JSON we actually wanted" (see synthesis/limits.ts's changelog for the
+ * real diagnostic run that first showed this).
+ */
 export function formatCompletionDiagnostics(diagnostics: GeminiCompletionDiagnostics): string {
   return (
     `interaction_status=${diagnostics.interactionStatus} output_chars=${diagnostics.outputChars} ` +
     `is_empty=${diagnostics.isEmpty} starts_with_brace=${diagnostics.startsWithOpenBrace} ` +
-    `ends_with_brace=${diagnostics.endsWithCloseBrace} has_markdown_fence=${diagnostics.hasMarkdownFence}`
+    `ends_with_brace=${diagnostics.endsWithCloseBrace} has_markdown_fence=${diagnostics.hasMarkdownFence} ` +
+    `input_tokens=${diagnostics.usage.inputTokens} output_tokens=${diagnostics.usage.outputTokens} thinking_tokens=${diagnostics.usage.thinkingTokens}`
   );
 }
 

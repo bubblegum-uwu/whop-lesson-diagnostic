@@ -13,13 +13,17 @@ import { SYNTHESIS_MAX_OUTPUT_TOKENS } from "../src/synthesis/limits.js";
  * error carrying shape diagnostics — never a bare "invalid JSON" with no
  * context, and never the prompt or response text itself.
  */
+const zeroUsage: GeminiUsage = { inputTokens: 0, outputTokens: 0, thinkingTokens: 0 };
+/** Represents usage that genuinely couldn't be extracted (e.g. the interaction never reached a state with a usage block) — never fabricated. */
+const nullUsage: GeminiUsage = { inputTokens: null, outputTokens: null, thinkingTokens: null };
+
 function makeGemini(overrides: Partial<GeminiClient> = {}): GeminiClient {
   return {
     uploadFile: vi.fn(),
     waitUntilActive: vi.fn(),
     analyzeVideo: vi.fn(),
     deleteFile: vi.fn(),
-    generateStructured: vi.fn(async () => ({ text: "{}", usage: { inputTokens: 0, outputTokens: 0, thinkingTokens: 0 }, diagnostics: computeCompletionDiagnostics("completed", "{}") })),
+    generateStructured: vi.fn(async () => ({ text: "{}", usage: zeroUsage, diagnostics: computeCompletionDiagnostics("completed", "{}", zeroUsage) })),
     ...overrides,
   };
 }
@@ -30,7 +34,7 @@ describe("safe completion diagnostics — incomplete/budget_exceeded/failed/canc
   it.each(["incomplete", "budget_exceeded", "failed", "cancelled"] as const)(
     "wraps a %s interaction status as a specific safe error naming the status, never attempting JSON.parse on it",
     async (status) => {
-      const diagnostics = computeCompletionDiagnostics(status, '{"partial":');
+      const diagnostics = computeCompletionDiagnostics(status, '{"partial":', usage);
       const gemini = makeGemini({
         generateStructured: vi.fn(async () => {
           throw new GeminiIncompleteInteractionError(status, diagnostics);
@@ -56,7 +60,7 @@ describe("safe completion diagnostics — incomplete/budget_exceeded/failed/canc
   );
 
   it("classifies an incomplete-interaction failure as permanent (retrying the identical prompt against the identical budget would fail the same way)", () => {
-    const diagnostics = computeCompletionDiagnostics("budget_exceeded", "{");
+    const diagnostics = computeCompletionDiagnostics("budget_exceeded", "{", nullUsage);
     const err = new GeminiIncompleteInteractionError("budget_exceeded", diagnostics);
     expect(classifyError(err)).toBe("permanent");
 
@@ -67,7 +71,7 @@ describe("safe completion diagnostics — incomplete/budget_exceeded/failed/canc
 
 describe("safe completion diagnostics — empty response", () => {
   it("produces a specific safe error carrying is_empty=true, distinct from a generic parse failure", async () => {
-    const diagnostics = computeCompletionDiagnostics("completed", "");
+    const diagnostics = computeCompletionDiagnostics("completed", "", zeroUsage);
     const gemini = makeGemini({
       generateStructured: vi.fn(async () => {
         throw new GeminiAnalysisError("Gemini returned an empty response.", diagnostics);
@@ -89,7 +93,7 @@ describe("safe completion diagnostics — empty response", () => {
 
 describe("safe completion diagnostics — malformed JSON despite a completed interaction", () => {
   it("reports safe shape diagnostics (never the offending text) alongside the stage-tagged parse error", () => {
-    const diagnostics = computeCompletionDiagnostics("completed", "not json at all");
+    const diagnostics = computeCompletionDiagnostics("completed", "not json at all", usage);
     let caught: SynthesisSchemaValidationError | undefined;
     try {
       parseStageJson("canonical_strategy", "not json at all", diagnostics);
@@ -105,7 +109,7 @@ describe("safe completion diagnostics — malformed JSON despite a completed int
   });
 
   it("formatCompletionDiagnostics never emits the response text, only shape signals", () => {
-    const diagnostics = computeCompletionDiagnostics("completed", "COURSE-DERIVED SECRET TEXT");
+    const diagnostics = computeCompletionDiagnostics("completed", "COURSE-DERIVED SECRET TEXT", usage);
     const formatted = formatCompletionDiagnostics(diagnostics);
     expect(formatted).not.toContain("COURSE-DERIVED SECRET TEXT");
     expect(formatted).toContain("interaction_status=completed");
@@ -122,7 +126,7 @@ describe("token usage is captured even when the stage ultimately fails", () => {
     // "synthesis progress and observability") is exactly what preserves
     // usage from any call that DID complete before this one failed —
     // never lost, never fabricated for the one that didn't.
-    const diagnostics = computeCompletionDiagnostics("incomplete", "{");
+    const diagnostics = computeCompletionDiagnostics("incomplete", "{", nullUsage);
     const gemini = makeGemini({
       generateStructured: vi.fn(async () => {
         throw new GeminiIncompleteInteractionError("incomplete", diagnostics);
@@ -140,7 +144,7 @@ describe("token usage is captured even when the stage ultimately fails", () => {
   });
 
   it("a successful call still returns real usage alongside diagnostics", async () => {
-    const diagnostics = computeCompletionDiagnostics("completed", '{"ok":true}');
+    const diagnostics = computeCompletionDiagnostics("completed", '{"ok":true}', usage);
     const gemini = makeGemini({
       generateStructured: vi.fn(async () => ({ text: '{"ok":true}', usage, diagnostics })),
     });
