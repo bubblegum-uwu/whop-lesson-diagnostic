@@ -383,7 +383,7 @@ describe("CourseIntelligence", () => {
     expect(await screen.findByText("Completed")).toBeInTheDocument();
     expect(screen.getByText("Duration: 5 min")).toBeInTheDocument();
     expect(screen.getByText("Canonical Strategies: 1")).toBeInTheDocument();
-    expect(screen.getByText("Synthesis Cost: $1.23")).toBeInTheDocument();
+    expect(screen.getByText("Total Synthesis Cost: $1.23")).toBeInTheDocument();
     expect(screen.getByText("Coverage: COMPLETE")).toBeInTheDocument();
     expect(screen.queryByText("Synthesizing Course")).not.toBeInTheDocument();
   });
@@ -404,7 +404,7 @@ describe("CourseIntelligence", () => {
     expect(screen.getByText("42%")).toBeInTheDocument();
   });
 
-  it("shows the full diagnostic snapshot on failure — progress within stage, current item, duration, last heartbeat, and cost so far — for retrying a failed synthesis", async () => {
+  it("shows the full diagnostic snapshot on failure — progress within stage, current item, duration, last heartbeat, and cost incurred — for retrying a failed synthesis", async () => {
     const status = baseStatus({
       canSynthesizeNow: true,
       latestRun: baseRunSummary({
@@ -434,9 +434,86 @@ describe("CourseIntelligence", () => {
     expect(screen.getByText("Order Block Sweep")).toBeInTheDocument();
     expect(screen.getByText("Duration: 3 min")).toBeInTheDocument();
     expect(screen.getByText("Last heartbeat: 10s before failure")).toBeInTheDocument();
-    expect(screen.getByText("Cost so far: $0.07")).toBeInTheDocument();
+    expect(screen.getByText("Cost incurred: $0.07")).toBeInTheDocument();
     expect(screen.getByText(/canonical_strategy/)).toBeInTheDocument();
     // Never the raw Gemini output or prompt content — only the safe, already-redacted message.
     expect(screen.queryByText(/synthesizing ONE canonical trading strategy/)).not.toBeInTheDocument();
   });
+
+  it("shows 'Cost so far' for a RUNNING synthesis, restored immediately on mount from the persisted run (e.g. after a browser refresh)", async () => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({ status: "RUNNING", currentStage: "CANONICALIZING", completedAt: null, estimatedCost: 0.07 }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+
+    expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
+    expect(screen.getByText("Cost so far: $0.07")).toBeInTheDocument();
+  });
+
+  it("never renders a cost line before any Gemini usage has been reported (null estimatedCost) — no fabricated cost between calls", async () => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({ status: "RUNNING", currentStage: "NORMALIZING", completedAt: null, estimatedCost: null }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+
+    await screen.findByText("Synthesizing Course");
+    expect(screen.queryByText(/Cost so far/)).not.toBeInTheDocument();
+  });
+
+  it("renders 'Cost so far: $0.00' once a real zero cost is persisted, distinct from no cost reported yet", async () => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({ status: "RUNNING", currentStage: "CANONICALIZING", completedAt: null, estimatedCost: 0 }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+
+    expect(await screen.findByText("Cost so far: $0.00")).toBeInTheDocument();
+  });
+
+  it("never drifts 'Cost so far' between local clock ticks — only a new poll can change it", async () => {
+    const status = baseStatus({
+      latestRun: baseRunSummary({ status: "RUNNING", currentStage: "CANONICALIZING", completedAt: null, estimatedCost: 0.05 }),
+    });
+    stubFetch(status);
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    expect(await screen.findByText("Cost so far: $0.05")).toBeInTheDocument();
+
+    // Real time passes (several of the component's 1s elapsed-clock ticks) with no new
+    // fetch response — the stubbed run object never changes, so cost must not drift,
+    // even though the elapsed-time text does (mirrors the existing "never advances the
+    // displayed percentage" test's real-timer pattern above).
+    await new Promise((r) => setTimeout(r, 1200));
+    expect(screen.getByText("Cost so far: $0.05")).toBeInTheDocument();
+  });
+
+  it("updates 'Cost so far' once a new poll returns increased backend progress data — never before then", async () => {
+    let pollCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/api/course/synthesis-status")) {
+          pollCount++;
+          const estimatedCost = pollCount === 1 ? 0.05 : 0.09;
+          return jsonResponse(
+            200,
+            baseStatus({ latestRun: baseRunSummary({ status: "RUNNING", currentStage: "CANONICALIZING", completedAt: null, estimatedCost }) }),
+          );
+        }
+        return jsonResponse(200, { run: null });
+      }),
+    );
+
+    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    expect(await screen.findByText("Cost so far: $0.05")).toBeInTheDocument();
+
+    // The component polls /synthesis-status every 4s while RUNNING (see CourseIntelligence's
+    // refresh() effect) — wait past that boundary for the second, higher-cost response to land.
+    await waitFor(() => expect(screen.getByText("Cost so far: $0.09")).toBeInTheDocument(), { timeout: 6000 });
+  }, 8000);
 });
