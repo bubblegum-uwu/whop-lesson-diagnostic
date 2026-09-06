@@ -176,6 +176,49 @@ export function knowledgeItemsWithExceptionsCount(analysis: LessonStrategyAnalys
   return analysis.knowledge.knowledgeItems.filter((item) => item.exceptions.length > 0).length;
 }
 
+/**
+ * Strategy-extraction regression diagnostic (see gemini/schema.ts's
+ * changelog): counts knowledgeItems that name a specific strategy in
+ * `scope.strategies`, regardless of `strategy_found`. This is DIAGNOSTIC
+ * OBSERVABILITY ONLY, never a schema invariant — a lesson may legitimately
+ * discuss one component of a named strategy without teaching enough of it
+ * to qualify as a standalone setup, so this must never fail Zod validation
+ * or be used to auto-flip strategy_found. See
+ * `strategyScopedKnowledgeWithoutExtractedStrategy` below for the actual
+ * warning condition.
+ */
+export function strategyScopedKnowledgeItemCount(analysis: LessonStrategyAnalysis): number {
+  return analysis.knowledge.knowledgeItems.filter((item) => item.scope.strategies.length > 0).length;
+}
+
+/** Every distinct strategy name referenced in any knowledgeItem's scope.strategies, in first-seen order — course content (strategy names), never a secret. */
+export function knowledgeStrategyScopeNames(analysis: LessonStrategyAnalysis): string[] {
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const item of analysis.knowledge.knowledgeItems) {
+    for (const name of item.scope.strategies) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        names.push(name);
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * True exactly when strategy_found is false but at least one knowledgeItem
+ * names a specific strategy in its scope — the signature of the exact
+ * regression a real diagnostic run found (Gemini recognizes a named,
+ * repeatable setup in knowledgeItems/examples but never re-populates
+ * `strategies`). A WARNING signal only: never fails validation, and never
+ * used to auto-generate or auto-flip `strategies`/`strategy_found` — the
+ * fix belongs in the extraction prompt, not in application-side inference.
+ */
+export function strategyScopedKnowledgeWithoutExtractedStrategy(analysis: LessonStrategyAnalysis): boolean {
+  return !analysis.strategy_found && strategyScopedKnowledgeItemCount(analysis) > 0;
+}
+
 /** Per-role breakdown of every numericalValue across every knowledgeItem — RULE_THRESHOLD/GUIDELINE are binding-ish, EXAMPLE/DERIVED_EXAMPLE are illustrative-only and must never be read as universal rules. */
 export function numericalValueCounts(analysis: LessonStrategyAnalysis): NumericalValueCounts {
   const counts: NumericalValueCounts = { total: 0, ruleThreshold: 0, guideline: 0, example: 0, reference: 0, derivedExample: 0 };

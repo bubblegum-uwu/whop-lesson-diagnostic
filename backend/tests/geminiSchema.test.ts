@@ -5,6 +5,7 @@ import {
   LessonKnowledgeSchema,
   LessonExampleSchema,
   STRATEGY_RESPONSE_JSON_SCHEMA,
+  STRATEGY_EXTRACTION_PROMPT,
 } from "../src/gemini/schema.js";
 
 function baseRule(overrides: Partial<Record<string, unknown>> = {}) {
@@ -547,5 +548,75 @@ describe("provenance — timestamps, evidence, and no wasteful per-item duplicat
     expect(knowledgeProps).toEqual(["summary", "knowledgeItems", "examples", "conflictsAndAmbiguities"]);
     expect(knowledgeProps).not.toContain("risk_management");
     expect(knowledgeProps).not.toContain("position_sizing");
+  });
+});
+
+// Strategy-extraction regression fix (see gemini/schema.ts's changelog): a
+// real diagnostic run found strategy_found=false with knowledgeItems that
+// clearly named a recognized strategy in scope.strategies — the model
+// recognized the setup but never re-populated `strategies`. The fix is
+// prompt-only; these tests confirm the SCHEMA still structurally allows
+// this exact shape (it must remain valid — it's a legitimate warning
+// signal, never a validation failure, per the task's explicit instruction
+// not to fail Zod validation solely on this condition) and never
+// auto-corrects it.
+describe("strategy_found=false with strategy-scoped knowledge — structurally valid, a warning signal only (never a schema failure)", () => {
+  it("accepts strategy_found:false + strategies:[] even when a knowledgeItem's scope names a specific strategy", () => {
+    const payload = {
+      lesson: { title: "Support & Resistance, Key Levels & Market Trends", duration_seconds: 2618 },
+      strategy_found: false,
+      strategies: [],
+      knowledge: emptyKnowledge({
+        knowledgeItems: [
+          baseKnowledgeItem({
+            category: "definitions",
+            statement: "The Break and Retest model dictates that broken resistance turns into newly formed support.",
+            scope: baseScope({ strategies: ["Break & Retest"] }),
+          }),
+        ],
+      }),
+    };
+    const result = LessonStrategyAnalysisSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.strategy_found).toBe(false);
+      expect(result.data.strategies).toEqual([]);
+      expect(result.data.knowledge.knowledgeItems[0]?.scope.strategies).toEqual(["Break & Retest"]);
+    }
+  });
+
+  it("never auto-populates strategies from knowledgeItems — parsing is a pure pass-through, never inference", () => {
+    const payload = {
+      lesson: { title: "X", duration_seconds: 100 },
+      strategy_found: false,
+      strategies: [],
+      knowledge: emptyKnowledge({ knowledgeItems: [baseKnowledgeItem({ scope: baseScope({ strategies: ["Break & Retest"] }) })] }),
+    };
+    const result = LessonStrategyAnalysisSchema.parse(payload);
+    expect(result.strategies).toEqual([]);
+    expect(result.strategy_found).toBe(false);
+  });
+});
+
+// Non-brittle content assertions (deliberately substring/keyword checks,
+// never a full-prompt snapshot) confirming the regression-fix instructions
+// are actually present in the shipped prompt.
+describe("STRATEGY_EXTRACTION_PROMPT — Task A/Task B independence (regression fix)", () => {
+  it("explicitly states Task A and Task B are independent and that overlap is expected, not a reason to skip strategy extraction", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/INDEPENDENT/);
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/already represented in knowledgeItems/i);
+  });
+
+  it("explicitly allows a strategy to qualify with some fields left discretionary, rather than requiring a perfectly complete setup", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/does not need to be perfectly complete/i);
+  });
+
+  it("explicitly warns against turning an isolated definition or general principle into a strategy on its own", () => {
+    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/do not turn an isolated definition/i);
+  });
+
+  it("repeats the independence reminder near the end of the prompt (bookended), not stated only once where Task B's length can crowd it out", () => {
+    const matches = STRATEGY_EXTRACTION_PROMPT.match(/Task A/g) ?? [];
+    expect(matches.length).toBeGreaterThanOrEqual(3);
   });
 });

@@ -14,6 +14,9 @@ import {
   globalKnowledgeItemCount,
   knowledgeItemsWithExceptionsCount,
   numericalValueCounts,
+  strategyScopedKnowledgeItemCount,
+  knowledgeStrategyScopeNames,
+  strategyScopedKnowledgeWithoutExtractedStrategy,
 } from "../src/pipeline/analysisSummary.js";
 import { estimateCost } from "../src/pricing/geminiPricing.js";
 import { createSecretRedactor } from "../src/lib/redact.js";
@@ -218,6 +221,18 @@ async function main(): Promise<void> {
       console.log(`  numerical_value_count=${numCounts.total}`);
       console.log(`  numerical_rule_threshold_count=${numCounts.ruleThreshold}`);
       console.log(`  numerical_example_count=${numCounts.example} (derived_example=${numCounts.derivedExample} guideline=${numCounts.guideline} reference=${numCounts.reference})`);
+      const strategyScopeNames = knowledgeStrategyScopeNames(analysis);
+      console.log(`  strategy_scoped_knowledge_item_count=${strategyScopedKnowledgeItemCount(analysis)}`);
+      if (strategyScopeNames.length > 0) {
+        console.log(`  knowledge_strategy_scope_names=${strategyScopeNames.join(",")}`);
+      }
+      if (strategyScopedKnowledgeWithoutExtractedStrategy(analysis)) {
+        // DIAGNOSTIC WARNING ONLY — never a schema/validation failure (see
+        // analysisSummary.ts's doc comment). A lesson can legitimately
+        // discuss one component of a named strategy without teaching
+        // enough of it to qualify as a standalone setup.
+        console.log("  semantic_warning=STRATEGY_SCOPED_KNOWLEDGE_WITHOUT_EXTRACTED_STRATEGY");
+      }
       console.log("Nothing was persisted to analysis_jobs/lesson_analyses/strategy_instances/usage_records.");
 
       const outputFile = process.env.LESSON_ANALYSIS_DIAGNOSTIC_OUTPUT_FILE;

@@ -11,6 +11,9 @@ import {
   globalKnowledgeItemCount,
   knowledgeItemsWithExceptionsCount,
   numericalValueCounts,
+  strategyScopedKnowledgeItemCount,
+  knowledgeStrategyScopeNames,
+  strategyScopedKnowledgeWithoutExtractedStrategy,
 } from "../src/pipeline/analysisSummary.js";
 import type { LessonStrategyAnalysis, Rule, KnowledgeItem, LessonKnowledge } from "../src/gemini/schema.js";
 
@@ -374,5 +377,65 @@ describe("numericalValueCounts", () => {
 
   it("is all zero when there are no numericalValues at all", () => {
     expect(numericalValueCounts(noStrategyAnalysis())).toEqual({ total: 0, ruleThreshold: 0, guideline: 0, example: 0, reference: 0, derivedExample: 0 });
+  });
+});
+
+// Strategy-extraction regression diagnostics (see gemini/schema.ts's
+// changelog): a real diagnostic run found Gemini recognizing a named
+// strategy in knowledgeItems (scope.strategies non-empty) while never
+// re-populating `strategies`/strategy_found. These helpers surface that
+// as a WARNING signal only — never a schema invariant, and never used to
+// auto-generate or auto-flip strategies/strategy_found.
+const scopedToBreakRetest = { strategies: ["Break & Retest"], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] };
+const scopedToDipAndRip = { strategies: ["Dip and Rip"], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] };
+const globalScope = { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] };
+
+describe("strategyScopedKnowledgeItemCount / knowledgeStrategyScopeNames", () => {
+  it("counts knowledgeItems naming a strategy in scope.strategies, regardless of strategy_found", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [makeKnowledgeItem({ scope: scopedToBreakRetest }), makeKnowledgeItem({ scope: globalScope }), makeKnowledgeItem({ scope: scopedToBreakRetest })],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(strategyScopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(2);
+    expect(strategyScopedKnowledgeItemCount(strategyAnalysis([makeStrategy("Break & Retest")], knowledge))).toBe(2);
+  });
+
+  it("is zero when no knowledgeItem names a strategy", () => {
+    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem({ scope: globalScope })], examples: [], conflictsAndAmbiguities: [] };
+    expect(strategyScopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(0);
+  });
+
+  it("lists every distinct strategy name referenced, in first-seen order, without duplicates", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [makeKnowledgeItem({ scope: scopedToBreakRetest }), makeKnowledgeItem({ scope: scopedToDipAndRip }), makeKnowledgeItem({ scope: scopedToBreakRetest })],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(knowledgeStrategyScopeNames(noStrategyAnalysis(knowledge))).toEqual(["Break & Retest", "Dip and Rip"]);
+  });
+
+  it("returns an empty array when no knowledgeItem names a strategy", () => {
+    expect(knowledgeStrategyScopeNames(noStrategyAnalysis())).toEqual([]);
+  });
+});
+
+describe("strategyScopedKnowledgeWithoutExtractedStrategy — the regression signature", () => {
+  it("warns when strategy_found is false but a knowledgeItem names a strategy — the exact regression a real diagnostic run found", () => {
+    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem({ scope: scopedToBreakRetest })], examples: [], conflictsAndAmbiguities: [] };
+    expect(strategyScopedKnowledgeWithoutExtractedStrategy(noStrategyAnalysis(knowledge))).toBe(true);
+  });
+
+  it("never warns when strategy_found is true, even with strategy-scoped knowledgeItems — that's the expected, non-regressed case", () => {
+    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem({ scope: scopedToBreakRetest })], examples: [], conflictsAndAmbiguities: [] };
+    expect(strategyScopedKnowledgeWithoutExtractedStrategy(strategyAnalysis([makeStrategy("Break & Retest")], knowledge))).toBe(false);
+  });
+
+  it("never warns when strategy_found is false and no knowledgeItem names a strategy — a lesson can legitimately have neither", () => {
+    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem({ scope: globalScope })], examples: [], conflictsAndAmbiguities: [] };
+    expect(strategyScopedKnowledgeWithoutExtractedStrategy(noStrategyAnalysis(knowledge))).toBe(false);
+    expect(strategyScopedKnowledgeWithoutExtractedStrategy(noStrategyAnalysis())).toBe(false);
   });
 });

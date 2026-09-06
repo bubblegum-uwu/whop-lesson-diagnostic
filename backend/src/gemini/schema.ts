@@ -109,6 +109,30 @@ import { z } from "zod";
  * "v3" now would create a version distinction with nothing real on either
  * side of it. The version should bump the NEXT time this shape changes
  * after a real "v2" analysis has been persisted.
+ *
+ * Strategy-extraction regression fix (still v2, prompt-only): a real
+ * diagnostic run against "Support & Resistance, Key Levels & Market
+ * Trends" — which a pre-fidelity-refinement run of this same prompt
+ * correctly extracted as strategy_found=true with a "Break and Retest"
+ * strategy — came back strategy_found=false after the fidelity
+ * refinement above, even though the model's own knowledgeItems/examples
+ * still clearly recognized the Break & Retest setup (a DEFINITION item
+ * with scope.strategies: ["Break & Retest"], four matching examples).
+ * `STRATEGY_EXTRACTION_PROMPT`'s standalone-strategy paragraph (Task A)
+ * was NOT itself edited by the fidelity refinement — it's byte-for-byte
+ * identical to the pre-refinement version. The likely cause: Task B's
+ * instructions grew substantially more detailed and emphatic (scope,
+ * exceptions, numerical operator/role semantics), and nothing in the
+ * prompt ever told the model the two tasks are independent — so a
+ * setup the model recognized could get "absorbed" into the now much
+ * more heavily-scaffolded Task B and never re-populate `strategies`.
+ * Fixed by making that independence explicit and prominent (bookended
+ * before Task A and again after Task B, not stated once and left to
+ * compete with Task B's length), and by explicitly allowing a strategy
+ * to qualify with some fields left discretionary/empty rather than
+ * requiring a perfectly complete, machine-executable setup. No schema
+ * change — Strategy/Rule/KnowledgeItem/NumericalValue/KnowledgeItemScope
+ * are all byte-for-byte unchanged by this fix.
  */
 
 /** Single source of truth for RuleClassification's values, reused by both Strategy's `Rule` and (v2 refinement) `KnowledgeItem` — HOW a claim was obtained, never conflated with `ruleType` (WHAT KIND of statement it is). */
@@ -556,11 +580,18 @@ export const STRATEGY_EXTRACTION_PROMPT = `You are analyzing one lesson video fr
 
 Analyze BOTH the spoken audio/instruction AND the visible on-screen trading charts and UI. This is knowledge reconstruction, not summarization.
 
-This lesson may or may not teach a complete, standalone, executable trading strategy — many valuable lessons (risk management, position sizing, trade management, psychology, preparation routines) correctly do NOT, and that is expected, not a failure. Extract BOTH of the following, independently of each other:
+This lesson may or may not teach a complete, standalone, executable trading strategy — many valuable lessons (risk management, position sizing, trade management, psychology, preparation routines) correctly do NOT, and that is expected, not a failure. You must perform TWO INDEPENDENT EXTRACTION TASKS (Task A, Task B), both fully, on every lesson:
 
-1. STANDALONE STRATEGIES (only if actually taught): if — and only if — this video teaches one or more complete, executable trading setups, extract them into "strategies": strategy_name, market_or_instrument, timeframes, indicators, setup_conditions, entry_rules, confirmation_rules, stop_loss_rules, profit_target_rules, trade_management_rules, invalidation_rules, no_trade_conditions, market_context_rules, visual_discretionary_rules, examples_shown, ambiguities. Set strategy_found to true and strategies to a non-empty array ONLY when a complete setup is taught; otherwise set strategy_found to false and strategies to an empty array. strategy_found=false means ONLY "no complete standalone setup was taught here" — it does NOT mean the lesson has no useful content, and you must still fully populate "knowledge" below regardless of strategy_found.
+*** TASK A AND TASK B ARE INDEPENDENT. THIS IS CRITICAL. ***
+A trading rule, setup, or concept may legitimately — and should — appear BOTH as part of a structured Strategy (Task A) AND as one or more KnowledgeItems (Task B). That is NOT undesirable duplication; the two representations serve different downstream purposes (a structured, executable setup vs. maximum-fidelity source knowledge). Never reason "this is already represented in knowledgeItems, so I don't need to also populate strategies" — that is the single most common mistake to avoid. Populating knowledgeItems thoroughly is never a substitute for Task A, and vice versa. Do both, completely, independently.
 
-2. LESSON KNOWLEDGE (always required, regardless of strategy_found): populate "knowledge" with every other piece of useful trading knowledge in this lesson, whether or not it is part of a standalone strategy:
+TASK A — STANDALONE STRATEGY / SETUP EXTRACTION: if this video teaches one or more repeatable trading setups with meaningful execution logic (the instructor describes how to identify, enter, manage, and exit a trade — even if some details are left discretionary), extract them into "strategies": strategy_name, market_or_instrument, timeframes, indicators, setup_conditions, entry_rules, confirmation_rules, stop_loss_rules, profit_target_rules, trade_management_rules, invalidation_rules, no_trade_conditions, market_context_rules, visual_discretionary_rules, examples_shown, ambiguities. Set strategy_found to true and strategies to a non-empty array when such a setup is taught; otherwise set strategy_found to false and strategies to an empty array. strategy_found=false means ONLY "no repeatable setup with execution logic was taught here" — it does NOT mean the lesson has no useful content, and you must still fully populate "knowledge" below (Task B) regardless of strategy_found.
+
+  A strategy DOES NOT need to be perfectly complete or machine-executable to qualify — do not reject an otherwise coherent setup just because one field remains discretionary or unspecified (e.g. the exact stop buffer, a precise target formula, an exact indicator threshold, or exact position size). Leave the corresponding rule array empty, or note the ambiguity in "ambiguities", rather than inventing a value or rejecting the whole strategy. Preserve as much strategy detail as the source actually provides across every field above — do not compress several distinct rules into one vague rule merely to save space, and do not invent missing information.
+
+  Conversely, do NOT turn an isolated definition or general principle into a strategy on its own — a definition of support, a definition of resistance, general psychology, risk-management theory in the abstract, a definition of "break of structure" or "order block", or a generic market-structure discussion, taught in isolation, is knowledge (Task B), not a strategy. But when the instructor ASSEMBLES concepts like these into a repeatable setup with entry/execution logic (e.g. "resistance breaks and becomes support; wait for a retest of that new support with a bullish candle close, then enter, with a stop below the retest low and a target at the next resistance level") — that IS a strategy, and must be captured in "strategies" via Task A, even though the same concepts (the break-and-retest definition, the entry/stop/target rules, the examples shown) should ALSO be captured as KnowledgeItems and examples via Task B below.
+
+TASK B — LESSON KNOWLEDGE (always required, regardless of strategy_found): populate "knowledge" with every other piece of useful trading knowledge in this lesson, whether or not it is part of a standalone strategy:
    - summary: a concise description of what the lesson teaches, its major themes, and its primary learning objectives.
    - knowledgeItems: every individual claim, rule, or observation worth preserving — including content that would otherwise be lost when strategy_found is false, such as risk management, position sizing, scaling in/out, trade management, execution/order-flow mechanics, higher-timeframe analysis, pre-market preparation/routine, psychology/discipline, no-trade conditions, warnings/common mistakes, and definitions/terminology. Prefer MULTIPLE precise, atomic items over one broad summarized item when the lesson teaches materially different rules — never compress distinct entry/sizing/management/invalidation rules into one vague paragraph; keep concepts atomic enough that a later synthesis step can combine them without having already lost detail.
 
@@ -589,5 +620,7 @@ This lesson may or may not teach a complete, standalone, executable trading stra
    - conflictsAndAmbiguities: apparently conflicting statements, qualified rules, or unclear/context-dependent statements made WITHIN this one lesson. Do not silently reconcile contradictory guidance — preserve the source-level uncertainty faithfully; a later synthesis stage decides how to resolve it, not you.
 
 For every individual rule/item/example, provide a start_timestamp (MM:SS), an end_timestamp (MM:SS or null if a single instant), and a short evidence explanation referencing what was said or shown. Never invent a rule, quantity, exception, or example that is not supported by the video. Preserve uncertainty, ambiguity, and strategy/timeframe/market/session/instrument/trader-experience-specific variation rather than generalizing it away — the goal of this extraction is MAXIMUM FIDELITY to what the source actually supports, not the shortest or prettiest output.
+
+*** REMINDER: before responding, re-check Task A. *** If any KnowledgeItem above has a non-empty scope.strategies (i.e. you tagged content as belonging to a named strategy), re-confirm whether that same strategy also belongs in "strategies" via Task A — a named, repeatable setup with execution logic must be captured in BOTH places, never knowledge-only.
 
 Respond ONLY with JSON matching the required schema.`;
