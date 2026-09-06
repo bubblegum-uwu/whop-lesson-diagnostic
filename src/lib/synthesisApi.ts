@@ -3,6 +3,7 @@
  * conventions as courseApi.ts: every call requires the operator's current
  * Whop access token as a bearer header.
  */
+import type { KnowledgeItemScope, NumericalValue } from "./courseApi";
 
 function authHeaders(accessToken: string): HeadersInit {
   return { Authorization: `Bearer ${accessToken}` };
@@ -66,6 +67,20 @@ export interface NoStandaloneSetupLesson {
   title: string;
 }
 
+/** Phase 3.5B — whether the FULL course is current v2/current-fingerprint before running production synthesis. Read-only/informational here; does not itself block POST /api/course/synthesize. */
+export interface SynthesisPreflight {
+  lessonCount: number;
+  latestSuccessfulAnalysisCount: number;
+  currentAnalysisCount: number;
+  staleAnalysisCount: number;
+  missingAnalysisCount: number;
+  staleLessonIds: number[];
+  staleLessonTitles: string[];
+  missingLessonIds: number[];
+  missingLessonTitles: string[];
+  ready: boolean;
+}
+
 export interface SynthesisStatus {
   course: { title: string } | null;
   counts: { totalLessons: number; analyzed: number; processing: number; queued: number; failed: number };
@@ -74,6 +89,7 @@ export interface SynthesisStatus {
   latestCompletedRun: SynthesisRunSummary | null;
   isOutOfDate: boolean;
   canSynthesizeNow: boolean;
+  preflight: SynthesisPreflight;
 }
 
 export async function getSynthesisStatus(backendUrl: string, accessToken: string): Promise<SynthesisStatus | null> {
@@ -117,6 +133,11 @@ export interface SynthesizedRule {
   supportCount: number;
   sources: SourceRef[];
   conflictSources: SourceRef[];
+  /** Phase 3.5B — deterministically attached from whichever cited rich-knowledge source(s) support this rule; empty for a rule derived only from a pre-3.5B strategy-instance rule. */
+  exceptions: string[];
+  numericalValues: NumericalValue[];
+  /** The union of every cited source's scope — null when this rule carries no scope-bearing citation. */
+  scope: KnowledgeItemScope | null;
 }
 
 export interface Conflict {
@@ -140,6 +161,19 @@ export interface CanonicalStrategy {
   invalidationRules: SynthesizedRule[];
   noTradeConditions: SynthesizedRule[];
   visualDiscretionaryRules: SynthesizedRule[];
+  /**
+   * Phase 3.5B — populated from strategy-scoped rich KnowledgeItems (see
+   * strategyScopeMapping.ts) drawn from ANY contributing lesson, not just
+   * this cluster's own strategy instances. Same SynthesizedRule shape as
+   * the 11 categories above.
+   */
+  riskManagementRules: SynthesizedRule[];
+  positionSizingRules: SynthesizedRule[];
+  scalingInRules: SynthesizedRule[];
+  scalingOutRules: SynthesizedRule[];
+  runnerManagementRules: SynthesizedRule[];
+  warnings: SynthesizedRule[];
+  instructorPreferences: SynthesizedRule[];
   variants: { description: string; sourceLessonIds: number[] }[];
   examples: { description: string; sourceLessonId: number }[];
   ambiguities: string[];
@@ -192,6 +226,8 @@ export interface FrameworkCoverage {
   lessonsMissingSupportingKnowledgeExtraction: number;
   missingSupportingKnowledgeLessonIds: number[];
   missingSupportingKnowledgeLessonTitles: string[];
+  /** Phase 3.5B — human-readable labels of tracked knowledge dimensions (risk management, position sizing, psychology, etc.) with zero supporting evidence anywhere in the course; this, not lesson/strategy counts, now drives `status`. */
+  missingFrameworkDimensions: string[];
   coverageNote: string;
 }
 

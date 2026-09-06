@@ -517,4 +517,87 @@ describe("synthesis/coreFramework — Phase 3.5B course-wide knowledge pooling",
     expect(coreFramework.sections[0].rules[0].numericalValues).toEqual([]);
     expect(coreFramework.sections[0].rules[0].scope).toBeNull();
   });
+
+  it("preserves every numerical operator/role, ruleType, and classification unchanged end to end — never collapsed, converted, or averaged", async () => {
+    const operators = ["EQ", "GT", "GTE", "LT", "LTE", "BETWEEN", "APPROX"] as const;
+    const roles = ["RULE_THRESHOLD", "GUIDELINE", "EXAMPLE", "REFERENCE", "DERIVED_EXAMPLE"] as const;
+    const ruleTypes = ["HARD_RULE", "GUIDELINE", "PREFERENCE", "WARNING", "PROHIBITION", "DEFINITION", "OBSERVATION"] as const;
+    const classifications = ["explicit", "inferred", "visual"] as const;
+
+    // One KnowledgeItem per operator (paired round-robin with a role), plus separate items covering every ruleType/classification — proves the deterministic aggregation never branches on or drops a specific enum value.
+    const numericalItems: KnowledgeItemRecord[] = operators.map((operator, i) => ({
+      lessonId: 40,
+      lessonTitle: "Numerics Lesson",
+      analysisId: 400,
+      isScoped: false,
+      item: makeKnowledgeItem({
+        category: "risk_management",
+        numericalValues: [
+          { metric: `metric-${operator}`, operator, value: 1, value2: operator === "BETWEEN" ? 5 : null, unit: "%", role: roles[i % roles.length], rawText: `raw-${operator}`, context: "c" },
+        ],
+      }),
+    }));
+    const ruleTypeItems: KnowledgeItemRecord[] = ruleTypes.map((ruleType, i) => ({
+      lessonId: 41,
+      lessonTitle: "RuleType Lesson",
+      analysisId: 401,
+      isScoped: false,
+      item: makeKnowledgeItem({ category: "warnings", ruleType, classification: classifications[i % classifications.length], statement: `${ruleType} statement` }),
+    }));
+    const courseKnowledge = [...numericalItems, ...ruleTypeItems];
+
+    // Cite every knowledge item's key in one pooled framework rule so the aggregation touches all of them at once.
+    const allKeys = courseKnowledge.map((_, i) => `k${i + 1}`);
+    const generateStructured = vi.fn(async () => ({
+      text: JSON.stringify({
+        sections: [{ key: "pooled", title: "Pooled", rules: [{ description: "d", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 2, sourceKeys: allKeys, conflictSourceKeys: [] }] }],
+      }),
+      usage,
+    }));
+    const gemini = makeGemini({ generateStructured });
+
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [canonicalStrategy], [], courseKnowledge);
+    const rule = coreFramework.sections[0].rules[0];
+
+    for (const operator of operators) {
+      expect(rule.numericalValues.some((v) => v.operator === operator)).toBe(true);
+    }
+    for (const role of roles) {
+      expect(rule.numericalValues.some((v) => v.role === role)).toBe(true);
+    }
+    // BETWEEN kept its value2; every non-BETWEEN kept value2 null (never fabricated, never averaged away).
+    const betweenValue = rule.numericalValues.find((v) => v.operator === "BETWEEN");
+    expect(betweenValue?.value2).toBe(5);
+    expect(rule.numericalValues.filter((v) => v.operator !== "BETWEEN").every((v) => v.value2 === null)).toBe(true);
+
+    // ruleType/classification aren't carried on SynthesizedRule itself (they're per-source-item concepts), but confirm every cited source resolved correctly and no item was dropped.
+    expect(rule.sources).toHaveLength(courseKnowledge.length);
+  });
+
+  it("an example value never becomes a universal rule — a DERIVED_EXAMPLE/EXAMPLE numeric role is preserved as such, never promoted to RULE_THRESHOLD", async () => {
+    const courseKnowledge: KnowledgeItemRecord[] = [
+      {
+        lessonId: 42,
+        lessonTitle: "Example Lesson",
+        analysisId: 402,
+        isScoped: false,
+        item: makeKnowledgeItem({
+          category: "risk_management",
+          statement: "Example trade risked $150 on one Apple contract.",
+          numericalValues: [{ metric: "example risk amount", operator: "EQ", value: 150, value2: null, unit: "USD", role: "EXAMPLE", rawText: "$150", context: "one AAPL contract example" }],
+        }),
+      },
+    ];
+    const generateStructured = vi.fn(async () => ({
+      text: JSON.stringify({
+        sections: [{ key: "risk_framework", title: "Risk Framework", rules: [{ description: "Example trade risk amount noted for illustration.", classification: "explicit", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["k1"], conflictSourceKeys: [] }] }],
+      }),
+      usage,
+    }));
+    const gemini = makeGemini({ generateStructured });
+
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [canonicalStrategy], [], courseKnowledge);
+    expect(coreFramework.sections[0].rules[0].numericalValues[0].role).toBe("EXAMPLE");
+    expect(coreFramework.sections[0].rules[0].numericalValues[0].role).not.toBe("RULE_THRESHOLD");
+  });
 });
