@@ -392,3 +392,156 @@ button:disabled {
   padding: 0.35rem 0.6rem;
   color: #7fe0a0;
 }
+
+/* ---- PR2: batch processing dashboard ---- */
+
+.dashboard-summary {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  border: 1px solid #262a33;
+  border-radius: 8px;
+  background: #14161b;
+}
+
+.dashboard-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.dashboard-tile {
+  text-align: center;
+  padding: 0.5rem;
+  border-radius: 6px;
+  background: #1a1d24;
+}
+
+.dashboard-tile-value {
+  font-size: 1.3rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.dashboard-tile-label {
+  font-size: 0.72rem;
+  color: #8b91a0;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-top: 0.15rem;
+}
+
+.dashboard-spend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  font-size: 0.85rem;
+  color: #c7cad3;
+  border-top: 1px solid #262a33;
+  padding-top: 0.75rem;
+}
+
+.batch-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+.batch-selection-actions,
+.batch-primary-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.batch-primary-actions button {
+  margin-top: 0;
+}
+
+.batch-confirm {
+  margin-bottom: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  border: 1px solid #3a4a2e;
+  background: #171f14;
+}
+
+.batch-confirm p {
+  margin: 0.15rem 0;
+  font-size: 0.88rem;
+}
+
+.batch-confirm-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.6rem;
+}
+
+.batch-confirm-actions button {
+  margin-top: 0;
+}
+
+.status-badge {
+  display: inline-block;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.status-neutral { background: #262a33; color: #a7adba; }
+.status-queued { background: #332c17; color: #e0c67f; }
+.status-processing { background: #17232f; color: #7fbfe0; }
+.status-success { background: #17331f; color: #7fe0a0; }
+.status-error { background: #331717; color: #ff9b9b; }
+
+.stale-hint {
+  color: #e0c67f;
+  font-size: 0.75rem;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.row-error {
+  color: #ff9b9b;
+  font-size: 0.78rem;
+  text-decoration: underline dotted;
+  cursor: help;
+}
+
+.detail-row td {
+  background: #0f131a;
+  padding: 1rem;
+}
+
+.analysis-detail-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+/* Keep these columns visible on narrow screens; everything marked
+   hide-narrow collapses so Lesson/Status/Progress/Strategy/Actions still fit. */
+@media (max-width: 900px) {
+  .hide-narrow {
+    display: none;
+  }
+}

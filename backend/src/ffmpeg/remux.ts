@@ -26,9 +26,54 @@ export interface RemuxDeps {
 
 const defaultDeps: RemuxDeps = { spawn, redactor: globalRedactor };
 
+export interface RemuxProgress {
+  elapsedSeconds: number;
+  /** null when no duration could be determined (Whop metadata absent AND ffprobe failed) — indeterminate. */
+  totalSeconds: number | null;
+}
+
 export interface RemuxOptions {
   ffmpegPath?: string;
+  ffprobePath?: string;
   timeoutMs?: number;
+  /** Skips the ffprobe pre-flight when the caller already knows the duration (e.g. from Whop's video_asset). */
+  knownDurationSeconds?: number | null;
+  /** When provided, ffmpeg is run with real `-progress pipe:1` tracking instead of the plain fire-and-forget mode. */
+  onProgress?: (progress: RemuxProgress) => void;
+}
+
+/**
+ * Best-effort duration probe via `ffprobe`, used only to compute real
+ * `PREPARING_VIDEO` percentage when Whop hasn't reported `duration_seconds`
+ * for a lesson yet. Never throws — a probe failure just means progress stays
+ * indeterminate (elapsed-only), never a fabricated percentage.
+ */
+export async function probeDurationSeconds(
+  signedUrl: string,
+  ffprobePath = "ffprobe",
+  deps: RemuxDeps = defaultDeps,
+): Promise<number | null> {
+  deps.redactor.register(signedUrl);
+  return new Promise((resolve) => {
+    const child = deps.spawn(
+      ffprobePath,
+      ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", signedUrl],
+      { stdio: ["ignore", "pipe", "ignore"] },
+    );
+    let stdout = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.on("error", () => resolve(null));
+    child.on("close", (code: number | null) => {
+      if (code !== 0) {
+        resolve(null);
+        return;
+      }
+      const seconds = Number.parseFloat(stdout.trim());
+      resolve(Number.isFinite(seconds) ? Math.round(seconds) : null);
+    });
+  });
 }
 
 /**
@@ -38,6 +83,12 @@ export interface RemuxOptions {
  * sanitized message — it does NOT automatically fall back to re-encoding,
  * per the "no unnecessary re-encoding" requirement. Callers may retry with
  * `forceReencode: true` if they've decided that's appropriate.
+ *
+ * When `onProgress` is given, ffmpeg is asked for real `-progress pipe:1`
+ * output and the elapsed media time is parsed from it — never a fabricated
+ * percentage. `totalSeconds` comes from `knownDurationSeconds` if the caller
+ * has it, else a best-effort `ffprobe` pre-flight (itself allowed to fail
+ * into indeterminate progress).
  */
 export async function remuxToMp4(
   signedUrl: string,
@@ -45,15 +96,23 @@ export async function remuxToMp4(
   options: RemuxOptions = {},
   deps: RemuxDeps = defaultDeps,
 ): Promise<void> {
-  const { ffmpegPath = "ffmpeg", timeoutMs = 25 * 60 * 1000 } = options;
+  const { ffmpegPath = "ffmpeg", ffprobePath = "ffprobe", timeoutMs = 25 * 60 * 1000, onProgress } = options;
   deps.redactor.register(signedUrl);
 
-  const args = ["-y", "-loglevel", "error", "-i", signedUrl, "-c", "copy", outputPath];
+  let totalSeconds = options.knownDurationSeconds ?? null;
+  if (onProgress && totalSeconds == null) {
+    totalSeconds = await probeDurationSeconds(signedUrl, ffprobePath, deps);
+  }
+
+  const args = onProgress
+    ? ["-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats", "-i", signedUrl, "-c", "copy", outputPath]
+    : ["-y", "-loglevel", "error", "-i", signedUrl, "-c", "copy", outputPath];
 
   await new Promise<void>((resolve, reject) => {
-    const child = deps.spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
+    const child = deps.spawn(ffmpegPath, args, { stdio: ["ignore", onProgress ? "pipe" : "ignore", "pipe"] });
 
     let stderr = "";
+    let stdoutBuffer = "";
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new FfmpegRemuxError("ffmpeg timed out during remux.", null));
@@ -63,6 +122,27 @@ export async function remuxToMp4(
       stderr += chunk.toString("utf8");
       // Cap buffered stderr to avoid unbounded memory growth on pathological input.
       if (stderr.length > 20_000) stderr = stderr.slice(-20_000);
+    });
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (!onProgress) return;
+      stdoutBuffer += chunk.toString("utf8");
+      let newlineIndex: number;
+      while ((newlineIndex = stdoutBuffer.indexOf("\n")) !== -1) {
+        const line = stdoutBuffer.slice(0, newlineIndex).trim();
+        stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+        const separatorIndex = line.indexOf("=");
+        if (separatorIndex === -1) continue;
+        const key = line.slice(0, separatorIndex);
+        const value = line.slice(separatorIndex + 1);
+        if (key === "out_time_us" || key === "out_time_ms") {
+          const raw = Number(value);
+          if (Number.isFinite(raw)) {
+            const elapsedSeconds = key === "out_time_us" ? raw / 1_000_000 : raw / 1_000;
+            onProgress({ elapsedSeconds, totalSeconds });
+          }
+        }
+      }
     });
 
     child.on("error", (err) => {

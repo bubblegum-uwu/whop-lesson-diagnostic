@@ -1,7 +1,9 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
 import { saveAuthSession, getAuthSession, getAuthSessionStatus, deleteAuthSession } from "../../db/authSessionRepo.js";
+import { resumeAllAuthRequiredJobs } from "../../db/analysisJobsRepo.js";
 import { WhopIdentityError, type WhopOAuthClient } from "../../whop/oauthClient.js";
+import type { JobTrigger } from "../../jobs/runJobTrigger.js";
 import { globalRedactor } from "../../lib/redact.js";
 import { logger } from "../../lib/logger.js";
 
@@ -11,6 +13,13 @@ export interface AuthRoutesDeps {
   refreshTokenEncryptionKey: string;
   /** The one Whop user allowed to become (or remain) this deployment's operator. */
   whopOperatorUserId: string;
+  /**
+   * Optional: when present, a successful reconnect resumes every
+   * AUTH_REQUIRED analysis job (PR2) and ensures a worker execution is
+   * running to pick them back up — this is the ONLY path that ever moves a
+   * job out of AUTH_REQUIRED; the Cloud Scheduler safety net never does.
+   */
+  jobTrigger?: JobTrigger;
 }
 
 interface EstablishSessionBody {
@@ -98,6 +107,19 @@ export function createEstablishSessionHandler(deps: AuthRoutesDeps) {
       },
       deps.refreshTokenEncryptionKey,
     );
+
+    if (deps.jobTrigger) {
+      const resumedCount = await resumeAllAuthRequiredJobs(deps.pool);
+      if (resumedCount > 0) {
+        try {
+          await deps.jobTrigger.triggerRun();
+        } catch (err) {
+          logger.error("Failed to trigger worker Job execution after resuming AUTH_REQUIRED jobs", {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
 
     res.status(200).json({ ok: true });
   };

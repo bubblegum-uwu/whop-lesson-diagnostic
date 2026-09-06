@@ -1,5 +1,5 @@
 import express, { type Express } from "express";
-import type { AppConfig } from "../config.js";
+import { requireApiRoleEnv, type AppConfig } from "../config.js";
 import { corsMiddleware } from "../lib/cors.js";
 import { createWhopClient } from "../whop/client.js";
 import { createWhopCourseClient } from "../whop/courseClient.js";
@@ -15,7 +15,14 @@ import {
 } from "./routes/auth.js";
 import { createCourseSyncHandler } from "./routes/courseSync.js";
 import { createCourseLessonsHandler } from "./routes/courseLessons.js";
+import { createEnqueueJobsHandler, createRetryJobHandler, createCancelJobHandler, createGetJobHandler } from "./routes/analysisJobs.js";
+import { createLessonAnalysisDetailHandler } from "./routes/lessonAnalysisDetail.js";
+import { createAnalysisSummaryHandler } from "./routes/analysisSummary.js";
+import { createAnalysisEventsHandler } from "./routes/analysisEvents.js";
+import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
 import { requireOperator } from "./middleware/operatorAuth.js";
+import { createJobTrigger } from "../jobs/runJobTrigger.js";
+import { createGoogleOidcVerifier } from "../lib/googleOidc.js";
 import type { AnalyzeLessonDeps } from "../pipeline/analyzeLesson.js";
 
 export function createApp(config: AppConfig): Express {
@@ -54,11 +61,18 @@ export function createApp(config: AppConfig): Express {
   // this deployment's Gemini quota.
   app.post("/api/analyze-lesson", operatorAuth, createAnalyzeLessonHandler(deps));
 
+  // PR2: batch analysis job control, dashboard summary, live progress, and
+  // the Cloud Scheduler safety net. requireApiRoleEnv fails startup loudly
+  // if any of these are missing rather than silently degrading.
+  const { gcpProjectId, cloudRunJobName, schedulerServiceAccountEmail, publicApiBaseUrl } = requireApiRoleEnv(config);
+  const jobTrigger = createJobTrigger({ projectId: gcpProjectId, region: config.gcpRegion, jobName: cloudRunJobName });
+
   const authDeps = {
     pool,
     oauthClient,
     refreshTokenEncryptionKey: config.refreshTokenEncryptionKey,
     whopOperatorUserId: config.whopOperatorUserId,
+    jobTrigger,
   };
   // Not gated: this is the one route reachable before any operator exists —
   // it verifies the submitted token itself and enforces single-operator
@@ -77,6 +91,26 @@ export function createApp(config: AppConfig): Express {
     operatorAuth,
     createCourseLessonsHandler({ pool, whopCourseId: config.course.courseId }),
   );
+  app.get(
+    "/api/course/lessons/:lessonId/analysis",
+    operatorAuth,
+    createLessonAnalysisDetailHandler({ pool }),
+  );
+
+  const analysisJobsDeps = { pool, jobTrigger, geminiModel: config.geminiModel };
+  app.post("/api/analysis/jobs", operatorAuth, createEnqueueJobsHandler(analysisJobsDeps));
+  app.post("/api/analysis/jobs/:jobId/retry", operatorAuth, createRetryJobHandler(analysisJobsDeps));
+  app.post("/api/analysis/jobs/:jobId/cancel", operatorAuth, createCancelJobHandler(analysisJobsDeps));
+  app.get("/api/analysis/jobs/:jobId", operatorAuth, createGetJobHandler(analysisJobsDeps));
+  app.get(
+    "/api/analysis/summary",
+    operatorAuth,
+    createAnalysisSummaryHandler({ pool, whopCourseId: config.course.courseId }),
+  );
+  app.get("/api/analysis/events", operatorAuth, createAnalysisEventsHandler({ pool }));
+
+  const oidcVerifier = createGoogleOidcVerifier(publicApiBaseUrl, schedulerServiceAccountEmail);
+  app.post("/internal/ensure-worker-running", createEnsureWorkerRunningHandler({ pool, jobTrigger, oidcVerifier }));
 
   return app;
 }

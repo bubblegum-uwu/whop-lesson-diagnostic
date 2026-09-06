@@ -158,6 +158,17 @@ directly (never this app's backend) who you are, so you can copy the
 result into `WHOP_OPERATOR_USER_ID`. See `backend/README.md`'s "Security
 model" for the full design.
 
+**Phase 3 PR2** turns the Course table into a batch-processing dashboard:
+select any number of lessons (checkboxes, "Select All Unanalyzed", "Select
+Failed"), queue them with **Analyze Selected**/**Analyze All Unanalyzed**,
+and close the browser — a Cloud Run Job keeps working durably in Postgres
+and the table reconstructs live status, progress, and results the moment
+you come back. Per-lesson output includes strategy name(s), rule counts,
+confidence, a deterministic summary, cost, and processing time, with a
+**View Analysis** panel for the full breakdown and a JSON download. See
+`backend/README.md`'s "Phase 3 PR2" section for the underlying
+queue/worker architecture.
+
 ## 6. How to run this diagnostic
 
 ### Locally
@@ -210,7 +221,7 @@ src/
     sessionConfig.ts           # sessionStorage-only, non-secret config (which OAuth flow + lesson URL)
     backendConfig.ts            # Reads VITE_BACKEND_URL (Phase 2, optional)
     scarfaceCourseConfig.ts       # Phase 3: VITE_WHOP_CLIENT_ID + the one course's fixed IDs
-    courseApi.ts                  # Phase 3: client for /api/auth/* and /api/course/* (bearer-authenticated)
+    courseApi.ts                  # Phase 3: client for /api/auth/*, /api/course/*, and PR2's /api/analysis/*
     whopIdentify.ts                 # Security fix: calls Whop's userinfo directly — never this app's backend
     analyzeLessonClient.ts            # SSE client for the Phase 2 backend
     strategyTypes.ts                    # Display types for the Gemini strategy result
@@ -222,9 +233,12 @@ src/
     ConfigForm.tsx         # Lesson URL input (client_id is build-time config, not typed in)
     DiagnosticResult.tsx    # Sanitized success view
     ErrorResult.tsx          # 401/403/404/other error view
-    AnalyzeLesson.tsx         # Phase 2: trigger, live stage progress, results, download
-    CourseTable.tsx            # Phase 3: sign-in, sync, one row per persisted lesson
-    FindWhopUserId.tsx           # One-time setup: discover your own Whop user id for WHOP_OPERATOR_USER_ID
+    AnalyzeLesson.tsx         # Phase 2: single-lesson trigger, live stage progress, results, download
+    CourseTable.tsx            # PR2: batch-processing dashboard — selection, status/progress, actions
+    StatusBadge.tsx              # PR2: job status → badge label/class
+    AnalysisDetailPanel.tsx        # PR2: [ View Analysis ] full strategy breakdown + JSON download
+    DashboardSummary.tsx             # PR2: course-level stats/spend tiles
+    FindWhopUserId.tsx                 # One-time setup: discover your own Whop user id for WHOP_OPERATOR_USER_ID
   App.tsx                 # Orchestrates OAuth (course + diagnostic + identify flows) + display
 .github/workflows/deploy.yml  # CI: test backend, test+build+deploy frontend to Pages
 backend/                  # Phase 2 Cloud Run backend + Phase 3 course/auth persistence (see backend/README.md)

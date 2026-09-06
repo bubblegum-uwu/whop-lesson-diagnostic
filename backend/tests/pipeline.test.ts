@@ -94,7 +94,7 @@ function makeDeps(overrides: Partial<AnalyzeLessonDeps> = {}, geminiOverrides: P
   const gemini: GeminiClient = {
     uploadFile: vi.fn(async () => makeFile("ACTIVE")),
     waitUntilActive: vi.fn(async (f: GeminiFileRef) => f),
-    analyzeVideo: vi.fn(async () => validStrategyJson),
+    analyzeVideo: vi.fn(async () => ({ text: validStrategyJson, usage: { inputTokens: 1000, outputTokens: 200, thinkingTokens: 50 } })),
     deleteFile: vi.fn(async () => undefined),
     ...geminiOverrides,
   };
@@ -125,9 +125,11 @@ describe("analyzeLesson pipeline", () => {
       "resolving_secure_video",
       "preparing_video",
       "uploading_to_gemini",
+      "gemini_processing",
       "analyzing_lesson",
       "validating_result",
     ]);
+    expect(result.usage).toEqual({ inputTokens: 1000, outputTokens: 200, thinkingTokens: 50 });
   });
 
   it("registers the Whop access token with the redactor immediately", async () => {
@@ -271,17 +273,17 @@ describe("analyzeLesson pipeline", () => {
   });
 
   it("throws SchemaValidationError when Gemini returns invalid JSON", async () => {
-    const deps = makeDeps({}, { analyzeVideo: vi.fn(async () => "not json at all") });
+    const deps = makeDeps({}, { analyzeVideo: vi.fn(async () => ({ text: "not json at all", usage: { inputTokens: null, outputTokens: null, thinkingTokens: null } })) });
     await expect(analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps)).rejects.toThrow(SchemaValidationError);
   });
 
   it("throws SchemaValidationError when Gemini's JSON doesn't match the required schema", async () => {
-    const deps = makeDeps({}, { analyzeVideo: vi.fn(async () => JSON.stringify({ strategy_found: true })) });
+    const deps = makeDeps({}, { analyzeVideo: vi.fn(async () => ({ text: JSON.stringify({ strategy_found: true }), usage: { inputTokens: null, outputTokens: null, thinkingTokens: null } })) });
     await expect(analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps)).rejects.toThrow(SchemaValidationError);
   });
 
   it("returns a successful (non-error) result with strategy_found:false when the lesson teaches no strategy", async () => {
-    const deps = makeDeps({}, { analyzeVideo: vi.fn(async () => noStrategyJson) });
+    const deps = makeDeps({}, { analyzeVideo: vi.fn(async () => ({ text: noStrategyJson, usage: { inputTokens: null, outputTokens: null, thinkingTokens: null } })) });
     const result = await analyzeLesson(LESSON_URL, ACCESS_TOKEN, deps);
     expect(result.analysis.strategy_found).toBe(false);
     expect(result.analysis.strategies).toEqual([]);

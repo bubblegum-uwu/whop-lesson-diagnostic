@@ -35,12 +35,33 @@ export class GeminiAnalysisError extends Error {
   }
 }
 
+export interface GeminiUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  thinkingTokens: number | null;
+}
+
+export interface AnalyzeVideoResult {
+  /** The raw JSON text produced by the model (not yet schema-validated). */
+  text: string;
+  usage: GeminiUsage;
+}
+
 export interface GeminiClient {
   uploadFile(filePath: string): Promise<GeminiFileRef>;
   waitUntilActive(file: GeminiFileRef, pollIntervalMs?: number): Promise<GeminiFileRef>;
-  /** Returns the raw JSON text produced by the model (not yet schema-validated). */
-  analyzeVideo(file: GeminiFileRef, model: string, processingMode: "agentic" | "static"): Promise<string>;
+  analyzeVideo(file: GeminiFileRef, model: string, processingMode: "agentic" | "static"): Promise<AnalyzeVideoResult>;
   deleteFile(file: GeminiFileRef): Promise<void>;
+}
+
+/** Extracts token usage from `Interaction.usage` — never a second Gemini call. */
+export function extractUsage(interaction: Interactions.Interaction): GeminiUsage {
+  const usage = interaction.usage;
+  return {
+    inputTokens: usage?.total_input_tokens ?? null,
+    outputTokens: usage?.total_output_tokens ?? null,
+    thinkingTokens: usage?.total_thought_tokens ?? null,
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -113,7 +134,7 @@ export function createGeminiClient(apiKey: string): GeminiClient {
     file: GeminiFileRef,
     model: string,
     processingMode: "agentic" | "static",
-  ): Promise<string> {
+  ): Promise<AnalyzeVideoResult> {
     try {
       const videoContent: Interactions.VideoContent = {
         type: "video",
@@ -140,7 +161,7 @@ export function createGeminiClient(apiKey: string): GeminiClient {
       if (!text) {
         throw new GeminiAnalysisError("Gemini returned an empty response.");
       }
-      return text;
+      return { text, usage: extractUsage(interaction) };
     } catch (err) {
       if (err instanceof GeminiAnalysisError) throw err;
       throw new GeminiAnalysisError(
