@@ -21,6 +21,7 @@ import {
   CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   PLAYBOOK_RESPONSE_JSON_SCHEMA,
   DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+  RULE_CATEGORY_KEYS,
   type RawCanonicalStrategy,
 } from "../src/synthesis/schema.js";
 import type { CanonicalStrategy, ClusterProposal, CoreFramework } from "../src/synthesis/schema.js";
@@ -222,9 +223,39 @@ function validCanonicalStrategyJson(overrides: Record<string, unknown> = {}) {
   });
 }
 
+function validRawCanonicalStrategyJson(overrides: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    name: "Break & Retest",
+    purpose: "p",
+    markets: ["ES"],
+    timeframes: ["5m"],
+    sections: [
+      {
+        category: "entryRules",
+        rules: [
+          {
+            description: "Enter on retest",
+            classification: "explicit",
+            supportLevel: "MULTI_SOURCE",
+            supportCount: 2,
+            sources: [{ lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e" }],
+            conflictSources: [],
+          },
+        ],
+      },
+    ],
+    variants: [],
+    examples: [],
+    ambiguities: [],
+    conflicts: [],
+    sourceLessonIds: [10],
+    ...overrides,
+  });
+}
+
 describe("synthesis/canonicalStrategy", () => {
   it("validates and returns a canonical strategy with usage", async () => {
-    const gemini = makeGemini({ generateStructured: vi.fn(async () => ({ text: validCanonicalStrategyJson(), usage })) });
+    const gemini = makeGemini({ generateStructured: vi.fn(async () => ({ text: validRawCanonicalStrategyJson(), usage })) });
     const cluster: ClusterProposal = {
       clusterKey: "br",
       proposedCanonicalName: "Break & Retest",
@@ -306,7 +337,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
       }
       if (prompt.includes("synthesizing ONE canonical trading strategy")) {
         calls.push("canonical");
-        return { text: validCanonicalStrategyJson(), usage };
+        return { text: validRawCanonicalStrategyJson(), usage };
       }
       if (prompt.includes("Core Trading Framework")) {
         calls.push("core_framework");
@@ -382,7 +413,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
             usage,
           };
         }
-        if (prompt.includes("synthesizing ONE canonical trading strategy")) return { text: validCanonicalStrategyJson(), usage };
+        if (prompt.includes("synthesizing ONE canonical trading strategy")) return { text: validRawCanonicalStrategyJson(), usage };
         if (prompt.includes("Core Trading Framework")) return { text: validCoreFrameworkJson(), usage };
         if (prompt.includes("Comprehensive Trading Playbook")) return { text: validPlaybookJson(), usage };
         return { text: validDecisionFrameworkJson(), usage };
@@ -500,17 +531,7 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
       purpose: "p",
       markets: ["ES"],
       timeframes: ["5m"],
-      marketContext: [],
-      prerequisites: [],
-      setup: [],
-      entryRules: [],
-      confirmationRules: [],
-      stopLossRules: [],
-      profitTargetRules: [],
-      tradeManagementRules: [],
-      invalidationRules: [],
-      noTradeConditions: [],
-      visualDiscretionaryRules: [],
+      sections: [],
       variants: [],
       examples: [],
       ambiguities: [],
@@ -520,19 +541,31 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
     };
   }
 
+  function rawRule(overrides: Partial<RawCanonicalStrategy["sections"][number]["rules"][number]> = {}) {
+    return {
+      description: "Enter on retest",
+      classification: "explicit" as const,
+      supportLevel: "MULTI_SOURCE" as const,
+      supportCount: 2,
+      sources: [],
+      conflictSources: [],
+      ...overrides,
+    };
+  }
+
   it("reattaches lessonTitle and strategyInstanceId to every rule source from already-known member data, never fabricated", () => {
     const raw = rawStrategy({
-      entryRules: [
+      sections: [
         {
-          description: "Enter on retest",
-          classification: "explicit",
-          supportLevel: "MULTI_SOURCE",
-          supportCount: 2,
-          sources: [
-            { lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e1" },
-            { lessonId: 20, startTimestamp: "2:00", endTimestamp: null, evidence: "e2" },
+          category: "entryRules",
+          rules: [
+            rawRule({
+              sources: [
+                { lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e1" },
+                { lessonId: 20, startTimestamp: "2:00", endTimestamp: null, evidence: "e2" },
+              ],
+            }),
           ],
-          conflictSources: [],
         },
       ],
     });
@@ -551,14 +584,17 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
     ];
     const raw = rawStrategy({
       sourceLessonIds: [10],
-      setup: [
+      sections: [
         {
-          description: "Setup rule",
-          classification: "explicit",
-          supportLevel: "SINGLE_SOURCE",
-          supportCount: 1,
-          sources: [{ lessonId: 10, startTimestamp: null, endTimestamp: null, evidence: "e" }],
-          conflictSources: [],
+          category: "setup",
+          rules: [
+            rawRule({
+              description: "Setup rule",
+              supportLevel: "SINGLE_SOURCE",
+              supportCount: 1,
+              sources: [{ lessonId: 10, startTimestamp: null, endTimestamp: null, evidence: "e" }],
+            }),
+          ],
         },
       ],
     });
@@ -566,6 +602,27 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
     const enriched = enrichCanonicalStrategy(raw, ambiguousMembers);
     expect(enriched.setup[0].sources[0].strategyInstanceId).toBeNull();
     expect(enriched.setup[0].sources[0].lessonTitle).toBe("Multi-Strategy Lesson");
+  });
+
+  it("defaults every rule category Gemini didn't mention to an empty array, never fabricated", () => {
+    const raw = rawStrategy({ sections: [{ category: "setup", rules: [rawRule()] }] });
+    const enriched = enrichCanonicalStrategy(raw, members);
+    expect(enriched.setup).toHaveLength(1);
+    for (const category of RULE_CATEGORY_KEYS) {
+      if (category === "setup") continue;
+      expect(enriched[category]).toEqual([]);
+    }
+  });
+
+  it("concatenates rules when Gemini names the same category more than once, instead of one section overwriting another", () => {
+    const raw = rawStrategy({
+      sections: [
+        { category: "entryRules", rules: [rawRule({ description: "First entry rule" })] },
+        { category: "entryRules", rules: [rawRule({ description: "Second entry rule" })] },
+      ],
+    });
+    const enriched = enrichCanonicalStrategy(raw, members);
+    expect(enriched.entryRules.map((r) => r.description)).toEqual(["First entry rule", "Second entry rule"]);
   });
 
   it("preserves unresolved conflicts with full reattached source provenance on both sides", () => {
@@ -593,14 +650,10 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
   it("end-to-end: synthesizeCanonicalStrategy enriches Gemini's raw response and still validates against the full, unchanged CanonicalStrategySchema", async () => {
     const rawJson = JSON.stringify(
       rawStrategy({
-        entryRules: [
+        sections: [
           {
-            description: "Enter on retest",
-            classification: "explicit",
-            supportLevel: "MULTI_SOURCE",
-            supportCount: 2,
-            sources: [{ lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e" }],
-            conflictSources: [],
+            category: "entryRules",
+            rules: [rawRule({ sources: [{ lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e" }] })],
           },
         ],
       }),

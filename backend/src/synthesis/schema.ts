@@ -239,22 +239,31 @@ export const CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA = {
 
 // ---- Stage 3 raw wire format ------------------------------------------------
 //
-// Gemini's documentation warns that very large/deeply nested structured-
-// output schemas *may* be rejected, and canonical-strategy is by far the
-// most complex of the six stages: 11 separate arrays of SynthesizedRule,
-// each of which nests TWO more arrays of the full SourceRef shape. This is
-// a plausible risk factor, not a confirmed cause of the production 400 —
-// the original error handling lost which stage even failed, so the actual
-// root cause is still unknown pending the real-API smoke test. As a
-// precautionary complexity reduction (validated by that smoke test),
-// Gemini is asked for a smaller per-source shape here — dropping
-// `lessonTitle` and `strategyInstanceId`, which our own code already knows
-// for every lesson in this cluster's member list — and the full, rich
-// SourceRef (and therefore the full CanonicalStrategy, validated unchanged
-// against CanonicalStrategySchema above) is reconstructed deterministically
-// afterward; see canonicalStrategy.ts's enrichment step. No provenance,
-// conflict, or persisted field is dropped — only what Gemini itself has to
-// restate shrinks.
+// v2 (the previous shape here) asked Gemini for 11 separate sibling arrays
+// — one per rule category — each an array of the full nested rule/source
+// shape. A real-Gemini smoke test (tests/synthesisRealApiSmoke.test.ts)
+// confirmed that schema IS rejected with a 400 by the actual API, not just
+// a theoretical risk. Because these 11 properties are written out as
+// separate JSON Schema object literals (JSON has no $ref-sharing on the
+// wire — each of the 11 is a full independent copy when serialized), the
+// v2 schema included roughly 11x more copies of the same deeply nested
+// rule/source shape than necessary. v3 collapses them into a SINGLE
+// `sections` array, each entry tagged with which of the 11 categories it
+// belongs to — the same information, restructured so the nested rule shape
+// appears exactly once in the schema instead of eleven times. This has not
+// itself been re-verified against the real API in this environment (no
+// Gemini API key available here) — see the PR for the exact command to
+// confirm it, and tests/synthesisRealApiSmoke.test.ts's bisection ladder
+// for isolating exactly which structural factor (duplication count, nested
+// depth, sources vs conflictSources, enums) was actually responsible.
+//
+// Every rule's `sources`/`conflictSources` still only need lessonId +
+// timestamps + evidence; lessonTitle and strategyInstanceId — already
+// known for every member of this cluster — are filled in deterministically
+// by canonicalStrategy.ts's enrichment step, same as v2. No provenance,
+// conflict, or persisted field is dropped by any of this — only how
+// Gemini's own output is grouped changed; the final, persisted
+// CanonicalStrategy shape/CanonicalStrategySchema above is untouched.
 
 const rawSourceRefJsonSchema = {
   type: "object",
@@ -302,39 +311,71 @@ export const RawConflictSchema = z.object({
 });
 export type RawConflict = z.infer<typeof RawConflictSchema>;
 
-export const RawCanonicalStrategySchema = CanonicalStrategySchema.extend({
-  marketContext: z.array(RawSynthesizedRuleSchema),
-  prerequisites: z.array(RawSynthesizedRuleSchema),
-  setup: z.array(RawSynthesizedRuleSchema),
-  entryRules: z.array(RawSynthesizedRuleSchema),
-  confirmationRules: z.array(RawSynthesizedRuleSchema),
-  stopLossRules: z.array(RawSynthesizedRuleSchema),
-  profitTargetRules: z.array(RawSynthesizedRuleSchema),
-  tradeManagementRules: z.array(RawSynthesizedRuleSchema),
-  invalidationRules: z.array(RawSynthesizedRuleSchema),
-  noTradeConditions: z.array(RawSynthesizedRuleSchema),
-  visualDiscretionaryRules: z.array(RawSynthesizedRuleSchema),
+/** The 11 CanonicalStrategy rule-category keys — see CanonicalStrategySchema above. Exported so canonicalStrategy.ts's enrichment step can iterate them without re-listing them a third time. */
+export const RULE_CATEGORY_KEYS = [
+  "marketContext",
+  "prerequisites",
+  "setup",
+  "entryRules",
+  "confirmationRules",
+  "stopLossRules",
+  "profitTargetRules",
+  "tradeManagementRules",
+  "invalidationRules",
+  "noTradeConditions",
+  "visualDiscretionaryRules",
+] as const;
+export type RuleCategoryKey = (typeof RULE_CATEGORY_KEYS)[number];
+
+export const RawRuleSectionSchema = z.object({
+  category: z.enum(RULE_CATEGORY_KEYS),
+  rules: z.array(RawSynthesizedRuleSchema),
+});
+export type RawRuleSection = z.infer<typeof RawRuleSectionSchema>;
+
+const rawRuleSectionJsonSchema = {
+  type: "object",
+  properties: {
+    category: { type: "string", enum: [...RULE_CATEGORY_KEYS] },
+    rules: rawSynthesizedRuleArray,
+  },
+  required: ["category", "rules"],
+};
+
+export const RawCanonicalStrategySchema = CanonicalStrategySchema.omit({
+  marketContext: true,
+  prerequisites: true,
+  setup: true,
+  entryRules: true,
+  confirmationRules: true,
+  stopLossRules: true,
+  profitTargetRules: true,
+  tradeManagementRules: true,
+  invalidationRules: true,
+  noTradeConditions: true,
+  visualDiscretionaryRules: true,
+  conflicts: true,
+}).extend({
+  sections: z.array(RawRuleSectionSchema),
   conflicts: z.array(RawConflictSchema),
 });
 export type RawCanonicalStrategy = z.infer<typeof RawCanonicalStrategySchema>;
 
 export const RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA = {
-  ...CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
+  type: "object",
   properties: {
-    ...CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA.properties,
-    marketContext: rawSynthesizedRuleArray,
-    prerequisites: rawSynthesizedRuleArray,
-    setup: rawSynthesizedRuleArray,
-    entryRules: rawSynthesizedRuleArray,
-    confirmationRules: rawSynthesizedRuleArray,
-    stopLossRules: rawSynthesizedRuleArray,
-    profitTargetRules: rawSynthesizedRuleArray,
-    tradeManagementRules: rawSynthesizedRuleArray,
-    invalidationRules: rawSynthesizedRuleArray,
-    noTradeConditions: rawSynthesizedRuleArray,
-    visualDiscretionaryRules: rawSynthesizedRuleArray,
+    name: { type: "string" },
+    purpose: { type: "string" },
+    markets: { type: "array", items: { type: "string" } },
+    timeframes: { type: "array", items: { type: "string" } },
+    sections: { type: "array", items: rawRuleSectionJsonSchema },
+    variants: { type: "array", items: variantJsonSchema },
+    examples: { type: "array", items: exampleJsonSchema },
+    ambiguities: { type: "array", items: { type: "string" } },
     conflicts: { type: "array", items: rawConflictJsonSchema },
+    sourceLessonIds: { type: "array", items: { type: "number" } },
   },
+  required: ["name", "purpose", "markets", "timeframes", "sections", "variants", "examples", "ambiguities", "conflicts", "sourceLessonIds"],
 };
 
 // ---- Stage 4: core framework ----------------------------------------------

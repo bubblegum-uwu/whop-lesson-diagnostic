@@ -148,23 +148,14 @@ async function seedRunReadyToClaim() {
   return { course, run, strategyLesson, noStrategyLesson };
 }
 
+/** The RAW/wire shape synthesizeCanonicalStrategy's Gemini call expects (see synthesis/schema.ts's v3 `sections` format) — not the final, persisted CanonicalStrategy shape. */
 function validCanonicalStrategyJson() {
   return JSON.stringify({
     name: "Break & Retest",
     purpose: "p",
     markets: ["ES"],
     timeframes: ["5m"],
-    marketContext: [],
-    prerequisites: [],
-    setup: [],
-    entryRules: [],
-    confirmationRules: [],
-    stopLossRules: [],
-    profitTargetRules: [],
-    tradeManagementRules: [],
-    invalidationRules: [],
-    noTradeConditions: [],
-    visualDiscretionaryRules: [],
+    sections: [],
     variants: [],
     examples: [],
     ambiguities: [],

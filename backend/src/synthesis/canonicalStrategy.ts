@@ -5,12 +5,14 @@ import {
   RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   RawCanonicalStrategySchema,
   CanonicalStrategySchema,
+  RULE_CATEGORY_KEYS,
   type CanonicalStrategy,
   type ClusterProposal,
   type RawCanonicalStrategy,
   type RawConflict,
   type RawSourceRef,
   type RawSynthesizedRule,
+  type RuleCategoryKey,
   type Conflict,
   type SourceRef,
   type SynthesizedRule,
@@ -28,22 +30,22 @@ const STAGE = "canonical_strategy";
  * resolving them, and never fabricate a compromise rule.
  *
  * Gemini is constrained to a REDUCED response schema
- * (RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA) — this is by far the most
- * complex of the six stages (11 rule categories, each nesting two more
- * arrays of full provenance objects). Gemini's own documentation warns that
- * structured-output schemas can be rejected once they get this large/deeply
- * nested; this is a precautionary reduction against a *plausible* risk
- * factor, not a change made in response to a confirmed API rejection — the
- * production 400 that motivated this file's changes lost its stage context
- * before it could be diagnosed, so whether canonical_strategy specifically
- * was ever rejected is unverified (see tests/synthesisRealApiSmoke.test.ts,
- * which exists to verify this directly against the real API). Every rule's
- * `sources`/`conflictSources` only need to name lessonId + timestamps +
- * evidence; lessonTitle and strategyInstanceId — which our own code already
- * knows for every member of this cluster — are filled in deterministically
- * by enrichCanonicalStrategy below. The final validated/persisted
+ * (RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA) — a real Gemini API smoke
+ * test (tests/synthesisRealApiSmoke.test.ts) confirmed the previous (v2)
+ * version of this schema, which asked for 11 separate sibling arrays (one
+ * per rule category) each containing the full nested rule/source shape,
+ * IS rejected by the real API with a 400. v3 (current) collapses those 11
+ * arrays into one `sections` array — see schema.ts's v3 comment for why:
+ * each of the 11 was a full independent copy on the wire, so this is
+ * roughly an 11x reduction in how many times the same nested shape appears
+ * in the schema. Every rule's `sources`/`conflictSources` only need to name
+ * lessonId + timestamps + evidence; lessonTitle and strategyInstanceId —
+ * already known for every member of this cluster — are filled in
+ * deterministically by enrichCanonicalStrategy below, which also un-flattens
+ * `sections` back into the 11 named categories the persisted
+ * CanonicalStrategy shape requires. The final validated/persisted
  * CanonicalStrategy is byte-for-byte the same rich shape as before; only
- * what Gemini itself has to restate shrinks.
+ * how Gemini's own output is grouped/restated changed.
  */
 export async function synthesizeCanonicalStrategy(
   deps: SynthesisStageDeps,
@@ -100,6 +102,12 @@ function enrichConflict(
   return { description: raw.description, sources: raw.sources.map((s) => enrichSourceRef(s, lessonTitleById, singleInstanceIdByLesson)) };
 }
 
+function emptyCategoryMap(): Record<RuleCategoryKey, RawSynthesizedRule[]> {
+  const map = {} as Record<RuleCategoryKey, RawSynthesizedRule[]>;
+  for (const key of RULE_CATEGORY_KEYS) map[key] = [];
+  return map;
+}
+
 /**
  * Reattaches lessonTitle/strategyInstanceId to every source Gemini reported
  * by lessonId, using only data we already had before the Gemini call — never
@@ -109,6 +117,13 @@ function enrichConflict(
  * instance a piece of evidence came from is genuinely ambiguous from
  * lessonId alone, so it's left null rather than guessed — lessonTitle,
  * timestamps, and evidence still fully identify the source.
+ *
+ * Also un-flattens `raw.sections` (Gemini's single wire-format array — see
+ * schema.ts's v3 comment for why it's collapsed this way) back into the 11
+ * named category arrays the persisted CanonicalStrategy shape requires.
+ * A category Gemini never mentions defaults to `[]` — never fabricated; a
+ * category Gemini names more than once has its rules concatenated rather
+ * than one occurrence silently overwriting another.
  */
 export function enrichCanonicalStrategy(raw: RawCanonicalStrategy, members: StrategyInstanceRecord[]): CanonicalStrategy {
   const lessonTitleById = new Map(members.map((m) => [m.lessonId, m.lessonTitle]));
@@ -121,20 +136,32 @@ export function enrichCanonicalStrategy(raw: RawCanonicalStrategy, members: Stra
 
   const rule = (r: RawSynthesizedRule) => enrichRule(r, lessonTitleById, singleInstanceIdByLesson);
 
+  const byCategory = emptyCategoryMap();
+  for (const section of raw.sections) {
+    byCategory[section.category] = byCategory[section.category].concat(section.rules);
+  }
+
   return {
-    ...raw,
-    marketContext: raw.marketContext.map(rule),
-    prerequisites: raw.prerequisites.map(rule),
-    setup: raw.setup.map(rule),
-    entryRules: raw.entryRules.map(rule),
-    confirmationRules: raw.confirmationRules.map(rule),
-    stopLossRules: raw.stopLossRules.map(rule),
-    profitTargetRules: raw.profitTargetRules.map(rule),
-    tradeManagementRules: raw.tradeManagementRules.map(rule),
-    invalidationRules: raw.invalidationRules.map(rule),
-    noTradeConditions: raw.noTradeConditions.map(rule),
-    visualDiscretionaryRules: raw.visualDiscretionaryRules.map(rule),
+    name: raw.name,
+    purpose: raw.purpose,
+    markets: raw.markets,
+    timeframes: raw.timeframes,
+    marketContext: byCategory.marketContext.map(rule),
+    prerequisites: byCategory.prerequisites.map(rule),
+    setup: byCategory.setup.map(rule),
+    entryRules: byCategory.entryRules.map(rule),
+    confirmationRules: byCategory.confirmationRules.map(rule),
+    stopLossRules: byCategory.stopLossRules.map(rule),
+    profitTargetRules: byCategory.profitTargetRules.map(rule),
+    tradeManagementRules: byCategory.tradeManagementRules.map(rule),
+    invalidationRules: byCategory.invalidationRules.map(rule),
+    noTradeConditions: byCategory.noTradeConditions.map(rule),
+    visualDiscretionaryRules: byCategory.visualDiscretionaryRules.map(rule),
+    variants: raw.variants,
+    examples: raw.examples,
+    ambiguities: raw.ambiguities,
     conflicts: raw.conflicts.map((c) => enrichConflict(c, lessonTitleById, singleInstanceIdByLesson)),
+    sourceLessonIds: raw.sourceLessonIds,
   };
 }
 
@@ -149,7 +176,9 @@ function buildPrompt(cluster: ClusterProposal, members: StrategyInstanceRecord[]
 
   return `You are synthesizing ONE canonical trading strategy from multiple lesson instances of the same underlying strategy, previously clustered together as "${cluster.proposedCanonicalName}" (cluster rationale: ${cluster.similarityRationale}${cluster.differencesNotes ? `; noted differences: ${cluster.differencesNotes}` : ""}).
 
-Every synthesized rule (in marketContext, prerequisites, setup, entryRules, confirmationRules, stopLossRules, profitTargetRules, tradeManagementRules, invalidationRules, noTradeConditions, visualDiscretionaryRules) MUST carry provenance via "sources" entries. For each source, give ONLY lessonId, startTimestamp, endTimestamp, and evidence — do NOT restate lessonTitle or strategyInstanceId, those are already known and will be attached automatically. Set "supportLevel" based on how many independent lessons actually support the rule (SINGLE_SOURCE, MULTI_SOURCE, REPEATED_EXPLICIT, VARIANT, CONFLICTING, or INFERRED) and "supportCount" to the number of supporting lessons — never invent a numeric confidence score.
+Put every synthesized rule into "sections": one entry per rule category you have rules for, each shaped as { "category": <one of ${RULE_CATEGORY_KEYS.join(", ")}>, "rules": [...] }. Omit a category entirely if you have no rules for it — never include an entry with an empty "rules" array, and never include more than one entry for the same category (put all of that category's rules in the one entry).
+
+Every rule MUST carry provenance via "sources" entries. For each source, give ONLY lessonId, startTimestamp, endTimestamp, and evidence — do NOT restate lessonTitle or strategyInstanceId, those are already known and will be attached automatically. Set "supportLevel" based on how many independent lessons actually support the rule (SINGLE_SOURCE, MULTI_SOURCE, REPEATED_EXPLICIT, VARIANT, CONFLICTING, or INFERRED) and "supportCount" to the number of supporting lessons — never invent a numeric confidence score.
 
 CRITICAL — do not silently resolve contradictions. If one source says "enter immediately on retest" and another says "wait for candle confirmation", record this as EITHER a variant (variants[]), a conditional rule (a rule whose description states the condition), or an unresolved conflict (conflicts[], with supportLevel CONFLICTING on the relevant rule and both sides listed in conflictSources) — depending on what the evidence actually shows. Never fabricate a compromise rule that blends the two.
 
