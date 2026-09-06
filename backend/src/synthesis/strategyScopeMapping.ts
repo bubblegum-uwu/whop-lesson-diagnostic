@@ -54,35 +54,85 @@ export interface ScopeMappingResult {
 }
 
 /**
- * Tier 1 — deterministic only. Exact normalized-name match against a
- * cluster's proposed canonical name or any member's original strategy name;
- * failing that, a containment match (one normalized string fully contains
- * the other) guarded by a minimum length so short/generic fragments (e.g.
- * "the", "setup") can't spuriously match everything. An initialism like
- * "B&R" will NOT match "Break and Retest" deterministically (there's no
- * reliable general rule for that) — it falls through to the Gemini tier.
+ * Words too generic/common in trading-course strategy names to count as
+ * identifying evidence for the token-subset check below (Real-audit fix,
+ * Blocker 7) — excluded so e.g. "Setup"/"Strategy" decorations never
+ * inflate a match, and so a name consisting ONLY of these (which should
+ * never happen for a real strategy name) can't spuriously match everything.
+ */
+const GENERIC_STRATEGY_WORDS = new Set(["the", "and", "with", "strategy", "setup", "trade", "trading", "a", "an", "of", "for", "on", "at"]);
+
+/** Significant (identifying) word tokens: length >= 3, not in GENERIC_STRATEGY_WORDS. Length-3 floor also excludes short noise like "b", "r" left over from normalizing "B&R" -> "b and r". */
+function significantTokens(normalized: string): Set<string> {
+  return new Set(normalized.split(" ").filter((t) => t.length >= 3 && !GENERIC_STRATEGY_WORDS.has(t)));
+}
+
+/**
+ * Tier 1 — deterministic only.
+ *
+ * Pass 1: exact normalized-name match against a cluster's proposed
+ * canonical name or any member's original strategy name; failing that, a
+ * containment match (one normalized string fully contains the other)
+ * guarded by a minimum length so short/generic fragments can't spuriously
+ * match everything.
+ *
+ * Pass 2 (Real-audit fix, Blocker 7) — token-subset match: a raw name
+ * confidently matches a cluster when EVERY one of that cluster's
+ * significant tokens appears among the raw name's own tokens (order- and
+ * decoration-independent), e.g. "Premarket Break and Retest" contains both
+ * significant tokens of "Break and Retest (B&R)" ({break, retest} — "b"/"r"
+ * are too short to count, "and" is generic), so it matches confidently even
+ * though pure substring containment fails once the cluster name carries a
+ * "(B&R)" suffix the raw name doesn't. Requires ALL of a candidate's
+ * significant tokens present (not just some) specifically to avoid
+ * over-matching on a single common word; a raw name matching more than one
+ * cluster this way is left unmatched as genuinely ambiguous — falls
+ * through to the Gemini tier rather than guessing.
+ *
+ * An initialism like "B&R" will NOT match "Break and Retest" through
+ * either pass (there's no reliable general rule for expanding an
+ * initialism) — it falls through to the Gemini tier.
  */
 export function deterministicMapScopeNames(rawNames: string[], clusters: ClusterCandidate[]): ScopeMappingResult {
   const mapped = new Map<string, string>();
   const unmatched: string[] = [];
 
-  const clustersWithNorm = clusters.map((c) => ({
-    clusterKey: c.clusterKey,
-    candidates: [c.proposedCanonicalName, ...c.memberNames].map(normalizeForMatching).filter((n) => n.length > 0),
-  }));
+  const clustersWithNorm = clusters.map((c) => {
+    const candidateNames = [c.proposedCanonicalName, ...c.memberNames];
+    return {
+      clusterKey: c.clusterKey,
+      candidates: candidateNames.map(normalizeForMatching).filter((n) => n.length > 0),
+      // The largest significant-token set among this cluster's candidate names — the most specific/identifying name wins when checking token subsets.
+      significantTokenSets: candidateNames.map(normalizeForMatching).map(significantTokens).filter((s) => s.size > 0),
+    };
+  });
 
   for (const raw of rawNames) {
     const norm = normalizeForMatching(raw);
+    const rawTokens = significantTokens(norm);
     let matchedKey: string | null = null;
+
     if (norm.length >= 3) {
       for (const cluster of clustersWithNorm) {
-        const isMatch = cluster.candidates.some((c) => c === norm || (c.length >= 4 && (c.includes(norm) || norm.includes(c))));
-        if (isMatch) {
+        const isExactOrContainment = cluster.candidates.some((c) => c === norm || (c.length >= 4 && (c.includes(norm) || norm.includes(c))));
+        if (isExactOrContainment) {
           matchedKey = cluster.clusterKey;
           break;
         }
       }
     }
+
+    if (!matchedKey && rawTokens.size > 0) {
+      const tokenMatches = clustersWithNorm.filter((cluster) =>
+        cluster.significantTokenSets.some((tokens) => tokens.size > 0 && [...tokens].every((t) => rawTokens.has(t))),
+      );
+      // Exactly one cluster's tokens are fully contained in the raw name -> confident match.
+      // Zero or multiple (genuinely ambiguous) -> left unmatched, never guessed.
+      if (tokenMatches.length === 1) {
+        matchedKey = tokenMatches[0].clusterKey;
+      }
+    }
+
     if (matchedKey) mapped.set(raw, matchedKey);
     else unmatched.push(raw);
   }

@@ -498,3 +498,118 @@ describe("Real-audit Blockers 4/5 — decision framework must not globalize scop
     expect(capturedPrompt).toContain("options");
   });
 });
+
+describe("Real-audit Blocker 6 — no false-universal retest rule in the playbook", () => {
+  function fullCanonicalStrategy(overrides: Record<string, unknown>) {
+    return {
+      name: "Strategy",
+      purpose: "p",
+      markets: [],
+      timeframes: [],
+      marketContext: [], prerequisites: [], setup: [], entryRules: [], confirmationRules: [], stopLossRules: [],
+      profitTargetRules: [], tradeManagementRules: [], invalidationRules: [], noTradeConditions: [], visualDiscretionaryRules: [],
+      riskManagementRules: [], positionSizingRules: [], scalingInRules: [], scalingOutRules: [], runnerManagementRules: [],
+      warnings: [], instructorPreferences: [], variants: [], examples: [], ambiguities: [], conflicts: [],
+      sourceLessonIds: [], supportingKnowledgeLessonIds: [],
+      ...overrides,
+    };
+  }
+
+  it("the playbook prompt instructs against false-universal claims AND still shows Inside Bar's conflicting resting-stop entry rule (the exact real-audit conflict)", async () => {
+    const { synthesizePlaybook } = await import("../src/synthesis/playbook.js");
+    let capturedPrompt = "";
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        capturedPrompt = prompt;
+        return { text: JSON.stringify({ title: "P", sections: [], conflictsAndAmbiguities: [] }), usage };
+      }),
+    });
+
+    const breakAndRetest = fullCanonicalStrategy({
+      name: "Break and Retest",
+      entryRules: [
+        { description: "Never chase the initial breakout candle — enter only on the pullback/retest.", classification: "explicit", supportLevel: "REPEATED_EXPLICIT", supportCount: 5, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: null },
+      ],
+    });
+    const insideBar = fullCanonicalStrategy({
+      name: "Inside Bar",
+      entryRules: [
+        { description: "May enter via a resting buy-stop above the mother-bar high (or sell-stop below the mother-bar low) — does not require waiting for a retest.", classification: "explicit", supportLevel: "SINGLE_SOURCE", supportCount: 1, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: null },
+      ],
+    });
+
+    await synthesizePlaybook({ gemini, model: "m" }, "Trading Accelerator", [breakAndRetest as never, insideBar as never], { sections: [] });
+
+    // The instruction that prevents the false-universal claim must actually be present in what Gemini sees.
+    expect(capturedPrompt).toContain("do not state a rule as universal");
+    expect(capturedPrompt).toContain("resting stop-order entry");
+
+    // The conflicting evidence itself (Inside Bar's resting-stop variant) must reach the prompt — the guard is useless if the model never sees the counter-example.
+    expect(capturedPrompt).toContain("resting buy-stop above the mother-bar high");
+    expect(capturedPrompt).toContain("Never chase the initial breakout candle");
+  });
+});
+
+describe("Real-audit Blocker 7 — unmatched strategy-scope aliasing review", () => {
+  it("matches 'Premarket Break and Retest' to the Break and Retest (B&R) cluster via token-subset matching, even though pure substring containment fails due to the '(B&R)' suffix", async () => {
+    const { deterministicMapScopeNames } = await import("../src/synthesis/strategyScopeMapping.js");
+    const clusters = [
+      { clusterKey: "br", proposedCanonicalName: "Break and Retest (B&R) with Key Levels and Order Blocks", memberNames: ["Break & Retest"] },
+    ];
+    const { mapped, unmatchedNames } = deterministicMapScopeNames(["Premarket Break and Retest"], clusters);
+    expect(mapped.get("Premarket Break and Retest")).toBe("br");
+    expect(unmatchedNames).toEqual([]);
+  });
+
+  it("does NOT force-map genuinely unrelated names (Straddle, swing trading, Scalping, 84% Rule, momentum trading) to an unrelated cluster", async () => {
+    const { deterministicMapScopeNames } = await import("../src/synthesis/strategyScopeMapping.js");
+    const clusters = [
+      { clusterKey: "br", proposedCanonicalName: "Break and Retest (B&R)", memberNames: ["Break & Retest"] },
+      { clusterKey: "ob", proposedCanonicalName: "Intraday Order Block Continuation", memberNames: ["Order Block Retest"] },
+    ];
+    const names = ["Straddle", "swing trading", "Scalping", "84% Rule", "momentum trading"];
+    const { mapped, unmatchedNames } = deterministicMapScopeNames(names, clusters);
+    expect(mapped.size).toBe(0);
+    expect(unmatchedNames.sort()).toEqual([...names].sort());
+  });
+
+  it("leaves a name unmatched when it covers none of any cluster's identifying tokens, rather than guessing", async () => {
+    const { deterministicMapScopeNames } = await import("../src/synthesis/strategyScopeMapping.js");
+    const clusters = [
+      { clusterKey: "br", proposedCanonicalName: "Break and Retest", memberNames: [] },
+      { clusterKey: "ob", proposedCanonicalName: "Order Block Retest", memberNames: [] },
+    ];
+    const { mapped, unmatchedNames } = deterministicMapScopeNames(["Reversal"], clusters);
+    expect(mapped.size).toBe(0);
+    expect(unmatchedNames).toEqual(["Reversal"]);
+  });
+
+  it("leaves a name unmatched when it fully covers TWO different clusters' identifying tokens at once — genuine ambiguity, never guessed", async () => {
+    const { deterministicMapScopeNames } = await import("../src/synthesis/strategyScopeMapping.js");
+    const clusters = [
+      { clusterKey: "a", proposedCanonicalName: "Order Block Continuation", memberNames: [] },
+      { clusterKey: "b", proposedCanonicalName: "Continuation Retest", memberNames: [] },
+    ];
+    // Word order deliberately differs from both candidate names, so Pass 1's substring containment matches NEITHER — only
+    // the order-independent token-subset check (Pass 2) would fire, and it fires for BOTH clusters at once: ambiguous.
+    const { mapped, unmatchedNames } = deterministicMapScopeNames(["Continuation Block Order Retest"], clusters);
+    expect(mapped.size).toBe(0);
+    expect(unmatchedNames).toEqual(["Continuation Block Order Retest"]);
+  });
+
+  it("still resolves a genuinely ambiguous name via the Gemini fallback tier rather than leaving it unmatched forever", async () => {
+    const { resolveStrategyScopeNames } = await import("../src/synthesis/strategyScopeMapping.js");
+    const clusters = [
+      { clusterKey: "br", proposedCanonicalName: "Break and Retest", memberNames: [] },
+      { clusterKey: "pmh", proposedCanonicalName: "Pre-Market High and Low Strategy", memberNames: [] },
+    ];
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({ mappings: [{ rawName: "Premarket Reversal", clusterKey: "pmh" }] }),
+        usage,
+      })),
+    });
+    const { result } = await resolveStrategyScopeNames({ gemini, model: "m" }, ["Premarket Reversal"], clusters);
+    expect(result.mapped.get("Premarket Reversal")).toBe("pmh");
+  });
+});

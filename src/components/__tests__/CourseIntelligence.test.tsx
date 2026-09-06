@@ -118,6 +118,7 @@ function baseSynthesisData(overrides: Partial<CourseSynthesisData> = {}): Course
           ambiguities: [],
           conflicts: [],
           sourceLessonIds: [10],
+          supportingKnowledgeLessonIds: [],
         },
       },
     ],
@@ -136,8 +137,19 @@ function baseSynthesisData(overrides: Partial<CourseSynthesisData> = {}): Course
         missingFrameworkDimensions: [],
         coverageNote: "Strategy synthesis complete. Course-framework coverage is current — every analyzed lesson taught a standalone setup captured above.",
       },
+      strategyScopeMapping: {
+        distinctRawNameCount: 0,
+        matchedRawNameCount: 0,
+        unmatchedRawNameCount: 0,
+        matchedRawNames: [],
+        unmatchedRawNames: [],
+        totalStrategyScopedItemCount: 0,
+        matchedItemCount: 0,
+        unmatchedItemCount: 0,
+        completeness: "COMPLETE",
+      },
     },
-    decisionFramework: { nodes: [], readableSteps: ["Determine HTF context", "Manage the trade"] },
+    decisionFramework: { nodes: [], readableSteps: ["Determine HTF context", "Manage the trade"], scopeLeaks: [] },
     ...overrides,
   };
 }

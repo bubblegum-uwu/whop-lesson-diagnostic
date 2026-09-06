@@ -178,7 +178,10 @@ export interface CanonicalStrategy {
   examples: { description: string; sourceLessonId: number }[];
   ambiguities: string[];
   conflicts: Conflict[];
+  /** Real-audit fix (Phase 3.5B) — lessons whose standalone strategy instance is a member of this cluster (taught the setup), computed deterministically. Distinct from `supportingKnowledgeLessonIds` below — see Source Index. */
   sourceLessonIds: number[];
+  /** Real-audit fix (Phase 3.5B) — lessons that contributed matched strategy-scoped supporting knowledge to this cluster WITHOUT necessarily teaching the standalone setup themselves. */
+  supportingKnowledgeLessonIds: number[];
 }
 
 export interface ClusterInfo {
@@ -231,11 +234,25 @@ export interface FrameworkCoverage {
   coverageNote: string;
 }
 
+/** Real-audit fix (Phase 3.5B) — a signal fully independent of FrameworkCoverage.status: whether every distinct strategy name referenced by scope.strategies was resolved to a canonical-strategy cluster. Never infer one from the other's wording. */
+export interface StrategyScopeMappingSummary {
+  distinctRawNameCount: number;
+  matchedRawNameCount: number;
+  unmatchedRawNameCount: number;
+  matchedRawNames: string[];
+  unmatchedRawNames: string[];
+  totalStrategyScopedItemCount: number;
+  matchedItemCount: number;
+  unmatchedItemCount: number;
+  completeness: FrameworkCoverageStatus;
+}
+
 export interface CoursePlaybook {
   title: string;
   sections: PlaybookSection[];
   conflictsAndAmbiguities: Conflict[];
   frameworkCoverage: FrameworkCoverage;
+  strategyScopeMapping: StrategyScopeMappingSummary;
 }
 
 export interface DecisionNode {
@@ -245,11 +262,15 @@ export interface DecisionNode {
   description: string | null;
   next: string[];
   branches: { label: string; next: string }[];
+  /** Real-audit fix (Phase 3.5B) — all arrays empty means this node applies globally; a non-empty array means it's conditioned on that restriction and must never sit on the unconditional path before strategy selection (see decisionScopeAudit.ts). */
+  scope: KnowledgeItemScope;
 }
 
 export interface DecisionFramework {
   nodes: DecisionNode[];
   readableSteps: string[];
+  /** Real-audit fix (Phase 3.5B) — deterministic post-check output: any node here means a scoped rule was structurally placed on the unconditional global path, a bug in the returned graph. Should be empty by construction. */
+  scopeLeaks: { nodeId: string; label: string; scope: KnowledgeItemScope }[];
 }
 
 export interface CourseSynthesisData {
