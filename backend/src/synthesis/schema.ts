@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NumericalValueSchema, KnowledgeItemScopeSchema } from "../gemini/schema.js";
 
 /**
  * Zod schemas for every Gemini-produced synthesis artifact (Stages 2-6),
@@ -52,6 +53,20 @@ export const SynthesizedRuleSchema = z.object({
   supportCount: z.number().int().min(0),
   sources: z.array(SourceRefSchema),
   conflictSources: z.array(SourceRefSchema),
+  /**
+   * Phase 3.5B additive fields — NEVER asked of Gemini directly (no wire
+   * schema requires them); populated deterministically by enrichment code
+   * from the KnowledgeItem(s) a rule's sourceKeys/conflictSourceKeys cite
+   * (see sourceRegistry.ts), the same "don't make Gemini reproduce data the
+   * application already has" principle this file already applies to
+   * provenance. Default [] / null for every rule not derived from a
+   * knowledge citation (e.g. the pre-3.5B strategy-instance-only
+   * categories), so no existing behavior changes for those.
+   */
+  exceptions: z.array(z.string()).optional().default([]),
+  numericalValues: z.array(NumericalValueSchema).optional().default([]),
+  /** The union of every cited KnowledgeItem's scope — null when this rule carries no scope-bearing citation. Preserves instrument/timeframe/session/traderProfile restrictions that must survive synthesis rather than being flattened into a universal rule. */
+  scope: KnowledgeItemScopeSchema.nullable().optional().default(null),
 });
 export type SynthesizedRule = z.infer<typeof SynthesizedRuleSchema>;
 
@@ -170,6 +185,22 @@ export const CanonicalStrategySchema = z.object({
   invalidationRules: z.array(SynthesizedRuleSchema),
   noTradeConditions: z.array(SynthesizedRuleSchema),
   visualDiscretionaryRules: z.array(SynthesizedRuleSchema),
+  /**
+   * Phase 3.5B additive categories — populated from strategy-scoped rich
+   * KnowledgeItems (see strategyScopeMapping.ts) drawn from ANY contributing
+   * lesson, not just the cluster's own strategy_instances rows. Same
+   * SynthesizedRule shape as the 11 categories above; defaults to [] for a
+   * cluster with no matching knowledge, so this is purely additive to
+   * existing consumers (a canonical strategy already worked with these
+   * absent — it just wasn't as rich as the source material allowed).
+   */
+  riskManagementRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  positionSizingRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  scalingInRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  scalingOutRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  runnerManagementRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  warnings: z.array(SynthesizedRuleSchema).optional().default([]),
+  instructorPreferences: z.array(SynthesizedRuleSchema).optional().default([]),
   variants: z.array(VariantSchema),
   examples: z.array(ExampleSchema),
   ambiguities: z.array(z.string()),
@@ -333,7 +364,16 @@ export const RawConflictSchema = z.object({
 });
 export type RawConflict = z.infer<typeof RawConflictSchema>;
 
-/** The 11 CanonicalStrategy rule-category keys — see CanonicalStrategySchema above. Exported so canonicalStrategy.ts's enrichment step can iterate them without re-listing them a third time. */
+/**
+ * The CanonicalStrategy rule-category keys — see CanonicalStrategySchema
+ * above. Exported so canonicalStrategy.ts's enrichment step can iterate them
+ * without re-listing them a third time. The last 7 are Phase 3.5B additions
+ * (populated from strategy-scoped rich KnowledgeItems, not strategy_instances
+ * rules) — added to the SAME enum/sections mechanism rather than a parallel
+ * one, since that mechanism (schema.ts's v3 changelog) already exists
+ * specifically to let Gemini tag an arbitrary rule with its category without
+ * needing N separate sibling JSON Schema arrays.
+ */
 export const RULE_CATEGORY_KEYS = [
   "marketContext",
   "prerequisites",
@@ -346,6 +386,13 @@ export const RULE_CATEGORY_KEYS = [
   "invalidationRules",
   "noTradeConditions",
   "visualDiscretionaryRules",
+  "riskManagementRules",
+  "positionSizingRules",
+  "scalingInRules",
+  "scalingOutRules",
+  "runnerManagementRules",
+  "warnings",
+  "instructorPreferences",
 ] as const;
 export type RuleCategoryKey = (typeof RULE_CATEGORY_KEYS)[number];
 
@@ -376,6 +423,13 @@ export const RawCanonicalStrategySchema = CanonicalStrategySchema.omit({
   invalidationRules: true,
   noTradeConditions: true,
   visualDiscretionaryRules: true,
+  riskManagementRules: true,
+  positionSizingRules: true,
+  scalingInRules: true,
+  scalingOutRules: true,
+  runnerManagementRules: true,
+  warnings: true,
+  instructorPreferences: true,
   conflicts: true,
 }).extend({
   sections: z.array(RawRuleSectionSchema),
@@ -424,6 +478,41 @@ export const CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
         required: ["key", "title", "rules"],
       },
     },
+  },
+  required: ["sections"],
+};
+
+/**
+ * Phase 3.5B — keyed wire format for core framework, same "sourceKeys
+ * instead of restated evidence" pattern canonical_strategy already uses
+ * (schema.ts's v4 changelog). Introduced because Phase 3.5B roughly
+ * doubles/triples this stage's pooled input (adding ~300-500 course-wide
+ * KnowledgeItems on top of the existing pooled cross-strategy rules) — the
+ * same shared thinking/output-budget risk that caused canonical_strategy's
+ * real truncation failure applies here too if every rule keeps restating
+ * full source citations. The final persisted CoreFrameworkSchema shape
+ * above is unchanged; only how Gemini's own output cites sources changed.
+ */
+export const RawCoreFrameworkSectionSchema = z.object({
+  key: z.string().min(1),
+  title: z.string().min(1),
+  rules: z.array(RawSynthesizedRuleSchema),
+});
+export const RawCoreFrameworkSchema = z.object({
+  sections: z.array(RawCoreFrameworkSectionSchema),
+});
+export type RawCoreFramework = z.infer<typeof RawCoreFrameworkSchema>;
+
+const rawCoreFrameworkSectionJsonSchema = {
+  type: "object",
+  properties: { key: { type: "string" }, title: { type: "string" }, rules: rawSynthesizedRuleArray },
+  required: ["key", "title", "rules"],
+};
+
+export const RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    sections: { type: "array", items: rawCoreFrameworkSectionJsonSchema },
   },
   required: ["sections"],
 };
@@ -480,6 +569,8 @@ export const FrameworkCoverageSchema = z.object({
   lessonsMissingSupportingKnowledgeExtraction: z.number().int().min(0),
   missingSupportingKnowledgeLessonIds: z.array(z.number()),
   missingSupportingKnowledgeLessonTitles: z.array(z.string()),
+  /** Phase 3.5B — human-readable labels of the tracked knowledge dimensions (risk management, position sizing, psychology, etc.) with zero supporting evidence anywhere in the course. This, not lesson/strategy counts, is what now drives `status` — see runSynthesis.ts's buildFrameworkCoverage. */
+  missingFrameworkDimensions: z.array(z.string()).optional().default([]),
   coverageNote: z.string(),
 });
 export type FrameworkCoverage = z.infer<typeof FrameworkCoverageSchema>;

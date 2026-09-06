@@ -3,6 +3,7 @@ import type { Strategy } from "../src/gemini/schema.js";
 import type { GeminiClient, GeminiUsage } from "../src/gemini/client.js";
 import { GeminiAnalysisError } from "../src/gemini/client.js";
 import { buildStrategySignature, chunkSignatures, type StrategyInstanceRecord } from "../src/synthesis/normalize.js";
+import type { LessonKnowledgeSource } from "../src/synthesis/knowledgeNormalize.js";
 import { clusterStrategyInstances } from "../src/synthesis/cluster.js";
 import { synthesizeCanonicalStrategy, enrichCanonicalStrategy } from "../src/synthesis/canonicalStrategy.js";
 import { extractCoreFramework } from "../src/synthesis/coreFramework.js";
@@ -440,6 +441,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
           { id: 11, title: "Sizing & Scaling Trades", chapterTitle: "Ch 2", sourceUrl: "https://y" },
         ],
         noStandaloneSetupLessonIds: [11],
+        knowledgeSources: [],
       },
       (event) => progressEvents.push({ stage: event.stage, completedItems: event.completedItems, totalItems: event.totalItems }),
     );
@@ -497,7 +499,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     const events: { stage: string; completedItems: number | null; totalItems: number | null }[] = [];
     await runSynthesis(
       { gemini, model: "m" },
-      { courseTitle: "Trading Accelerator", instances: [makeInstance()], lessons: [{ id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" }], noStandaloneSetupLessonIds: [] },
+      { courseTitle: "Trading Accelerator", instances: [makeInstance()], lessons: [{ id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" }], noStandaloneSetupLessonIds: [], knowledgeSources: [] },
       (e) => events.push({ stage: e.stage, completedItems: e.completedItems, totalItems: e.totalItems }),
     );
 
@@ -537,7 +539,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
 
     await runSynthesis(
       { gemini, model: "m" },
-      { courseTitle: "Trading Accelerator", instances: [makeInstance()], lessons: [{ id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" }], noStandaloneSetupLessonIds: [] },
+      { courseTitle: "Trading Accelerator", instances: [makeInstance()], lessons: [{ id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" }], noStandaloneSetupLessonIds: [], knowledgeSources: [] },
     );
 
     expect(CANONICAL_STRATEGY_THINKING_LEVEL).toBe("low");
@@ -548,7 +550,7 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     expect(thinkingLevelByStage.decision_framework).toBeUndefined();
   });
 
-  it("reports no coverage gap when every lesson taught a standalone setup", async () => {
+  it("reports no coverage-notes gap when every lesson taught a standalone setup, and no lesson-level extraction gap when knowledgeSources is empty by construction (nothing to extract from, not a failure to extract)", async () => {
     const gemini = makeGemini({
       generateStructured: vi.fn(async (prompt: string) => {
         if (prompt.includes("clustering trading-strategy instances")) {
@@ -571,15 +573,148 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
         instances: [makeInstance()],
         lessons: [{ id: 10, title: "Lesson 10", chapterTitle: "Ch 1", sourceUrl: "https://x" }],
         noStandaloneSetupLessonIds: [],
+        knowledgeSources: [],
       },
     );
 
     const coverageNotes = result.playbook.sections.find((s) => s.key === "coverage_notes");
     expect(coverageNotes?.content).toContain("no coverage gaps to report");
 
-    expect(result.playbook.frameworkCoverage.status).toBe("COMPLETE");
+    // Phase 3.5B: status is no longer driven by strategy_found/lesson counts —
+    // with knowledgeSources empty, EVERY tracked dimension genuinely lacks
+    // evidence, so status is correctly PARTIAL (see the dedicated
+    // frameworkCoverage describe block below for the full COMPLETE case).
+    expect(result.playbook.frameworkCoverage.status).toBe("PARTIAL");
+    expect(result.playbook.frameworkCoverage.missingFrameworkDimensions.length).toBe(13);
+    // No no_strategy lesson exists at all here, so there is nothing to call an extraction gap.
     expect(result.playbook.frameworkCoverage.lessonsMissingSupportingKnowledgeExtraction).toBe(0);
     expect(result.playbook.frameworkCoverage.missingSupportingKnowledgeLessonIds).toEqual([]);
+  });
+});
+
+describe("synthesis/runSynthesis — Phase 3.5B frameworkCoverage (deterministic, evidence-based)", () => {
+  const ALL_DIMENSIONS = [
+    "market_context",
+    "risk_management",
+    "position_sizing",
+    "scaling_in",
+    "scaling_out",
+    "trade_management",
+    "execution",
+    "higher_timeframe",
+    "preparation",
+    "psychology",
+    "no_trade_conditions",
+    "warnings",
+    "definitions",
+  ] as const;
+
+  function fullCourseKnowledgeSources(): LessonKnowledgeSource[] {
+    return [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Everything Lesson",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: ALL_DIMENSIONS.map((category) => ({
+            category,
+            statement: `${category} rule`,
+            ruleType: "HARD_RULE" as const,
+            classification: "explicit" as const,
+            confidence: 0.9,
+            conditions: null,
+            exceptions: [],
+            scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+            numericalValues: [],
+            start_timestamp: "0:00",
+            end_timestamp: null,
+            evidence: "e",
+          })),
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+    ];
+  }
+
+  function gemini() {
+    return makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("clustering trading-strategy instances")) {
+          return {
+            text: JSON.stringify({ clusters: [{ clusterKey: "br", proposedCanonicalName: "Break & Retest", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" }] }),
+            usage,
+          };
+        }
+        if (prompt.includes("synthesizing ONE canonical trading strategy")) return { text: validRawCanonicalStrategyJson(), usage };
+        if (prompt.includes("Core Trading Framework")) return { text: validCoreFrameworkJson(), usage };
+        if (prompt.includes("Comprehensive Trading Playbook")) return { text: validPlaybookJson(), usage };
+        return { text: validDecisionFrameworkJson(), usage };
+      }),
+    });
+  }
+
+  it("status is COMPLETE when all 13 tracked dimensions have real evidence, regardless of strategy_found — never a Gemini opinion", async () => {
+    const result = await runSynthesis(
+      { gemini: gemini(), model: "m" },
+      {
+        courseTitle: "Trading Accelerator",
+        instances: [makeInstance()],
+        lessons: [{ id: 10, title: "Everything Lesson", chapterTitle: null, sourceUrl: "https://x" }],
+        noStandaloneSetupLessonIds: [],
+        knowledgeSources: fullCourseKnowledgeSources(),
+      },
+    );
+    expect(result.playbook.frameworkCoverage.status).toBe("COMPLETE");
+    expect(result.playbook.frameworkCoverage.missingFrameworkDimensions).toEqual([]);
+  });
+
+  it("does NOT depend on strategy_found/instance/canonical-strategy counts — a no_strategy lesson with full-dimension knowledge yields COMPLETE with zero canonical strategies", async () => {
+    const noClusterGemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) return { text: validCoreFrameworkJson(), usage };
+        if (prompt.includes("Comprehensive Trading Playbook")) return { text: validPlaybookJson(), usage };
+        return { text: validDecisionFrameworkJson(), usage };
+      }),
+    });
+    const result = await runSynthesis(
+      { gemini: noClusterGemini, model: "m" },
+      {
+        courseTitle: "Trading Accelerator",
+        instances: [], // no strategy instances at all — every lesson is no_strategy
+        lessons: [{ id: 10, title: "Everything Lesson", chapterTitle: null, sourceUrl: "https://x" }],
+        noStandaloneSetupLessonIds: [10],
+        knowledgeSources: fullCourseKnowledgeSources(),
+      },
+    );
+    expect(result.clusters).toEqual([]);
+    expect(result.playbook.frameworkCoverage.status).toBe("COMPLETE");
+    expect(result.playbook.frameworkCoverage.standaloneStrategyLessonsAnalyzed).toBe(0);
+    expect(result.playbook.frameworkCoverage.lessonsWithoutStandaloneSetup).toBe(1);
+    // The lesson DID return real extractable knowledge — this is not an extraction gap.
+    expect(result.playbook.frameworkCoverage.lessonsMissingSupportingKnowledgeExtraction).toBe(0);
+  });
+
+  it("a no_strategy lesson that ALSO returned zero knowledgeItems is a real extraction gap (distinct from missingFrameworkDimensions)", async () => {
+    const result = await runSynthesis(
+      { gemini: gemini(), model: "m" },
+      {
+        courseTitle: "Trading Accelerator",
+        instances: [makeInstance()],
+        lessons: [
+          { id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" },
+          { id: 11, title: "Empty Lesson", chapterTitle: null, sourceUrl: "https://y" },
+        ],
+        noStandaloneSetupLessonIds: [11],
+        knowledgeSources: [
+          { analysisId: 2, lessonId: 11, lessonTitle: "Empty Lesson", knowledge: { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] } },
+        ],
+      },
+    );
+    expect(result.playbook.frameworkCoverage.lessonsMissingSupportingKnowledgeExtraction).toBe(1);
+    expect(result.playbook.frameworkCoverage.missingSupportingKnowledgeLessonIds).toEqual([11]);
+    expect(result.playbook.frameworkCoverage.status).toBe("PARTIAL");
   });
 });
 
@@ -719,6 +854,9 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
       supportCount: 2,
       sourceKeys: [] as string[],
       conflictSourceKeys: [] as string[],
+      exceptions: [] as string[],
+      numericalValues: [] as RawCanonicalStrategy["sections"][number]["rules"][number]["numericalValues"],
+      scope: null as RawCanonicalStrategy["sections"][number]["rules"][number]["scope"],
       ...overrides,
     };
   }
