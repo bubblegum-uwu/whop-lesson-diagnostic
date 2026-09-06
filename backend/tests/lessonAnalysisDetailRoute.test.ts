@@ -30,7 +30,7 @@ describe("GET /api/course/lessons/:lessonId/analysis", () => {
     expect(statusCode()).toBe(400);
   });
 
-  it("returns the full validated JSON for the lesson's latest analysis", async () => {
+  async function makeLesson() {
     const course = await upsertCourse(pool, { whopCourseId: randomId("cors"), whopExperienceId: "exp_1", slug: "s", title: "Course" });
     await syncLessons(pool, course.id, [
       {
@@ -53,13 +53,60 @@ describe("GET /api/course/lessons/:lessonId/analysis", () => {
       `INSERT INTO analysis_jobs (lesson_id, analysis_fingerprint, status) VALUES ($1, 'fp', 'COMPLETED') RETURNING job_id`,
       [lesson.id],
     );
-    const validatedJson = { lesson: { title: "L", duration_seconds: 600 }, strategy_found: false, strategies: [] };
+    return { lesson, jobId: job.rows[0].job_id as string };
+  }
+
+  it("returns the full validated JSON for the lesson's latest analysis (v2, already carrying knowledge)", async () => {
+    const { lesson, jobId } = await makeLesson();
+    const validatedJson = {
+      lesson: { title: "L", duration_seconds: 600 },
+      strategy_found: false,
+      strategies: [],
+      knowledge: { summary: "s", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] },
+    };
     await createLessonAnalysis(pool, {
       lessonId: lesson.id,
-      jobId: job.rows[0].job_id,
+      jobId,
       status: "no_strategy",
       strategyFound: false,
       validatedJson,
+      analysisSummary: "s",
+      model: "gemini-3.8-flash",
+      promptVersion: "v2",
+      extractorVersion: "v2",
+      schemaVersion: "v2",
+      analysisFingerprint: "fp",
+      startedAt: new Date(),
+      completedAt: new Date(),
+      processingDurationSeconds: 60,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: null,
+    });
+
+    const handler = createLessonAnalysisDetailHandler({ pool });
+    const { res, statusCode, body } = makeResponse();
+    await handler({ params: { lessonId: String(lesson.id) } } as unknown as Request, res);
+
+    expect(statusCode()).toBe(200);
+    expect(body()).toEqual({ validatedJson });
+  });
+
+  // Phase 3.5 / test scenario #22: a v1 row (persisted before this feature
+  // existed) has NO `knowledge` field in its stored JSON at all — reading
+  // it back must not crash, and must not silently pretend content exists.
+  // It's backfilled with empty defaults (never fabricated) so every
+  // downstream consumer can safely assume `.knowledge` is always present.
+  it("normalizes a pre-v2 analysis (no `knowledge` in the stored JSON) with empty defaults on read — old analyses remain fully readable", async () => {
+    const { lesson, jobId } = await makeLesson();
+    const v1ValidatedJson = { lesson: { title: "L", duration_seconds: 600 }, strategy_found: false, strategies: [] };
+    await createLessonAnalysis(pool, {
+      lessonId: lesson.id,
+      jobId,
+      status: "no_strategy",
+      strategyFound: false,
+      validatedJson: v1ValidatedJson as never,
       analysisSummary: "No concrete trading strategy taught.",
       model: "gemini-3.8-flash",
       promptVersion: "v1",
@@ -80,6 +127,8 @@ describe("GET /api/course/lessons/:lessonId/analysis", () => {
     await handler({ params: { lessonId: String(lesson.id) } } as unknown as Request, res);
 
     expect(statusCode()).toBe(200);
-    expect(body()).toEqual({ validatedJson });
+    expect(body()).toEqual({
+      validatedJson: { ...v1ValidatedJson, knowledge: { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] } },
+    });
   });
 });

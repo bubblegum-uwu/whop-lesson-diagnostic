@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { LessonStrategyAnalysisSchema } from "../src/gemini/schema.js";
+import {
+  LessonStrategyAnalysisSchema,
+  KnowledgeItemSchema,
+  LessonKnowledgeSchema,
+  LessonExampleSchema,
+  STRATEGY_RESPONSE_JSON_SCHEMA,
+} from "../src/gemini/schema.js";
 
 function baseRule(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -35,12 +41,44 @@ function baseStrategy(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+function baseKnowledgeItem(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    category: "risk_management",
+    statement: "Never risk more than 1% of account equity on a single trade.",
+    ruleType: "HARD_RULE",
+    confidence: 0.95,
+    conditions: null,
+    numericalValues: [{ value: 1, unit: "%", context: "max risk per trade" }],
+    start_timestamp: "02:15",
+    end_timestamp: null,
+    evidence: "Spoken instruction at 02:15.",
+    ...overrides,
+  };
+}
+
+function baseExample(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    description: "A trade sized at 1% risk on a $10,000 account.",
+    illustratesCategory: "position_sizing",
+    outcome: "Stopped out for the planned 1% loss.",
+    start_timestamp: "05:00",
+    end_timestamp: "05:45",
+    evidence: "\"Here I risked exactly 1%.\"",
+    ...overrides,
+  };
+}
+
+function emptyKnowledge(overrides: Partial<Record<string, unknown>> = {}) {
+  return { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [], ...overrides };
+}
+
 describe("LessonStrategyAnalysisSchema", () => {
   it("accepts a well-formed strategy_found:true payload", () => {
     const payload = {
       lesson: { title: "VWAP Reclaim Setup", duration_seconds: 1593 },
       strategy_found: true,
       strategies: [baseStrategy()],
+      knowledge: emptyKnowledge(),
     };
     const result = LessonStrategyAnalysisSchema.safeParse(payload);
     expect(result.success).toBe(true);
@@ -51,9 +89,41 @@ describe("LessonStrategyAnalysisSchema", () => {
       lesson: { title: "Welcome to the course", duration_seconds: 240 },
       strategy_found: false,
       strategies: [],
+      knowledge: emptyKnowledge(),
     };
     const result = LessonStrategyAnalysisSchema.safeParse(payload);
     expect(result.success).toBe(true);
+  });
+
+  // Phase 3.5: the entire reason this feature exists — strategy_found:false
+  // must be able to carry real, non-empty `knowledge` (test scenario #15).
+  it("accepts strategy_found:false with a NON-EMPTY knowledge — this is the exact case the rich extractor exists for", () => {
+    const payload = {
+      lesson: { title: "Trade Management & Scaling", duration_seconds: 3840 },
+      strategy_found: false,
+      strategies: [],
+      knowledge: emptyKnowledge({
+        summary: "Covers risk management and position sizing for scaling into trades.",
+        knowledgeItems: [baseKnowledgeItem()],
+        examples: [baseExample()],
+        conflictsAndAmbiguities: ["Unclear whether the 1% figure is per-trade or per-day."],
+      }),
+    };
+    const result = LessonStrategyAnalysisSchema.safeParse(payload);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.strategy_found).toBe(false);
+      expect(result.data.knowledge.knowledgeItems).toHaveLength(1);
+    }
+  });
+
+  it("rejects a payload missing knowledge entirely (v1 shape is no longer accepted from Gemini directly)", () => {
+    const payload = {
+      lesson: { title: "X", duration_seconds: 100 },
+      strategy_found: false,
+      strategies: [],
+    };
+    expect(LessonStrategyAnalysisSchema.safeParse(payload).success).toBe(false);
   });
 
   it("rejects strategy_found:false with a non-empty strategies array (must not fabricate)", () => {
@@ -61,6 +131,7 @@ describe("LessonStrategyAnalysisSchema", () => {
       lesson: { title: "Intro", duration_seconds: 100 },
       strategy_found: false,
       strategies: [baseStrategy()],
+      knowledge: emptyKnowledge(),
     };
     const result = LessonStrategyAnalysisSchema.safeParse(payload);
     expect(result.success).toBe(false);
@@ -71,6 +142,7 @@ describe("LessonStrategyAnalysisSchema", () => {
       lesson: { title: "Intro", duration_seconds: 100 },
       strategy_found: true,
       strategies: [],
+      knowledge: emptyKnowledge(),
     };
     const result = LessonStrategyAnalysisSchema.safeParse(payload);
     expect(result.success).toBe(false);
@@ -81,6 +153,7 @@ describe("LessonStrategyAnalysisSchema", () => {
       lesson: { title: "X", duration_seconds: 100 },
       strategy_found: true,
       strategies: [baseStrategy({ entry_rules: [baseRule({ confidence: 1.5 })] })],
+      knowledge: emptyKnowledge(),
     };
     expect(LessonStrategyAnalysisSchema.safeParse(payload).success).toBe(false);
   });
@@ -90,6 +163,7 @@ describe("LessonStrategyAnalysisSchema", () => {
       lesson: { title: "X", duration_seconds: 100 },
       strategy_found: true,
       strategies: [baseStrategy({ entry_rules: [baseRule({ classification: "guessed" })] })],
+      knowledge: emptyKnowledge(),
     };
     expect(LessonStrategyAnalysisSchema.safeParse(payload).success).toBe(false);
   });
@@ -104,6 +178,7 @@ describe("LessonStrategyAnalysisSchema", () => {
       lesson: { title: "X", duration_seconds: 100 },
       strategy_found: true,
       strategies: [baseStrategy({ entry_rules: [baseRule({ end_timestamp: null })] })],
+      knowledge: emptyKnowledge(),
     };
     expect(LessonStrategyAnalysisSchema.safeParse(payload).success).toBe(true);
   });
@@ -112,5 +187,170 @@ describe("LessonStrategyAnalysisSchema", () => {
     expect(LessonStrategyAnalysisSchema.safeParse("not an object").success).toBe(false);
     expect(LessonStrategyAnalysisSchema.safeParse(null).success).toBe(false);
     expect(LessonStrategyAnalysisSchema.safeParse(undefined).success).toBe(false);
+  });
+});
+
+describe("KnowledgeItemSchema — the normalized rich-knowledge rule shape", () => {
+  it("accepts a well-formed HARD_RULE item with numericalValues and no conditions", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem()).success).toBe(true);
+  });
+
+  it.each(["market_context", "risk_management", "position_sizing", "scaling_in", "scaling_out", "trade_management", "execution", "higher_timeframe", "preparation", "psychology", "no_trade_conditions", "warnings", "definitions"])(
+    "accepts category %s",
+    (category) => {
+      expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ category })).success).toBe(true);
+    },
+  );
+
+  it("rejects an unknown category", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ category: "not_a_real_category" })).success).toBe(false);
+  });
+
+  // The hard-rule-vs-preference distinction is load-bearing: these are all
+  // valid ruleType VALUES, but distinct semantic strengths — never collapsed.
+  it.each(["HARD_RULE", "GUIDELINE", "PREFERENCE", "WARNING", "PROHIBITION", "DEFINITION", "OBSERVATION"])(
+    "accepts ruleType %s",
+    (ruleType) => {
+      expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ ruleType })).success).toBe(true);
+    },
+  );
+
+  it("rejects an unknown ruleType — never silently accepted as some default strength", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ ruleType: "SUGGESTION" })).success).toBe(false);
+  });
+
+  it("distinguishes a HARD_RULE from a PREFERENCE for the same category — 'never risk more than 1%' vs 'I usually risk around 1%' are not the same semantic strength", () => {
+    const hardRule = KnowledgeItemSchema.parse(baseKnowledgeItem({ statement: "Never risk more than 1% of account equity.", ruleType: "HARD_RULE" }));
+    const preference = KnowledgeItemSchema.parse(baseKnowledgeItem({ statement: "I usually risk around 1%.", ruleType: "PREFERENCE" }));
+    expect(hardRule.ruleType).not.toBe(preference.ruleType);
+  });
+
+  it("keeps a conditional exception attached to its own item via `conditions`, not as a separate disconnected item", () => {
+    const withCondition = KnowledgeItemSchema.parse(
+      baseKnowledgeItem({ statement: "Wait for candle confirmation before entering.", conditions: "Except when price gaps through the level." }),
+    );
+    expect(withCondition.conditions).toBe("Except when price gaps through the level.");
+  });
+
+  it("allows conditions to be null when the rule is unconditional", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ conditions: null })).success).toBe(true);
+  });
+
+  it("preserves numericalValues' units exactly, without any implied conversion", () => {
+    const parsed = KnowledgeItemSchema.parse(
+      baseKnowledgeItem({
+        numericalValues: [
+          { value: 2, unit: "R", context: "minimum reward-to-risk" },
+          { value: 3, unit: "candles", context: "confirmation window" },
+        ],
+      }),
+    );
+    expect(parsed.numericalValues).toEqual([
+      { value: 2, unit: "R", context: "minimum reward-to-risk" },
+      { value: 3, unit: "candles", context: "confirmation window" },
+    ]);
+  });
+
+  it("allows an item with zero numericalValues — not every rule has an explicit quantity", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ numericalValues: [] })).success).toBe(true);
+  });
+
+  it("rejects a confidence value out of the 0-1 range", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ confidence: 1.2 })).success).toBe(false);
+  });
+});
+
+describe("LessonExampleSchema — a concrete case study, distinct from a generalized KnowledgeItem", () => {
+  it("accepts a well-formed example with an illustratesCategory and outcome", () => {
+    expect(LessonExampleSchema.safeParse(baseExample()).success).toBe(true);
+  });
+
+  it("allows illustratesCategory and outcome to both be null", () => {
+    expect(LessonExampleSchema.safeParse(baseExample({ illustratesCategory: null, outcome: null })).success).toBe(true);
+  });
+
+  it("rejects an illustratesCategory that isn't a real KnowledgeCategory value", () => {
+    expect(LessonExampleSchema.safeParse(baseExample({ illustratesCategory: "not_a_category" })).success).toBe(false);
+  });
+});
+
+describe("LessonKnowledgeSchema — the top-level knowledge object", () => {
+  it("accepts a fully populated knowledge object across every field", () => {
+    const knowledge = emptyKnowledge({
+      summary: "Covers risk management and position sizing.",
+      knowledgeItems: [baseKnowledgeItem()],
+      examples: [baseExample()],
+      conflictsAndAmbiguities: ["Unclear whether this applies per-trade or per-day."],
+    });
+    expect(LessonKnowledgeSchema.safeParse(knowledge).success).toBe(true);
+  });
+
+  it("accepts a fully empty knowledge object — a lesson can legitimately have nothing to extract here", () => {
+    expect(LessonKnowledgeSchema.safeParse(emptyKnowledge()).success).toBe(true);
+  });
+
+  it("rejects a knowledgeItems array containing a malformed item", () => {
+    const knowledge = emptyKnowledge({ knowledgeItems: [{ category: "risk_management" }] });
+    expect(LessonKnowledgeSchema.safeParse(knowledge).success).toBe(false);
+  });
+});
+
+// Phase 3.5 provenance (test scenarios #16-20). Unlike PR #11's canonical
+// synthesis (which resynthesizes from data Gemini already produced, so it
+// keys back into it via `sourceKeys`), lesson analysis is PRIMARY extraction
+// straight from video — every timestamp/evidence pair IS the original claim,
+// not a reference to one. So provenance here means: (a) Gemini is required
+// to produce its own timestamp+evidence per item (never omitted, never a
+// bare boolean), (b) the wire schema never asks Gemini to reproduce
+// lessonId/lessonTitle/source metadata the application already owns per
+// item — that's attached once, deterministically, via the persisted row's
+// own DB context/FK — and (c) unknown/invalid category or ruleType values
+// are rejected outright rather than silently accepted as some default.
+describe("provenance — timestamps, evidence, and no wasteful per-item duplication", () => {
+  it("requires a non-empty start_timestamp and evidence on every knowledge item — never optional, never fabricated after the fact", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ start_timestamp: "" })).success).toBe(false);
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ evidence: "" })).success).toBe(false);
+  });
+
+  it("round-trips a knowledge item's timestamps and evidence unchanged — provenance survives parsing exactly", () => {
+    const parsed = KnowledgeItemSchema.parse(baseKnowledgeItem({ start_timestamp: "12:34", end_timestamp: "13:01", evidence: "Exact quoted instructor line." }));
+    expect(parsed.start_timestamp).toBe("12:34");
+    expect(parsed.end_timestamp).toBe("13:01");
+    expect(parsed.evidence).toBe("Exact quoted instructor line.");
+  });
+
+  it("allows end_timestamp to be null for a single-instant knowledge item", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ end_timestamp: null })).success).toBe(true);
+  });
+
+  it("requires a non-empty start_timestamp and evidence on every example, same as knowledge items", () => {
+    expect(LessonExampleSchema.safeParse(baseExample({ start_timestamp: "" })).success).toBe(false);
+    expect(LessonExampleSchema.safeParse(baseExample({ evidence: "" })).success).toBe(false);
+  });
+
+  // The application already knows lessonId/lessonTitle from the row it's
+  // persisting the analysis under — asking Gemini to reproduce them on
+  // every one of dozens of items per lesson would be exactly the wasteful
+  // repetition PR #11 identified and fixed for synthesis. This is a
+  // regression guard: none of the per-item wire schemas ask for it.
+  it("never asks Gemini to reproduce lessonId/lessonTitle on knowledgeItems, examples, or numericalValues — that provenance is attached once by the application, not duplicated per item", () => {
+    const knowledgeItemProps = Object.keys((STRATEGY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.knowledgeItems.items as { properties: object }).properties);
+    const exampleProps = Object.keys((STRATEGY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.examples.items as { properties: object }).properties);
+    for (const props of [knowledgeItemProps, exampleProps]) {
+      expect(props).not.toContain("lessonId");
+      expect(props).not.toContain("lessonTitle");
+      expect(props).not.toContain("sourceKeys");
+    }
+  });
+
+  // PR #9's lesson: Gemini's real API rejects ~13 sibling JSON-schema arrays
+  // for the same conceptual thing. This guards against silently regressing
+  // back to a per-category array shape instead of the collapsed
+  // category-tagged `knowledgeItems` array.
+  it("keeps the 13 knowledge categories collapsed into ONE knowledgeItems array in the wire schema, not 13 sibling arrays", () => {
+    const knowledgeProps = Object.keys(STRATEGY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties);
+    expect(knowledgeProps).toEqual(["summary", "knowledgeItems", "examples", "conflictsAndAmbiguities"]);
+    expect(knowledgeProps).not.toContain("risk_management");
+    expect(knowledgeProps).not.toContain("position_sizing");
   });
 });

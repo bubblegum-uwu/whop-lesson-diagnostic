@@ -7,6 +7,7 @@ import { remuxToMp4 } from "../ffmpeg/remux.js";
 import { withTempMp4File } from "../tempFiles/tempFile.js";
 import type { GeminiClient } from "../gemini/client.js";
 import { LessonStrategyAnalysisSchema, type LessonStrategyAnalysis } from "../gemini/schema.js";
+import { LESSON_ANALYSIS_MAX_OUTPUT_TOKENS } from "./limits.js";
 import type { SecretRedactor } from "../lib/redact.js";
 import { globalRedactor } from "../lib/redact.js";
 import type { SafeLogger } from "../lib/logger.js";
@@ -192,7 +193,7 @@ export async function analyzeLesson(
     emit("analyzing_lesson");
     let text: string;
     try {
-      const result = await deps.gemini.analyzeVideo(file, deps.geminiModel, deps.geminiProcessingMode);
+      const result = await deps.gemini.analyzeVideo(file, deps.geminiModel, deps.geminiProcessingMode, LESSON_ANALYSIS_MAX_OUTPUT_TOKENS);
       text = result.text;
       usage = result.usage;
     } catch (err) {

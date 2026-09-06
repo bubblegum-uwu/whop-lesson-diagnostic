@@ -106,6 +106,7 @@ const validJson = JSON.stringify({
       ambiguities: [],
     },
   ],
+  knowledge: { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] },
 });
 
 function makeGemini(overrides: Partial<GeminiClient> = {}): GeminiClient {
@@ -272,7 +273,7 @@ describe("runWorkerLoop", () => {
     const lesson = await makeLesson();
     const fingerprint = "fp-no-strategy";
     const job = await createJob(pool, lesson.id, fingerprint);
-    const noStrategyJson = JSON.stringify({ lesson: { title: "t", duration_seconds: 1 }, strategy_found: false, strategies: [] });
+    const noStrategyJson = JSON.stringify({ lesson: { title: "t", duration_seconds: 1 }, strategy_found: false, strategies: [], knowledge: { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] } });
     const gemini = makeGemini({ analyzeVideo: vi.fn(async () => ({ text: noStrategyJson, usage: { inputTokens: 500, outputTokens: 20, thinkingTokens: 0 } })) });
 
     await runWorkerLoop(makeDeps({}, gemini));
@@ -282,6 +283,55 @@ describe("runWorkerLoop", () => {
     expect(analysis?.status).toBe("no_strategy");
     expect(analysis?.strategyFound).toBe(false);
     expect(analysis?.inputTokens).toBe(500);
+  });
+
+  // Phase 3.5: a lesson can have strategy_found=false while still carrying
+  // real, persisted supporting knowledge (risk management, sizing, ...) —
+  // this proves that content survives the full worker persistence path
+  // (createLessonAnalysis's validated_json, not just the in-memory Gemini
+  // result), and that createStrategyInstances is still correctly skipped
+  // (zero strategy_instances rows) even though the analysis itself is rich.
+  it("persists real supporting knowledge for a no-strategy lesson — strategyFound=false never means nothing useful was extracted", async () => {
+    await activeSession();
+    const lesson = await makeLesson();
+    const fingerprint = "fp-no-strategy-rich";
+    const job = await createJob(pool, lesson.id, fingerprint);
+    const richNoStrategyJson = JSON.stringify({
+      lesson: { title: "t", duration_seconds: 1 },
+      strategy_found: false,
+      strategies: [],
+      knowledge: {
+        summary: "Covers position sizing and risk management for scaling into trades.",
+        knowledgeItems: [
+          {
+            category: "risk_management",
+            statement: "Never risk more than 1% of account equity on a single trade.",
+            ruleType: "HARD_RULE",
+            confidence: 0.95,
+            conditions: null,
+            numericalValues: [{ value: 1, unit: "%", context: "max risk per trade" }],
+            start_timestamp: "02:15",
+            end_timestamp: null,
+            evidence: "Spoken instruction at 02:15.",
+          },
+        ],
+        examples: [],
+        conflictsAndAmbiguities: [],
+      },
+    });
+    const gemini = makeGemini({ analyzeVideo: vi.fn(async () => ({ text: richNoStrategyJson, usage: { inputTokens: 500, outputTokens: 120, thinkingTokens: 10 } })) });
+
+    await runWorkerLoop(makeDeps({}, gemini));
+
+    expect((await getJob(pool, job.jobId))?.status).toBe("NO_STRATEGY");
+    const analysis = await findLatestByFingerprint(pool, fingerprint);
+    expect(analysis?.strategyFound).toBe(false);
+    expect(analysis?.validatedJson.knowledge.knowledgeItems).toHaveLength(1);
+    expect(analysis?.validatedJson.knowledge.knowledgeItems[0].category).toBe("risk_management");
+    expect(analysis?.validatedJson.knowledge.knowledgeItems[0].ruleType).toBe("HARD_RULE");
+    // strategy_instances is still correctly skipped — this is knowledge, not a standalone setup.
+    const instances = await listByAnalysisId(pool, analysis!.analysisId);
+    expect(instances).toHaveLength(0);
   });
 
   it("a second concurrent execution exits immediately without processing anything (advisory lock is authoritative)", async () => {

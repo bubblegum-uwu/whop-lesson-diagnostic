@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import type { LessonStrategyAnalysis } from "../gemini/schema.js";
+import { EMPTY_LESSON_KNOWLEDGE } from "../gemini/schema.js";
 
 export type Queryable = Pool | PoolClient;
 
@@ -52,6 +53,21 @@ interface LessonAnalysisRow {
   created_at: Date;
 }
 
+/**
+ * Pre-v2 rows have no `knowledge` field at all (see pipeline/
+ * analysisVersion.ts's v2 changelog — `lesson_analyses` is insert-only, so
+ * a row persisted under the old extractor keeps its old JSON shape
+ * forever). Filling in empty defaults here — never fabricated content —
+ * is what lets every downstream consumer (analysisSummary.ts, HTTP
+ * routes, frontend) safely assume `.knowledge` is always present, exactly
+ * as the current LessonStrategyAnalysis type claims, without every
+ * caller re-deriving its own "is this an old row" check.
+ */
+function normalizeValidatedJson(raw: LessonStrategyAnalysis): LessonStrategyAnalysis {
+  if (raw.knowledge) return raw;
+  return { ...raw, knowledge: EMPTY_LESSON_KNOWLEDGE };
+}
+
 function mapRow(row: LessonAnalysisRow): LessonAnalysis {
   return {
     analysisId: Number(row.analysis_id),
@@ -59,7 +75,7 @@ function mapRow(row: LessonAnalysisRow): LessonAnalysis {
     jobId: row.job_id,
     status: row.status,
     strategyFound: row.strategy_found,
-    validatedJson: row.validated_json,
+    validatedJson: normalizeValidatedJson(row.validated_json),
     analysisSummary: row.analysis_summary,
     model: row.model,
     promptVersion: row.prompt_version,

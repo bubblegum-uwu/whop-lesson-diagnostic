@@ -46,6 +46,8 @@ function makeLessonResponse(overrides: Partial<WhopCourseLessonResponse> = {}): 
   };
 }
 
+const emptyKnowledge = { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] };
+
 const validStrategyJson = JSON.stringify({
   lesson: { title: "ignored - overwritten by pipeline", duration_seconds: 1 },
   strategy_found: true,
@@ -78,12 +80,34 @@ const validStrategyJson = JSON.stringify({
       ambiguities: [],
     },
   ],
+  knowledge: emptyKnowledge,
 });
 
+// Phase 3.5: strategy_found=false still carries real, non-empty `knowledge`
+// — this is exactly the case the rich-knowledge extractor exists for (a
+// lesson with no standalone setup but real risk-management content).
 const noStrategyJson = JSON.stringify({
   lesson: { title: "ignored", duration_seconds: 1 },
   strategy_found: false,
   strategies: [],
+  knowledge: {
+    summary: "Covers position sizing and risk management for scaling into trades.",
+    knowledgeItems: [
+      {
+        category: "risk_management",
+        statement: "Never risk more than 1% of account equity on a single trade.",
+        ruleType: "HARD_RULE",
+        confidence: 0.95,
+        conditions: null,
+        numericalValues: [{ value: 1, unit: "%", context: "max risk per trade" }],
+        start_timestamp: "02:15",
+        end_timestamp: null,
+        evidence: "Spoken instruction at 02:15.",
+      },
+    ],
+    examples: [],
+    conflictsAndAmbiguities: [],
+  },
 });
 
 function makeFile(state: GeminiFileRef["state"] = "ACTIVE"): GeminiFileRef {

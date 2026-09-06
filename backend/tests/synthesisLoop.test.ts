@@ -11,6 +11,7 @@ import { runSynthesisLoop, type SynthesisWorkerDeps } from "../src/worker/synthe
 import type { GeminiClient } from "../src/gemini/client.js";
 import { GeminiIncompleteInteractionError, computeCompletionDiagnostics } from "../src/gemini/client.js";
 import type { Strategy } from "../src/gemini/schema.js";
+import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import { createSecretRedactor } from "../src/lib/redact.js";
 import { computeSynthesisProgress } from "../src/synthesis/progress.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
@@ -99,7 +100,7 @@ async function seedRunReadyToClaim() {
     jobId: (await pool.query(`INSERT INTO analysis_jobs (lesson_id, analysis_fingerprint, status) VALUES ($1, 'fp-1', 'COMPLETED') RETURNING job_id`, [strategyLesson.id])).rows[0].job_id,
     status: "completed",
     strategyFound: true,
-    validatedJson: { lesson: { title: strategyLesson.title, duration_seconds: 600 }, strategy_found: true, strategies: [makeStrategy()] },
+    validatedJson: { lesson: { title: strategyLesson.title, duration_seconds: 600 }, strategy_found: true, strategies: [makeStrategy()], knowledge: EMPTY_LESSON_KNOWLEDGE },
     analysisSummary: "Break & Retest",
     model: GEMINI_MODEL,
     promptVersion: "v1",
@@ -121,7 +122,7 @@ async function seedRunReadyToClaim() {
     jobId: (await pool.query(`INSERT INTO analysis_jobs (lesson_id, analysis_fingerprint, status) VALUES ($1, 'fp-2', 'NO_STRATEGY') RETURNING job_id`, [noStrategyLesson.id])).rows[0].job_id,
     status: "no_strategy",
     strategyFound: false,
-    validatedJson: { lesson: { title: noStrategyLesson.title, duration_seconds: 400 }, strategy_found: false, strategies: [] },
+    validatedJson: { lesson: { title: noStrategyLesson.title, duration_seconds: 400 }, strategy_found: false, strategies: [], knowledge: EMPTY_LESSON_KNOWLEDGE },
     analysisSummary: "No concrete trading strategy taught.",
     model: GEMINI_MODEL,
     promptVersion: "v1",

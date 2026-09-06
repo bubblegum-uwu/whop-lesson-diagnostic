@@ -126,6 +126,64 @@ export interface RuleCount {
   count: number;
 }
 
+/**
+ * Phase 3.5 — mirrors backend/src/gemini/schema.ts's KnowledgeCategory
+ * exactly (v2 extractor). A lesson with strategyFound=false can still have
+ * real content in these categories — "No Standalone Setup" means only
+ * "no complete standalone trading setup," never "nothing useful here."
+ */
+export type KnowledgeCategory =
+  | "market_context"
+  | "risk_management"
+  | "position_sizing"
+  | "scaling_in"
+  | "scaling_out"
+  | "trade_management"
+  | "execution"
+  | "higher_timeframe"
+  | "preparation"
+  | "psychology"
+  | "no_trade_conditions"
+  | "warnings"
+  | "definitions";
+
+/** Mirrors backend RuleType — the item's stated STRENGTH, distinct from `classification` (how it was extracted). */
+export type RuleType = "HARD_RULE" | "GUIDELINE" | "PREFERENCE" | "WARNING" | "PROHIBITION" | "DEFINITION" | "OBSERVATION";
+
+export interface NumericalValue {
+  value: number;
+  unit: string;
+  context: string;
+}
+
+export interface KnowledgeItem {
+  category: KnowledgeCategory;
+  statement: string;
+  ruleType: RuleType;
+  confidence: number;
+  conditions: string | null;
+  numericalValues: NumericalValue[];
+  start_timestamp: string;
+  end_timestamp: string | null;
+  evidence: string;
+}
+
+export interface LessonExample {
+  description: string;
+  illustratesCategory: KnowledgeCategory | null;
+  outcome: string | null;
+  start_timestamp: string;
+  end_timestamp: string | null;
+  evidence: string;
+}
+
+export interface LessonKnowledge {
+  summary: string;
+  knowledgeItems: KnowledgeItem[];
+  examples: LessonExample[];
+  conflictsAndAmbiguities: string[];
+}
+
 export interface LessonAnalysisSummary {
   analysisId: number;
   strategyFound: boolean;
@@ -133,6 +191,11 @@ export interface LessonAnalysisSummary {
   ruleCounts: RuleCount[];
   confidence: number | null;
   summary: string;
+  /** True when this lesson's analysis carries any risk/sizing/management/psychology/... content, independent of strategyFound. */
+  hasSupportingKnowledge: boolean;
+  knowledgeItemCounts: RuleCount[];
+  /** "v1" (pre-Phase-3.5, no `knowledge` in the full analysis JSON) or "v2" — see backend/src/pipeline/analysisVersion.ts. */
+  schemaVersion: string;
   estimatedCost: number | null;
   processingDurationSeconds: number | null;
   completedAt: string;

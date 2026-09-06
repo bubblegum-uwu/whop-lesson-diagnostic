@@ -31,7 +31,7 @@ export class GeminiProcessingFailedError extends Error {
 export class GeminiAnalysisError extends Error {
   constructor(
     message: string,
-    /** Set only for a structured-generation empty-response failure (see generateStructured) — analyzeVideo never sets this. */
+    /** Set for an empty-response failure from either analyzeVideo or generateStructured — undefined for any other kind of failure (e.g. a raw SDK/network error caught below). */
     public readonly diagnostics?: GeminiCompletionDiagnostics,
   ) {
     super(message);
@@ -132,17 +132,26 @@ export interface AnalyzeVideoResult {
   /** The raw JSON text produced by the model (not yet schema-validated). */
   text: string;
   usage: GeminiUsage;
-}
-
-export interface GenerateStructuredResult extends AnalyzeVideoResult {
   /** Optional only so a test fake GeminiClient can omit it without friction — the real client (createGeminiClient below) always populates it. */
   diagnostics?: GeminiCompletionDiagnostics;
 }
 
+export type GenerateStructuredResult = AnalyzeVideoResult;
+
 export interface GeminiClient {
   uploadFile(filePath: string): Promise<GeminiFileRef>;
   waitUntilActive(file: GeminiFileRef, pollIntervalMs?: number): Promise<GeminiFileRef>;
-  analyzeVideo(file: GeminiFileRef, model: string, processingMode: "agentic" | "static"): Promise<AnalyzeVideoResult>;
+  /**
+   * `maxOutputTokens`, when provided, is passed through as
+   * `generation_config.max_output_tokens` — see pipeline/limits.ts's
+   * LESSON_ANALYSIS_MAX_OUTPUT_TOKENS. Previously always unset (server
+   * default); Phase 3.5's richer knowledge schema is enough larger than
+   * the old strategy-only schema that an explicit, visible budget (plus
+   * the same INCOMPLETE-status safety check generateStructured already
+   * has) is warranted the same way it was for synthesis — see
+   * GeminiIncompleteInteractionError and computeCompletionDiagnostics.
+   */
+  analyzeVideo(file: GeminiFileRef, model: string, processingMode: "agentic" | "static", maxOutputTokens?: number): Promise<AnalyzeVideoResult>;
   deleteFile(file: GeminiFileRef): Promise<void>;
   /**
    * Text-only, schema-constrained generation — no file upload/wait/delete
@@ -250,6 +259,7 @@ export function createGeminiClient(apiKey: string): GeminiClient {
     file: GeminiFileRef,
     model: string,
     processingMode: "agentic" | "static",
+    maxOutputTokens?: number,
   ): Promise<AnalyzeVideoResult> {
     try {
       const videoContent: Interactions.VideoContent = {
@@ -271,15 +281,29 @@ export function createGeminiClient(apiKey: string): GeminiClient {
           mime_type: "application/json",
           schema: STRATEGY_RESPONSE_JSON_SCHEMA,
         },
+        ...(maxOutputTokens != null ? { generation_config: { max_output_tokens: maxOutputTokens } } : {}),
       });
 
-      const text = extractOutputText(interaction);
-      if (!text) {
-        throw new GeminiAnalysisError("Gemini returned an empty response.");
+      const text = extractOutputText(interaction) ?? "";
+      const usage = extractUsage(interaction);
+      const diagnostics = computeCompletionDiagnostics(interaction.status, text, usage);
+
+      // Same ordering as generateStructured, and for the same reason: an
+      // INCOMPLETE/budget_exceeded interaction's output_text can be
+      // partial or stale, so this is checked BEFORE emptiness/JSON.parse —
+      // previously analyzeVideo had NO status check at all (only an
+      // emptiness check), a gap that mattered little against the old
+      // compact strategy-only schema but matters a great deal against the
+      // richer Phase 3.5 schema.
+      if (INCOMPLETE_INTERACTION_STATUSES.has(interaction.status)) {
+        throw new GeminiIncompleteInteractionError(interaction.status, diagnostics);
       }
-      return { text, usage: extractUsage(interaction) };
+      if (diagnostics.isEmpty) {
+        throw new GeminiAnalysisError("Gemini returned an empty response.", diagnostics);
+      }
+      return { text, usage, diagnostics };
     } catch (err) {
-      if (err instanceof GeminiAnalysisError) throw err;
+      if (err instanceof GeminiAnalysisError || err instanceof GeminiIncompleteInteractionError) throw err;
       throw new GeminiAnalysisError(
         `Gemini analysis request failed: ${err instanceof Error ? err.message : String(err)}`,
       );

@@ -5,6 +5,7 @@ import { createJob } from "../src/db/analysisJobsRepo.js";
 import { createLessonAnalysis, findLatestByFingerprint, getByJobId } from "../src/db/lessonAnalysesRepo.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 import type { LessonStrategyAnalysis } from "../src/gemini/schema.js";
+import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 
 const pool = createTestPool();
 afterAll(async () => {
@@ -39,7 +40,7 @@ async function makeLesson() {
 }
 
 function analysis(overrides: Partial<LessonStrategyAnalysis> = {}): LessonStrategyAnalysis {
-  return { lesson: { title: "t", duration_seconds: 600 }, strategy_found: false, strategies: [], ...overrides };
+  return { lesson: { title: "t", duration_seconds: 600 }, strategy_found: false, strategies: [], knowledge: EMPTY_LESSON_KNOWLEDGE, ...overrides };
 }
 
 describe("lessonAnalysesRepo", () => {

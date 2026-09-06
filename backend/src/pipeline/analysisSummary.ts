@@ -1,4 +1,4 @@
-import type { LessonStrategyAnalysis, Rule, Strategy } from "../gemini/schema.js";
+import type { LessonStrategyAnalysis, Rule, Strategy, KnowledgeCategoryValue } from "../gemini/schema.js";
 
 /**
  * Everything here is derived deterministically from the already-validated
@@ -77,11 +77,55 @@ function summarizeStrategy(strategy: Strategy): string {
  * A short, deterministic, template-built summary — never an extra Gemini
  * call. E.g. "Break & Retest using HTF levels, displacement, entry: retest
  * entry, stop: market-structure stop, target: next-key-level targets."
+ *
+ * Phase 3.5: previously hardcoded to the literal string "No concrete
+ * trading strategy taught." whenever strategy_found was false — since
+ * every lesson now always carries `knowledge.summary` regardless of
+ * strategy_found (see gemini/schema.ts's v2 changelog), a lesson with no
+ * standalone strategy but real supporting knowledge (risk management,
+ * sizing, psychology, ...) gets ITS OWN real summary here instead of that
+ * one hardcoded string — strategy_found=false no longer means "nothing
+ * useful to show."
  */
 export function buildAnalysisSummary(analysis: LessonStrategyAnalysis): string {
-  if (!analysis.strategy_found || analysis.strategies.length === 0) {
-    return "No concrete trading strategy taught.";
+  if (analysis.strategy_found && analysis.strategies.length > 0) {
+    return analysis.strategies.map(summarizeStrategy).join("; ");
   }
-  const summaries = analysis.strategies.map(summarizeStrategy);
-  return summaries.join("; ");
+  const knowledgeSummary = analysis.knowledge.summary.trim();
+  return knowledgeSummary.length > 0 ? knowledgeSummary : "No concrete trading strategy or supporting knowledge extracted.";
+}
+
+/** Non-zero knowledge categories only, in KNOWLEDGE_CATEGORY_LABELS' stable order — mirrors ruleCounts() above, but for Phase 3.5's category-tagged knowledgeItems rather than per-strategy rule arrays. */
+const KNOWLEDGE_CATEGORY_LABELS: { key: KnowledgeCategoryValue; label: string }[] = [
+  { key: "market_context", label: "Market Context" },
+  { key: "risk_management", label: "Risk Management" },
+  { key: "position_sizing", label: "Position Sizing" },
+  { key: "scaling_in", label: "Scaling In" },
+  { key: "scaling_out", label: "Scaling Out" },
+  { key: "trade_management", label: "Trade Management" },
+  { key: "execution", label: "Execution" },
+  { key: "higher_timeframe", label: "Higher Timeframe" },
+  { key: "preparation", label: "Preparation" },
+  { key: "psychology", label: "Psychology" },
+  { key: "no_trade_conditions", label: "No-Trade Conditions" },
+  { key: "warnings", label: "Warnings" },
+  { key: "definitions", label: "Definitions" },
+];
+
+export function knowledgeItemCounts(analysis: LessonStrategyAnalysis): RuleCount[] {
+  const totals = new Map<string, number>();
+  for (const item of analysis.knowledge.knowledgeItems) {
+    totals.set(item.category, (totals.get(item.category) ?? 0) + 1);
+  }
+  return KNOWLEDGE_CATEGORY_LABELS.map(({ key, label }) => ({ label, count: totals.get(key) ?? 0 })).filter((r) => r.count > 0);
+}
+
+/** True whenever this lesson's analysis carries ANY supporting knowledge beyond a bare strategy — used to distinguish "no standalone setup, but real supporting content" from "genuinely nothing extracted" without re-deriving the same check in every caller. */
+export function hasSupportingKnowledge(analysis: LessonStrategyAnalysis): boolean {
+  return (
+    analysis.knowledge.knowledgeItems.length > 0 ||
+    analysis.knowledge.examples.length > 0 ||
+    analysis.knowledge.conflictsAndAmbiguities.length > 0 ||
+    analysis.knowledge.summary.trim().length > 0
+  );
 }

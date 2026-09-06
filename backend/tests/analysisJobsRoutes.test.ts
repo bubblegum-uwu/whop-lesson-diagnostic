@@ -5,6 +5,7 @@ import { syncLessons, listLessons } from "../src/db/lessonsRepo.js";
 import { getJob } from "../src/db/analysisJobsRepo.js";
 import { createLessonAnalysis } from "../src/db/lessonAnalysesRepo.js";
 import { computeAnalysisFingerprint } from "../src/pipeline/fingerprint.js";
+import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import {
   createEnqueueJobsHandler,
   createRetryJobHandler,
@@ -84,7 +85,7 @@ describe("POST /api/analysis/jobs", () => {
       jobId: job.rows[0].job_id,
       status: "completed",
       strategyFound: true,
-      validatedJson: { lesson: { title: "t", duration_seconds: 600 }, strategy_found: true, strategies: [] },
+      validatedJson: { lesson: { title: "t", duration_seconds: 600 }, strategy_found: true, strategies: [], knowledge: EMPTY_LESSON_KNOWLEDGE },
       analysisSummary: "summary",
       model: GEMINI_MODEL,
       promptVersion: "v1",

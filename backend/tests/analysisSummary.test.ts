@@ -4,8 +4,10 @@ import {
   ruleCounts,
   aggregateConfidence,
   extractedStrategiesLabel,
+  knowledgeItemCounts,
+  hasSupportingKnowledge,
 } from "../src/pipeline/analysisSummary.js";
-import type { LessonStrategyAnalysis, Rule } from "../src/gemini/schema.js";
+import type { LessonStrategyAnalysis, Rule, KnowledgeItem, LessonKnowledge } from "../src/gemini/schema.js";
 
 function makeRule(overrides: Partial<Rule> = {}): Rule {
   return {
@@ -41,21 +43,50 @@ function makeStrategy(name: string, overrides: Partial<LessonStrategyAnalysis["s
   };
 }
 
-function noStrategyAnalysis(): LessonStrategyAnalysis {
-  return { lesson: { title: "t", duration_seconds: null }, strategy_found: false, strategies: [] };
+function makeKnowledgeItem(overrides: Partial<KnowledgeItem> = {}): KnowledgeItem {
+  return {
+    category: "risk_management",
+    statement: "Never risk more than 1% of account equity on a single trade.",
+    ruleType: "HARD_RULE",
+    confidence: 0.95,
+    conditions: null,
+    numericalValues: [{ value: 1, unit: "%", context: "max risk per trade" }],
+    start_timestamp: "02:15",
+    end_timestamp: null,
+    evidence: "Spoken instruction at 02:15.",
+    ...overrides,
+  };
+}
+
+const emptyKnowledge: LessonKnowledge = { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] };
+
+function noStrategyAnalysis(knowledge: LessonKnowledge = emptyKnowledge): LessonStrategyAnalysis {
+  return { lesson: { title: "t", duration_seconds: null }, strategy_found: false, strategies: [], knowledge };
+}
+
+function strategyAnalysis(strategies: LessonStrategyAnalysis["strategies"], knowledge: LessonKnowledge = emptyKnowledge): LessonStrategyAnalysis {
+  return { lesson: { title: "t", duration_seconds: 100 }, strategy_found: true, strategies, knowledge };
 }
 
 describe("buildAnalysisSummary", () => {
-  it('returns the fixed "no strategy" summary when strategy_found is false', () => {
-    expect(buildAnalysisSummary(noStrategyAnalysis())).toBe("No concrete trading strategy taught.");
+  it('returns the generic "nothing extracted" fallback only when BOTH strategy and knowledge are genuinely empty', () => {
+    expect(buildAnalysisSummary(noStrategyAnalysis())).toBe("No concrete trading strategy or supporting knowledge extracted.");
+  });
+
+  it("returns the lesson's own knowledge.summary when strategy_found is false but supporting knowledge exists — never the old hardcoded string", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "Covers risk management and position sizing for scaling into trades.",
+      knowledgeItems: [makeKnowledgeItem()],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    const summary = buildAnalysisSummary(noStrategyAnalysis(knowledge));
+    expect(summary).toBe("Covers risk management and position sizing for scaling into trades.");
+    expect(summary).not.toBe("No concrete trading strategy taught.");
   });
 
   it("builds a deterministic template summary for one strategy (never calls Gemini)", () => {
-    const analysis: LessonStrategyAnalysis = {
-      lesson: { title: "t", duration_seconds: 100 },
-      strategy_found: true,
-      strategies: [makeStrategy("Break & Retest")],
-    };
+    const analysis = strategyAnalysis([makeStrategy("Break & Retest")]);
     const summary = buildAnalysisSummary(analysis);
     expect(summary).toContain("Break & Retest");
     expect(summary).toContain("retest entry");
@@ -64,14 +95,17 @@ describe("buildAnalysisSummary", () => {
   });
 
   it("summarizes multiple strategies", () => {
-    const analysis: LessonStrategyAnalysis = {
-      lesson: { title: "t", duration_seconds: 100 },
-      strategy_found: true,
-      strategies: [makeStrategy("Break & Retest"), makeStrategy("VWAP Reclaim")],
-    };
+    const analysis = strategyAnalysis([makeStrategy("Break & Retest"), makeStrategy("VWAP Reclaim")]);
     const summary = buildAnalysisSummary(analysis);
     expect(summary).toContain("Break & Retest");
     expect(summary).toContain("VWAP Reclaim");
+  });
+
+  it("prefers the strategy summary over knowledge.summary when both are present — the strategy synopsis is more specific", () => {
+    const knowledge: LessonKnowledge = { summary: "General lesson themes.", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] };
+    const summary = buildAnalysisSummary(strategyAnalysis([makeStrategy("Break & Retest")], knowledge));
+    expect(summary).toContain("Break & Retest");
+    expect(summary).not.toContain("General lesson themes.");
   });
 });
 
@@ -81,31 +115,19 @@ describe("extractedStrategiesLabel", () => {
   });
 
   it('returns the bare name for exactly one strategy', () => {
-    const analysis: LessonStrategyAnalysis = {
-      lesson: { title: "t", duration_seconds: null },
-      strategy_found: true,
-      strategies: [makeStrategy("Break & Retest")],
-    };
+    const analysis = strategyAnalysis([makeStrategy("Break & Retest")]);
     expect(extractedStrategiesLabel(analysis)).toBe("Break & Retest");
   });
 
   it('returns "Name +N more" for multiple strategies', () => {
-    const analysis: LessonStrategyAnalysis = {
-      lesson: { title: "t", duration_seconds: null },
-      strategy_found: true,
-      strategies: [makeStrategy("Break & Retest"), makeStrategy("A"), makeStrategy("B")],
-    };
+    const analysis = strategyAnalysis([makeStrategy("Break & Retest"), makeStrategy("A"), makeStrategy("B")]);
     expect(extractedStrategiesLabel(analysis)).toBe("Break & Retest +2 more");
   });
 });
 
 describe("ruleCounts", () => {
   it("counts rules per category across all strategies, omitting zero categories", () => {
-    const analysis: LessonStrategyAnalysis = {
-      lesson: { title: "t", duration_seconds: null },
-      strategy_found: true,
-      strategies: [makeStrategy("A")],
-    };
+    const analysis = strategyAnalysis([makeStrategy("A")]);
     const counts = ruleCounts(analysis);
     expect(counts).toEqual([
       { label: "Setup", count: 3 },
@@ -127,19 +149,64 @@ describe("aggregateConfidence", () => {
   });
 
   it("averages confidence across every rule in every strategy (never a separate invented metric)", () => {
-    const analysis: LessonStrategyAnalysis = {
-      lesson: { title: "t", duration_seconds: null },
-      strategy_found: true,
-      strategies: [
-        makeStrategy("A", {
-          setup_conditions: [],
-          entry_rules: [makeRule({ confidence: 1 })],
-          stop_loss_rules: [],
-          profit_target_rules: [],
-          invalidation_rules: [makeRule({ confidence: 0 })],
-        }),
-      ],
-    };
+    const analysis = strategyAnalysis([
+      makeStrategy("A", {
+        setup_conditions: [],
+        entry_rules: [makeRule({ confidence: 1 })],
+        stop_loss_rules: [],
+        profit_target_rules: [],
+        invalidation_rules: [makeRule({ confidence: 0 })],
+      }),
+    ]);
     expect(aggregateConfidence(analysis)).toBe(0.5);
+  });
+});
+
+describe("knowledgeItemCounts", () => {
+  it("counts knowledgeItems per category, omitting zero categories, in a stable order", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "s",
+      knowledgeItems: [
+        makeKnowledgeItem({ category: "risk_management" }),
+        makeKnowledgeItem({ category: "risk_management" }),
+        makeKnowledgeItem({ category: "psychology", ruleType: "PREFERENCE" }),
+      ],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(knowledgeItemCounts(noStrategyAnalysis(knowledge))).toEqual([
+      { label: "Risk Management", count: 2 },
+      { label: "Psychology", count: 1 },
+    ]);
+  });
+
+  it("returns an empty array when there are no knowledge items", () => {
+    expect(knowledgeItemCounts(noStrategyAnalysis())).toEqual([]);
+  });
+});
+
+describe("hasSupportingKnowledge", () => {
+  it("is false when knowledge is entirely empty", () => {
+    expect(hasSupportingKnowledge(noStrategyAnalysis())).toBe(false);
+  });
+
+  it("is true when knowledgeItems has at least one item, even with no strategy", () => {
+    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem()], examples: [], conflictsAndAmbiguities: [] };
+    expect(hasSupportingKnowledge(noStrategyAnalysis(knowledge))).toBe(true);
+  });
+
+  it("is true when only examples or conflictsAndAmbiguities or summary are present, even with zero knowledgeItems", () => {
+    expect(hasSupportingKnowledge(noStrategyAnalysis({ summary: "s", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] }))).toBe(true);
+    expect(
+      hasSupportingKnowledge(
+        noStrategyAnalysis({
+          summary: "",
+          knowledgeItems: [],
+          examples: [{ description: "d", illustratesCategory: null, outcome: null, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }],
+          conflictsAndAmbiguities: [],
+        }),
+      ),
+    ).toBe(true);
+    expect(hasSupportingKnowledge(noStrategyAnalysis({ summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: ["c"] }))).toBe(true);
   });
 });

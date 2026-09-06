@@ -61,8 +61,8 @@ describe("CourseTable", () => {
 
     expect(screen.getByText("Support & Resistance")).toBeInTheDocument();
     expect(within(screen.getByRole("table")).getByText("Not analyzed")).toBeInTheDocument();
-    // Full output (summary text, JSON) must NOT be rendered inline in the table.
-    expect(screen.queryByText(/no concrete trading strategy taught/i)).not.toBeInTheDocument();
+    // Full output (summary text, JSON, drawer-only "No Standalone Setup" box) must NOT be rendered inline in the table.
+    expect(within(screen.getByRole("table")).queryByText(/no standalone setup/i)).not.toBeInTheDocument();
   });
 
   it("shows an empty-state message instead of an empty table when nothing has been synced yet", () => {
@@ -165,6 +165,9 @@ describe("CourseTable", () => {
           ruleCounts: [{ label: "Entry", count: 1 }],
           confidence: 0.8,
           summary: "Break & Retest using HTF levels.",
+          hasSupportingKnowledge: true,
+          knowledgeItemCounts: [],
+          schemaVersion: "v2",
           estimatedCost: 0.1,
           processingDurationSeconds: 60,
           completedAt: "2026-01-01T00:00:00Z",
@@ -198,7 +201,7 @@ describe("CourseTable", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
 
-    it('shows "No concrete trading strategy taught." in the drawer for a NO_STRATEGY lesson', async () => {
+    it('shows "No Standalone Setup" (never "no useful content") in the drawer for a NO_STRATEGY lesson, alongside its real supporting knowledge', async () => {
       const lesson = completedLesson({
         job: { jobId: "job_2", status: "NO_STRATEGY" },
         analysis: {
@@ -207,17 +210,45 @@ describe("CourseTable", () => {
           extractedStrategiesLabel: null,
           ruleCounts: [],
           confidence: null,
-          summary: "No concrete trading strategy taught.",
+          summary: "Covers risk management and position sizing for scaling into trades.",
+          hasSupportingKnowledge: true,
+          knowledgeItemCounts: [{ label: "Risk Management", count: 1 }],
+          schemaVersion: "v2",
           estimatedCost: 0.05,
           processingDurationSeconds: 30,
           completedAt: "2026-01-01T00:00:00Z",
         },
       });
-      const onLoadAnalysis = vi.fn(async () => ({ strategy_found: false, strategies: [] }));
+      const onLoadAnalysis = vi.fn(async () => ({
+        strategy_found: false,
+        strategies: [],
+        knowledge: {
+          summary: "Covers risk management and position sizing for scaling into trades.",
+          knowledgeItems: [
+            {
+              category: "risk_management",
+              statement: "Never risk more than 1% of account equity on a single trade.",
+              ruleType: "HARD_RULE",
+              confidence: 0.95,
+              conditions: null,
+              numericalValues: [{ value: 1, unit: "%", context: "max risk per trade" }],
+              start_timestamp: "2:15",
+              end_timestamp: null,
+              evidence: "\"Never risk more than 1% on any single trade.\"",
+            },
+          ],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      }));
       render(<CourseTable {...baseProps} connected onLoadAnalysis={onLoadAnalysis} lessons={[lesson]} />);
 
       fireEvent.click(screen.getByRole("button", { name: /^view$/i }));
-      expect(await screen.findByText("No concrete trading strategy taught.", { selector: ".no-strategy-box" })).toBeInTheDocument();
+      expect(await screen.findByText(/no standalone setup/i, { selector: ".no-strategy-box" })).toBeInTheDocument();
+      // Never implies the lesson has nothing useful — the real risk-management content still renders.
+      expect(screen.getByText("Risk Management")).toBeInTheDocument();
+      expect(screen.getByText("Never risk more than 1% of account equity on a single trade.")).toBeInTheDocument();
+      expect(screen.getByText("Hard Rule")).toBeInTheDocument();
     });
 
     it("renders full strategy detail in the drawer for a completed lesson", async () => {
@@ -311,6 +342,117 @@ describe("CourseTable", () => {
       render(<CourseTable {...baseProps} connected lessons={[makeLesson({ title: "A" })]} />);
       fireEvent.change(screen.getByPlaceholderText(/search lessons/i), { target: { value: "zzz-no-match" } });
       expect(screen.getByText(/no lessons match/i)).toBeInTheDocument();
+    });
+  });
+
+  describe("ANALYZED column", () => {
+    function analyzedLesson(overrides: Partial<CourseLessonSummary> = {}): CourseLessonSummary {
+      return makeLesson({
+        job: { jobId: "job_1", status: "COMPLETED" },
+        analysis: {
+          analysisId: 1,
+          strategyFound: true,
+          extractedStrategiesLabel: "Break & Retest",
+          ruleCounts: [],
+          confidence: 0.8,
+          summary: "s",
+          hasSupportingKnowledge: true,
+          knowledgeItemCounts: [],
+          schemaVersion: "v2",
+          estimatedCost: 0.1,
+          processingDurationSeconds: 60,
+          completedAt: "2026-01-01T08:31:00Z",
+        },
+        ...overrides,
+      });
+    }
+
+    it("renders an ANALYZED header and the latest successful analysis's completed timestamp, with the full timestamp available on hover", () => {
+      render(<CourseTable {...baseProps} connected lessons={[analyzedLesson()]} />);
+      const table = screen.getByRole("table");
+      expect(within(table).getByRole("columnheader", { name: /analyzed/i })).toBeInTheDocument();
+
+      const cell = within(table).getByTitle(new Date("2026-01-01T08:31:00Z").toLocaleString());
+      expect(cell.textContent).toContain("2026");
+    });
+
+    it("shows — for a lesson that has never been successfully analyzed", () => {
+      render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
+      const table = screen.getByRole("table");
+      const row = within(table).getAllByRole("row")[1];
+      expect(within(row).getByText("—", { selector: ".col-analyzed" })).toBeInTheDocument();
+    });
+
+    it("keeps showing the PREVIOUS successful analysis's timestamp while a re-analysis is QUEUED/PROCESSING — never blanks or advances it early", () => {
+      const lesson = analyzedLesson({ job: { jobId: "job_2", status: "ANALYZING", currentStage: "analyzing_lesson" } });
+      render(<CourseTable {...baseProps} connected lessons={[lesson]} />);
+      const table = screen.getByRole("table");
+      // The old completedAt (2026-01-01) still renders even though a NEW job is actively in flight.
+      expect(within(table).getByTitle(new Date("2026-01-01T08:31:00Z").toLocaleString())).toBeInTheDocument();
+    });
+
+    it("only replaces the ANALYZED timestamp once the new analysis actually completes", () => {
+      const before = analyzedLesson({ id: 5 });
+      const { rerender } = render(<CourseTable {...baseProps} connected lessons={[before]} />);
+      expect(screen.getByTitle(new Date("2026-01-01T08:31:00Z").toLocaleString())).toBeInTheDocument();
+
+      // Re-analysis in flight: job advances, but `analysis` (and its completedAt) is untouched — same backend shape as production (independent job/analysis fields).
+      const inFlight = analyzedLesson({ id: 5, job: { jobId: "job_2", status: "UPLOADING" } });
+      rerender(<CourseTable {...baseProps} connected lessons={[inFlight]} />);
+      expect(screen.getByTitle(new Date("2026-01-01T08:31:00Z").toLocaleString())).toBeInTheDocument();
+
+      // Only once the new analysis actually completes does a NEW completedAt appear.
+      const completed = analyzedLesson({
+        id: 5,
+        job: { jobId: "job_2", status: "COMPLETED" },
+        analysis: {
+          analysisId: 2,
+          strategyFound: true,
+          extractedStrategiesLabel: "Break & Retest",
+          ruleCounts: [],
+          confidence: 0.8,
+          summary: "s",
+          hasSupportingKnowledge: true,
+          knowledgeItemCounts: [],
+          schemaVersion: "v2",
+          estimatedCost: 0.1,
+          processingDurationSeconds: 60,
+          completedAt: "2026-02-02T09:00:00Z",
+        },
+      });
+      rerender(<CourseTable {...baseProps} connected lessons={[completed]} />);
+      expect(screen.queryByTitle(new Date("2026-01-01T08:31:00Z").toLocaleString())).not.toBeInTheDocument();
+      expect(screen.getByTitle(new Date("2026-02-02T09:00:00Z").toLocaleString())).toBeInTheDocument();
+    });
+
+    it("sorts by ANALYZED date when the header is clicked, toggling direction on repeated clicks", () => {
+      const older = analyzedLesson({ id: 1, title: "Older Lesson", analysis: { ...analyzedLesson().analysis!, completedAt: "2026-01-01T00:00:00Z" } });
+      const newer = analyzedLesson({ id: 2, title: "Newer Lesson", analysis: { ...analyzedLesson().analysis!, completedAt: "2026-06-01T00:00:00Z" } });
+      render(<CourseTable {...baseProps} connected lessons={[older, newer]} />);
+
+      const table = screen.getByRole("table");
+      const titlesInOrder = () => within(table).getAllByRole("row").slice(1).map((r) => within(r).getByRole("checkbox").getAttribute("aria-label"));
+
+      fireEvent.click(within(table).getByRole("button", { name: /sort by analyzed date/i }));
+      expect(titlesInOrder()).toEqual(["Select Newer Lesson", "Select Older Lesson"]); // first click: most recent first
+
+      fireEvent.click(within(table).getByRole("button", { name: /sort by analyzed date/i }));
+      expect(titlesInOrder()).toEqual(["Select Older Lesson", "Select Newer Lesson"]); // second click: oldest first
+    });
+
+    it("always sorts never-analyzed lessons to the end, in either sort direction", () => {
+      const analyzed = analyzedLesson({ id: 1, title: "Analyzed" });
+      const neverAnalyzed = makeLesson({ id: 2, title: "Never Analyzed" });
+      render(<CourseTable {...baseProps} connected lessons={[neverAnalyzed, analyzed]} />);
+
+      const table = screen.getByRole("table");
+      const titlesInOrder = () => within(table).getAllByRole("row").slice(1).map((r) => within(r).getByRole("checkbox").getAttribute("aria-label"));
+
+      fireEvent.click(within(table).getByRole("button", { name: /sort by analyzed date/i }));
+      expect(titlesInOrder()).toEqual(["Select Analyzed", "Select Never Analyzed"]);
+
+      fireEvent.click(within(table).getByRole("button", { name: /sort by analyzed date/i }));
+      expect(titlesInOrder()).toEqual(["Select Analyzed", "Select Never Analyzed"]);
     });
   });
 
