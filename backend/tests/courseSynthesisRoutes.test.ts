@@ -168,6 +168,39 @@ describe("GET /api/course/synthesis-status", () => {
     expect(result.noStandaloneSetupLessons).toHaveLength(1);
     expect(result.noStandaloneSetupLessons[0].title).toBe("Sizing & Scaling Trades");
   });
+
+  it("flags an existing completed synthesis as OUT OF DATE once the underlying lesson-analysis set changes", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const jobTrigger = makeJobTrigger();
+    const synthesizeHandler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+    const statusHandler = createSynthesisStatusHandler(deps(whopCourseId));
+
+    await synthesizeHandler({ body: {} } as Request, makeResponse().res);
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+    await markSynthesisCompleted(pool, claimed!.runId, "owner-a", {
+      inputTokens: 1,
+      outputTokens: 1,
+      thinkingTokens: 0,
+      estimatedCost: 0.001,
+      processingDurationSeconds: 5,
+    });
+
+    const beforeNewLesson = makeResponse();
+    await statusHandler({} as Request, beforeNewLesson.res);
+    expect((beforeNewLesson.body() as { isOutOfDate: boolean }).isOutOfDate).toBe(false);
+
+    // A new lesson finishes analysis after the run completed — the source set has changed.
+    await addAnalyzedLesson(course.id, { strategyFound: true, title: "Order Blocks and Liquidity Sweeps" });
+
+    const afterNewLesson = makeResponse();
+    await statusHandler({} as Request, afterNewLesson.res);
+    const result = afterNewLesson.body() as { isOutOfDate: boolean; counts: { totalLessons: number } };
+    expect(result.counts.totalLessons).toBe(2);
+    expect(result.isOutOfDate).toBe(true);
+  });
 });
 
 describe("POST /api/course/synthesize", () => {
