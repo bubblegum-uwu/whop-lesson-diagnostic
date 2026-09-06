@@ -10,6 +10,7 @@ import { listCanonicalStrategiesByRun } from "../../db/canonicalStrategiesRepo.j
 import { getCoursePlaybookByRun } from "../../db/coursePlaybooksRepo.js";
 import { computeSourceAnalysisHash } from "../../synthesis/fingerprint.js";
 import { SYNTHESIS_PROMPT_VERSION, SYNTHESIS_SCHEMA_VERSION, SYNTHESIZER_VERSION } from "../../synthesis/version.js";
+import { computeSynthesisProgress, computeHeartbeatTier } from "../../synthesis/progress.js";
 import type { JobTrigger } from "../../jobs/runJobTrigger.js";
 import { logger } from "../../lib/logger.js";
 
@@ -49,8 +50,28 @@ async function computeCurrentSourceState(deps: CourseSynthesisRouteDeps, courseI
   return { lessons, analysisIds, noStandaloneSetupLessons, hash };
 }
 
+/**
+ * Extends the existing run summary with computed (never separately
+ * persisted) progress/heartbeat fields — see synthesis/progress.ts. Never
+ * exposes prompt content, raw course material, API keys, tokens, or DB
+ * credentials: only the safe counters/labels already on synthesis_runs
+ * (current_stage, completed_items/total_items, current_item — a short
+ * display label only) plus deterministic values computed from them.
+ */
 function serializeRun(run: SynthesisRun | null) {
   if (!run) return null;
+  const progress = computeSynthesisProgress({
+    status: run.status,
+    currentStage: run.currentStage,
+    completedItems: run.completedItems,
+    totalItems: run.totalItems,
+  });
+  const heartbeatTier = computeHeartbeatTier({
+    status: run.status,
+    lastHeartbeatAt: run.lastHeartbeatAt,
+    leaseExpiresAt: run.leaseExpiresAt,
+  });
+
   return {
     runId: run.runId,
     status: run.status,
@@ -67,6 +88,23 @@ function serializeRun(run: SynthesisRun | null) {
     errorType: run.errorType,
     sanitizedError: run.sanitizedError,
     createdAt: run.createdAt,
+    updatedAt: run.updatedAt,
+    // Progress/observability (Phase 3.4 follow-up) — all derived from the
+    // safe fields above plus the two-line-summary current_item; never the
+    // Gemini prompt or raw course content that produced them.
+    stageIndex: progress.stageIndex,
+    totalStages: progress.totalStages,
+    stageLabel: progress.stageLabel,
+    overallProgress: progress.overallProgress,
+    stageProgress: progress.stageProgress,
+    isCountable: progress.isCountable,
+    isIndeterminate: progress.isIndeterminate,
+    completedItems: run.completedItems,
+    totalItems: run.totalItems,
+    currentItem: run.currentItem,
+    lastHeartbeatAt: run.lastHeartbeatAt,
+    leaseExpiresAt: run.leaseExpiresAt,
+    heartbeatTier,
   };
 }
 

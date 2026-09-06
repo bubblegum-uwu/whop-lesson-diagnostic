@@ -30,6 +30,12 @@ export interface SynthesisRun {
   errorType: string | null;
   sanitizedError: string | null;
   createdAt: Date;
+  updatedAt: Date;
+  /** Countable progress within `currentStage`, when that stage has countable work (see synthesis/progress.ts) — null for a stage that's a single indeterminate Gemini call. */
+  completedItems: number | null;
+  totalItems: number | null;
+  /** A short display label only (e.g. a canonical strategy's name) — never prompt content or raw course material. */
+  currentItem: string | null;
 }
 
 interface SynthesisRunRow {
@@ -56,6 +62,10 @@ interface SynthesisRunRow {
   error_type: string | null;
   sanitized_error: string | null;
   created_at: Date;
+  updated_at: Date;
+  completed_items: number | null;
+  total_items: number | null;
+  current_item: string | null;
 }
 
 function mapRow(row: SynthesisRunRow): SynthesisRun {
@@ -83,6 +93,10 @@ function mapRow(row: SynthesisRunRow): SynthesisRun {
     errorType: row.error_type,
     sanitizedError: row.sanitized_error,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    completedItems: row.completed_items,
+    totalItems: row.total_items,
+    currentItem: row.current_item,
   };
 }
 
@@ -90,7 +104,7 @@ const COLUMNS = `run_id, course_id, status, current_stage, source_analysis_hash,
   model, synthesis_prompt_version, synthesis_schema_version, synthesizer_version,
   lease_owner, lease_expires_at, last_heartbeat_at, started_at, completed_at,
   input_tokens, output_tokens, thinking_tokens, estimated_cost, processing_duration_seconds,
-  error_type, sanitized_error, created_at`;
+  error_type, sanitized_error, created_at, updated_at, completed_items, total_items, current_item`;
 
 export interface CreateSynthesisRunInput {
   courseId: number;
@@ -207,6 +221,83 @@ export async function renewSynthesisLease(
   return (result.rowCount ?? 0) > 0;
 }
 
+export interface SynthesisProgressUpdate {
+  currentStage: string;
+  /** Countable-work counters for this stage — pass null/null when the stage is a single indeterminate Gemini call (never fabricate a percentage for those). */
+  completedItems: number | null;
+  totalItems: number | null;
+  /** Short display label only (e.g. a canonical strategy's name) — never prompt content or raw course material. */
+  currentItem: string | null;
+  /**
+   * Usage accumulated across every Gemini call that has actually completed
+   * so far in this run (not just the current stage) — reuses the same
+   * columns/formula markSynthesisCompleted already writes on success, just
+   * applied to a running total instead of only the final one. This is what
+   * lets a FAILED run still show "cost so far" instead of leaving these
+   * columns null forever, since markSynthesisFailed never overwrites them.
+   */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  thinkingTokens: number | null;
+  estimatedCost: number | null;
+}
+
+/**
+ * Records a real progress event (a stage transition, or a countable-item
+ * increment within a stage) and — since this is just another authenticated
+ * write against the same row — renews the lease/heartbeat in the same
+ * statement, fenced by lease_owner exactly like renewSynthesisLease. Unlike
+ * that function's COALESCE-based "leave unspecified fields alone" renewal
+ * (used by the plain periodic heartbeat, which has no progress to report),
+ * every field here is set unconditionally to the caller's given value —
+ * including explicit nulls — because a real progress event always knows
+ * the full current state, and a stage transition must be able to clear a
+ * previous stage's stale item counts/currentItem rather than leave them
+ * COALESCEd forward.
+ *
+ * Callers MUST await this (never fire-and-forget it) for any checkpoint
+ * that must be durable before the next unit of work starts — e.g. after
+ * each completed canonical strategy — so that a failure immediately after
+ * is guaranteed to see the prior item's completion already persisted, not
+ * racing an in-flight write. See worker/synthesisLoop.ts's reportProgress.
+ */
+export async function updateSynthesisProgress(
+  db: Queryable,
+  runId: string,
+  leaseOwner: string,
+  update: SynthesisProgressUpdate,
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE synthesis_runs
+     SET lease_expires_at = now() + interval '${LEASE_DURATION}',
+         last_heartbeat_at = now(),
+         current_stage = $3,
+         completed_items = $4,
+         total_items = $5,
+         current_item = $6,
+         input_tokens = $7,
+         output_tokens = $8,
+         thinking_tokens = $9,
+         estimated_cost = $10,
+         updated_at = now()
+     WHERE run_id = $1 AND lease_owner = $2
+     RETURNING run_id`,
+    [
+      runId,
+      leaseOwner,
+      update.currentStage,
+      update.completedItems,
+      update.totalItems,
+      update.currentItem,
+      update.inputTokens,
+      update.outputTokens,
+      update.thinkingTokens,
+      update.estimatedCost,
+    ],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
 export interface CompleteSynthesisRunInput {
   inputTokens: number | null;
   outputTokens: number | null;
@@ -235,20 +326,33 @@ export async function markSynthesisCompleted(
   return (result.rowCount ?? 0) > 0;
 }
 
+/**
+ * Fenced terminal transition to FAILED. Deliberately never touches
+ * input_tokens/output_tokens/thinking_tokens/estimated_cost/current_stage/
+ * completed_items/total_items/current_item — whatever updateSynthesisProgress
+ * last persisted before the failure is exactly the "progress reached"
+ * snapshot a failed run should keep showing (see progress.ts's
+ * computeSynthesisProgress, which reads a FAILED run's stage/items the
+ * same way as a RUNNING one). `processingDurationSeconds` is optional only
+ * for backward compatibility with existing callers that don't have a
+ * `startedAt` handy; production always passes it (see worker/synthesisLoop.ts).
+ */
 export async function markSynthesisFailed(
   db: Queryable,
   runId: string,
   leaseOwner: string,
   errorType: string,
   sanitizedError: string,
+  processingDurationSeconds: number | null = null,
 ): Promise<boolean> {
   const result = await db.query(
     `UPDATE synthesis_runs
      SET status = 'FAILED', completed_at = now(), error_type = $3, sanitized_error = $4,
+         processing_duration_seconds = COALESCE($5, processing_duration_seconds),
          lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
      WHERE run_id = $1 AND lease_owner = $2
      RETURNING run_id`,
-    [runId, leaseOwner, errorType, sanitizedError],
+    [runId, leaseOwner, errorType, sanitizedError, processingDurationSeconds],
   );
   return (result.rowCount ?? 0) > 0;
 }

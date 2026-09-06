@@ -201,6 +201,148 @@ describe("GET /api/course/synthesis-status", () => {
     expect(result.counts.totalLessons).toBe(2);
     expect(result.isOutOfDate).toBe(true);
   });
+
+  interface RunProgressFields {
+    status: string;
+    currentStage: string | null;
+    stageIndex: number;
+    totalStages: number;
+    stageLabel: string;
+    overallProgress: number;
+    stageProgress: number | null;
+    isCountable: boolean;
+    isIndeterminate: boolean;
+    completedItems: number | null;
+    totalItems: number | null;
+    currentItem: string | null;
+    heartbeatTier: string;
+    sanitizedError: string | null;
+  }
+
+  it("exposes real, safe progress/heartbeat fields for a RUNNING synthesis — never a generic spinner-only state", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const synthesizeHandler = createSynthesizeHandler(deps(whopCourseId));
+    const statusHandler = createSynthesisStatusHandler(deps(whopCourseId));
+    await synthesizeHandler({ body: {} } as Request, makeResponse().res);
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+
+    // Simulates the worker having persisted real mid-flight progress (see worker/synthesisLoop.ts) — the API must read this back, never hold its own copy.
+    await pool.query(
+      `UPDATE synthesis_runs SET current_stage = 'CANONICALIZING', completed_items = 1, total_items = 4, current_item = 'Break & Retest' WHERE run_id = $1`,
+      [claimed!.runId],
+    );
+
+    const { res, body } = makeResponse();
+    await statusHandler({} as Request, res);
+    const result = body() as { latestRun: RunProgressFields };
+
+    expect(result.latestRun.status).toBe("RUNNING");
+    expect(result.latestRun.currentStage).toBe("CANONICALIZING");
+    expect(result.latestRun.stageIndex).toBe(3);
+    expect(result.latestRun.totalStages).toBe(7);
+    expect(result.latestRun.stageLabel).toBe("Building Canonical Strategies");
+    expect(result.latestRun.isCountable).toBe(true);
+    expect(result.latestRun.isIndeterminate).toBe(false);
+    expect(result.latestRun.stageProgress).toBe(25);
+    expect(result.latestRun.completedItems).toBe(1);
+    expect(result.latestRun.totalItems).toBe(4);
+    expect(result.latestRun.currentItem).toBe("Break & Retest");
+    expect(result.latestRun.heartbeatTier).toBe("none"); // just claimed — heartbeat is fresh
+    expect(result.latestRun.overallProgress).toBeGreaterThan(0);
+    expect(result.latestRun.overallProgress).toBeLessThan(100);
+  });
+
+  it("reloads progress fresh from Postgres on every call — a later call reflects a change with no request-scoped or in-memory state carried over", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const synthesizeHandler = createSynthesizeHandler(deps(whopCourseId));
+    const statusHandler = createSynthesisStatusHandler(deps(whopCourseId));
+    await synthesizeHandler({ body: {} } as Request, makeResponse().res);
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+
+    await pool.query(`UPDATE synthesis_runs SET current_stage = 'CLUSTERING', completed_items = 0, total_items = 1 WHERE run_id = $1`, [claimed!.runId]);
+    const first = makeResponse();
+    await statusHandler({} as Request, first.res);
+    expect((first.body() as { latestRun: RunProgressFields }).latestRun.overallProgress).toBe(5); // NORMALIZING done in full, CLUSTERING just started
+
+    // A brand-new handler instance (fresh closure, exactly as a new HTTP
+    // request would get) — proves the reload comes from Postgres, not a
+    // variable held over from the first call.
+    const secondStatusHandler = createSynthesisStatusHandler(deps(whopCourseId));
+    await pool.query(`UPDATE synthesis_runs SET current_stage = 'CANONICALIZING', completed_items = 4, total_items = 4 WHERE run_id = $1`, [claimed!.runId]);
+    const second = makeResponse();
+    await secondStatusHandler({} as Request, second.res);
+    expect((second.body() as { latestRun: RunProgressFields }).latestRun.overallProgress).toBe(55); // NORMALIZING+CLUSTERING done (20) + CANONICALIZING done in full (35)
+  });
+
+  it("a COMPLETED run always reports 100% overall progress", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const synthesizeHandler = createSynthesizeHandler(deps(whopCourseId));
+    const statusHandler = createSynthesisStatusHandler(deps(whopCourseId));
+    await synthesizeHandler({ body: {} } as Request, makeResponse().res);
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+    await markSynthesisCompleted(pool, claimed!.runId, "owner-a", {
+      inputTokens: 1,
+      outputTokens: 1,
+      thinkingTokens: 0,
+      estimatedCost: 0.01,
+      processingDurationSeconds: 5,
+    });
+
+    const { res, body } = makeResponse();
+    await statusHandler({} as Request, res);
+    const result = body() as { latestRun: RunProgressFields };
+    expect(result.latestRun.status).toBe("COMPLETED");
+    expect(result.latestRun.overallProgress).toBe(100);
+    expect(result.latestRun.heartbeatTier).toBe("none");
+  });
+
+  it("a FAILED run preserves and exposes the last known stage/progress reached, plus the safe sanitized error — never prompt content", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    await addAnalyzedLesson(course.id, { strategyFound: true });
+
+    const synthesizeHandler = createSynthesizeHandler(deps(whopCourseId));
+    const statusHandler = createSynthesisStatusHandler(deps(whopCourseId));
+    await synthesizeHandler({ body: {} } as Request, makeResponse().res);
+    const claimed = await claimNextEligibleSynthesisRun(pool, "owner-a");
+
+    // The worker reached CANONICALIZING (2 of 4 clusters) before failing — markSynthesisFailed never touches these progress columns.
+    await pool.query(
+      `UPDATE synthesis_runs SET current_stage = 'CANONICALIZING', completed_items = 2, total_items = 4, current_item = 'Break & Retest' WHERE run_id = $1`,
+      [claimed!.runId],
+    );
+    await pool.query(
+      `UPDATE synthesis_runs SET status = 'FAILED', completed_at = now(), error_type = 'permanent',
+         sanitized_error = 'stage=canonical_strategy schema=canonical_strategy_v3 model=gemini-3.8-flash prompt_chars=18420 error=Gemini did not return valid JSON for stage "canonical_strategy".',
+         lease_owner = NULL, lease_expires_at = NULL
+       WHERE run_id = $1`,
+      [claimed!.runId],
+    );
+
+    const { res, body } = makeResponse();
+    await statusHandler({} as Request, res);
+    const result = body() as { latestRun: RunProgressFields };
+
+    expect(result.latestRun.status).toBe("FAILED");
+    expect(result.latestRun.currentStage).toBe("CANONICALIZING"); // the stage it actually reached, preserved
+    expect(result.latestRun.stageLabel).toBe("Building Canonical Strategies");
+    expect(result.latestRun.completedItems).toBe(2);
+    expect(result.latestRun.totalItems).toBe(4);
+    expect(result.latestRun.overallProgress).toBeGreaterThan(0);
+    expect(result.latestRun.overallProgress).toBeLessThan(100);
+    expect(result.latestRun.heartbeatTier).toBe("none"); // terminal — never a heartbeat warning
+    expect(result.latestRun.sanitizedError).toContain("stage=canonical_strategy");
+    expect(result.latestRun.sanitizedError).not.toContain("SUPER SECRET");
+  });
 });
 
 describe("POST /api/course/synthesize", () => {

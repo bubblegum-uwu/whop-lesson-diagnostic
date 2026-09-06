@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it } from "vitest";
 import { callGeminiForStage } from "../src/synthesis/geminiStage.js";
 import { createGeminiClient } from "../src/gemini/client.js";
 import {
