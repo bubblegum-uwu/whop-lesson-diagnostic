@@ -1,4 +1,5 @@
 import type { LessonStrategyAnalysis, Rule, Strategy, KnowledgeCategoryValue } from "../gemini/schema.js";
+import { isKnowledgeItemScoped } from "../gemini/schema.js";
 
 export interface ClassificationCounts {
   explicit: number;
@@ -160,9 +161,14 @@ export function classificationCounts(analysis: LessonStrategyAnalysis): Classifi
   return counts;
 }
 
-/** Count of knowledgeItems whose scope.level is SCOPED (limited to a strategy/instrument/timeframe/session/trader-profile) rather than GLOBAL. */
+/** Count of knowledgeItems with at least one non-empty scope array (SCOPED — limited to a strategy/instrument/timeframe/session/trader-profile), derived from the arrays themselves, never a Gemini-generated field. */
 export function scopedKnowledgeItemCount(analysis: LessonStrategyAnalysis): number {
-  return analysis.knowledge.knowledgeItems.filter((item) => item.scope.level === "SCOPED").length;
+  return analysis.knowledge.knowledgeItems.filter((item) => isKnowledgeItemScoped(item.scope)).length;
+}
+
+/** Count of knowledgeItems where every scope array is empty (GLOBAL — genuinely course-wide), the complement of scopedKnowledgeItemCount. */
+export function globalKnowledgeItemCount(analysis: LessonStrategyAnalysis): number {
+  return analysis.knowledge.knowledgeItems.filter((item) => !isKnowledgeItemScoped(item.scope)).length;
 }
 
 /** Count of knowledgeItems that carry at least one exception (a case where the normally-applicable rule does NOT apply, distinct from `conditions`). */

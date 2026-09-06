@@ -57,7 +57,6 @@ function baseNumericalValue(overrides: Partial<Record<string, unknown>> = {}) {
 
 function baseScope(overrides: Partial<Record<string, unknown>> = {}) {
   return {
-    level: "GLOBAL",
     strategies: [],
     marketsOrInstruments: [],
     timeframes: [],
@@ -311,50 +310,59 @@ describe("KnowledgeItemSchema — classification (distinct from ruleType)", () =
 // Pre-merge fidelity refinement, item B: structured scope — guards against
 // an example-specific rule ("with one Apple contract I'd risk ~$150")
 // reading downstream as a universal one.
-describe("KnowledgeItemSchema — scope (GLOBAL vs SCOPED)", () => {
-  it("accepts a GLOBAL scope with every array empty", () => {
+//
+// Robustness fix: `scope` no longer carries a Gemini-generated
+// `level: "GLOBAL"|"SCOPED"` field — a real diagnostic run showed Gemini
+// can produce one that disagrees with its own arrays. GLOBAL/SCOPED is now
+// PURELY DERIVED from the arrays by application code (isKnowledgeItemScoped,
+// tested in analysisSummary.test.ts's scopedKnowledgeItemCount/
+// globalKnowledgeItemCount tests), so there is no longer a `level` value
+// for this schema layer to validate consistency against — any combination
+// of empty/non-empty arrays is a structurally valid `scope`.
+describe("KnowledgeItemSchema — scope arrays (GLOBAL vs SCOPED is derived, never Gemini-generated)", () => {
+  it("accepts a scope with every array empty (derived GLOBAL)", () => {
     expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope() })).success).toBe(true);
   });
 
-  it("accepts a SCOPED item narrowed to one strategy", () => {
-    const scope = baseScope({ level: "SCOPED", strategies: ["Break & Retest"] });
+  it("accepts a scope narrowed to one strategy (derived SCOPED)", () => {
+    const scope = baseScope({ strategies: ["Break & Retest"] });
     const parsed = KnowledgeItemSchema.parse(baseKnowledgeItem({ scope }));
     expect(parsed.scope).toEqual(scope);
   });
 
-  it("accepts a SCOPED item narrowed to one instrument type (e.g. 0-DTE options vs. swing)", () => {
-    const scope = baseScope({ level: "SCOPED", marketsOrInstruments: ["0-DTE options"] });
+  it("accepts a scope narrowed to one instrument type (e.g. 0-DTE options vs. swing)", () => {
+    const scope = baseScope({ marketsOrInstruments: ["0-DTE options"] });
     expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope })).success).toBe(true);
   });
 
-  it("accepts a SCOPED item narrowed to one timeframe or session", () => {
-    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ level: "SCOPED", timeframes: ["5m"] }) })).success).toBe(true);
-    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ level: "SCOPED", sessions: ["market-open"] }) })).success).toBe(true);
+  it("accepts a scope narrowed to one timeframe or session", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ timeframes: ["5m"] }) })).success).toBe(true);
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ sessions: ["market-open"] }) })).success).toBe(true);
   });
 
-  it("accepts a SCOPED item narrowed to a trader profile (e.g. beginner vs. experienced)", () => {
-    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ level: "SCOPED", traderProfiles: ["beginner"] }) })).success).toBe(true);
+  it("accepts a scope narrowed to a trader profile (e.g. beginner vs. experienced)", () => {
+    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope: baseScope({ traderProfiles: ["beginner"] }) })).success).toBe(true);
   });
 
-  it("rejects a GLOBAL scope that still carries a narrowing array — GLOBAL must mean genuinely course-wide", () => {
-    const scope = baseScope({ level: "GLOBAL", strategies: ["Break & Retest"] });
-    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope })).success).toBe(false);
+  it("never asks Gemini to generate a level field — the wire schema's scope properties are exactly the five arrays, nothing else", () => {
+    const scopeProps = Object.keys(
+      (
+        (STRATEGY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.knowledgeItems.items as { properties: { scope: { properties: object } } }).properties.scope as { properties: object }
+      ).properties,
+    );
+    expect(scopeProps.sort()).toEqual(["marketsOrInstruments", "sessions", "strategies", "timeframes", "traderProfiles"].sort());
+    expect(scopeProps).not.toContain("level");
   });
 
-  it("rejects a SCOPED scope where every narrowing array is empty — SCOPED must specify at least one dimension", () => {
-    const scope = baseScope({ level: "SCOPED" });
-    expect(KnowledgeItemSchema.safeParse(baseKnowledgeItem({ scope })).success).toBe(false);
-  });
-
-  it("never broadens an example-specific rule into a global one — the one-contract dollar example stays SCOPED", () => {
+  it("keeps an example-specific rule's scope arrays populated, never silently cleared — the one-contract dollar example stays narrowed", () => {
     const scoped = KnowledgeItemSchema.parse(
       baseKnowledgeItem({
         statement: "With one Apple contract I would risk around $150.",
         ruleType: "OBSERVATION",
-        scope: baseScope({ level: "SCOPED", marketsOrInstruments: ["Apple options contract example"] }),
+        scope: baseScope({ marketsOrInstruments: ["Apple options contract example"] }),
       }),
     );
-    expect(scoped.scope.level).toBe("SCOPED");
+    expect(scoped.scope.marketsOrInstruments).toEqual(["Apple options contract example"]);
   });
 });
 

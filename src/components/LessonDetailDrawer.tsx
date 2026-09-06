@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CourseLessonSummary, KnowledgeCategory, KnowledgeItem, LessonExample, LessonKnowledge } from "../lib/courseApi";
+import { isKnowledgeItemScoped } from "../lib/courseApi";
 import { StatusBadge } from "./StatusBadge";
 
 export interface LessonDetailDrawerProps {
@@ -156,9 +157,9 @@ function numericalValueLabel(n: KnowledgeItem["numericalValues"][number]): strin
 const ILLUSTRATIVE_NUMERICAL_ROLES = new Set<KnowledgeItem["numericalValues"][number]["role"]>(["EXAMPLE", "DERIVED_EXAMPLE"]);
 
 function scopeSummary(scope: KnowledgeItem["scope"]): string | null {
-  if (scope.level === "GLOBAL") return null;
+  if (!isKnowledgeItemScoped(scope)) return null;
   const parts = [...scope.strategies, ...scope.marketsOrInstruments, ...scope.timeframes, ...scope.sessions, ...scope.traderProfiles];
-  return parts.length > 0 ? parts.join(", ") : "Scoped";
+  return parts.join(", ");
 }
 
 function KnowledgeItemCard({ item, showCategory = false }: { item: KnowledgeItem; showCategory?: boolean }) {

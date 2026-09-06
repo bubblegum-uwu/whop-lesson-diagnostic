@@ -76,7 +76,7 @@ const noStrategyJson = {
         confidence: 0.95,
         conditions: null,
         exceptions: [],
-        scope: { level: "GLOBAL", strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+        scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
         numericalValues: [
           { metric: "max risk per trade", operator: "LTE", value: 1, value2: null, unit: "%", role: "RULE_THRESHOLD", rawText: "1%", context: "max risk per trade" },
         ],
@@ -92,7 +92,7 @@ const noStrategyJson = {
         confidence: 0.7,
         conditions: null,
         exceptions: [],
-        scope: { level: "GLOBAL", strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+        scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
         numericalValues: [],
         start_timestamp: "8:40",
         end_timestamp: null,

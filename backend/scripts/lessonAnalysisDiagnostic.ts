@@ -11,6 +11,7 @@ import {
   knowledgeItemCounts,
   classificationCounts,
   scopedKnowledgeItemCount,
+  globalKnowledgeItemCount,
   knowledgeItemsWithExceptionsCount,
   numericalValueCounts,
 } from "../src/pipeline/analysisSummary.js";
@@ -212,7 +213,7 @@ async function main(): Promise<void> {
       console.log(`  example_count=${analysis.knowledge.examples.length}`);
       console.log(`  conflict_count=${analysis.knowledge.conflictsAndAmbiguities.length}`);
       console.log(`  explicit_knowledge_count=${classCounts.explicit} inferred_knowledge_count=${classCounts.inferred} visual_knowledge_count=${classCounts.visual}`);
-      console.log(`  scoped_knowledge_count=${scopedKnowledgeItemCount(analysis)}`);
+      console.log(`  scoped_knowledge_count=${scopedKnowledgeItemCount(analysis)} global_knowledge_count=${globalKnowledgeItemCount(analysis)}`);
       console.log(`  knowledge_items_with_exceptions=${knowledgeItemsWithExceptionsCount(analysis)}`);
       console.log(`  numerical_value_count=${numCounts.total}`);
       console.log(`  numerical_rule_threshold_count=${numCounts.ruleThreshold}`);

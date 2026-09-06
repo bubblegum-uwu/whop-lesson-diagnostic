@@ -8,6 +8,7 @@ import {
   hasSupportingKnowledge,
   classificationCounts,
   scopedKnowledgeItemCount,
+  globalKnowledgeItemCount,
   knowledgeItemsWithExceptionsCount,
   numericalValueCounts,
 } from "../src/pipeline/analysisSummary.js";
@@ -56,7 +57,7 @@ function makeKnowledgeItem(overrides: Partial<KnowledgeItem> = {}): KnowledgeIte
     confidence: 0.95,
     conditions: null,
     exceptions: [],
-    scope: { level: "GLOBAL", strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+    scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
     numericalValues: [
       { metric: "max risk per trade", operator: "LTE", value: 1, value2: null, unit: "%", role: "RULE_THRESHOLD", rawText: "1%", context: "max risk per trade" },
     ],
@@ -241,28 +242,87 @@ describe("classificationCounts", () => {
   });
 });
 
-describe("scopedKnowledgeItemCount", () => {
-  it("counts only SCOPED items, never GLOBAL ones", () => {
-    const scopedToOneContract = {
-      level: "SCOPED" as const,
-      strategies: [],
-      marketsOrInstruments: ["Apple options contract example"],
-      timeframes: [],
-      sessions: [],
-      traderProfiles: [],
-    };
+// Robustness fix: GLOBAL/SCOPED is no longer a Gemini-generated `level`
+// field (a real diagnostic run showed Gemini could produce one that
+// disagreed with its own arrays) — it's derived deterministically from the
+// five scope arrays alone. These tests cover every array individually plus
+// the multi-array case (test requirement #7).
+const emptyScope = { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] };
+
+describe("scopedKnowledgeItemCount / globalKnowledgeItemCount — derived from scope arrays, never a generated field", () => {
+  it("derives GLOBAL when all five scope arrays are empty", () => {
+    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem({ scope: emptyScope })], examples: [], conflictsAndAmbiguities: [] };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(0);
+    expect(globalKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(1);
+  });
+
+  it("derives SCOPED when strategies is populated", () => {
     const knowledge: LessonKnowledge = {
       summary: "",
-      knowledgeItems: [makeKnowledgeItem({ scope: scopedToOneContract }), makeKnowledgeItem(), makeKnowledgeItem({ scope: scopedToOneContract })],
+      knowledgeItems: [makeKnowledgeItem({ scope: { ...emptyScope, strategies: ["Break & Retest"] } })],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(1);
+    expect(globalKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(0);
+  });
+
+  it("derives SCOPED when marketsOrInstruments is populated (e.g. the one-contract dollar example)", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [makeKnowledgeItem({ scope: { ...emptyScope, marketsOrInstruments: ["Apple options contract example"] } })],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(1);
+  });
+
+  it("derives SCOPED when timeframes is populated", () => {
+    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem({ scope: { ...emptyScope, timeframes: ["5m"] } })], examples: [], conflictsAndAmbiguities: [] };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(1);
+  });
+
+  it("derives SCOPED when sessions is populated", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [makeKnowledgeItem({ scope: { ...emptyScope, sessions: ["market-open"] } })],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(1);
+  });
+
+  it("derives SCOPED when traderProfiles is populated", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [makeKnowledgeItem({ scope: { ...emptyScope, traderProfiles: ["beginner"] } })],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(1);
+  });
+
+  it("derives SCOPED when multiple arrays are populated at once — still counted exactly once, not double-counted", () => {
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [makeKnowledgeItem({ scope: { strategies: ["Break & Retest"], marketsOrInstruments: ["ES"], timeframes: ["5m"], sessions: [], traderProfiles: [] } })],
+      examples: [],
+      conflictsAndAmbiguities: [],
+    };
+    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(1);
+    expect(globalKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(0);
+  });
+
+  it("counts a mix of scoped and global items correctly, never double-counting either", () => {
+    const scopedToOneContract = { ...emptyScope, marketsOrInstruments: ["Apple options contract example"] };
+    const knowledge: LessonKnowledge = {
+      summary: "",
+      knowledgeItems: [makeKnowledgeItem({ scope: scopedToOneContract }), makeKnowledgeItem({ scope: emptyScope }), makeKnowledgeItem({ scope: scopedToOneContract })],
       examples: [],
       conflictsAndAmbiguities: [],
     };
     expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(2);
-  });
-
-  it("is zero when every item is GLOBAL (the default scope)", () => {
-    const knowledge: LessonKnowledge = { summary: "", knowledgeItems: [makeKnowledgeItem()], examples: [], conflictsAndAmbiguities: [] };
-    expect(scopedKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(0);
+    expect(globalKnowledgeItemCount(noStrategyAnalysis(knowledge))).toBe(1);
   });
 });
 

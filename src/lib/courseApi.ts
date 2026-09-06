@@ -153,14 +153,24 @@ export type RuleType = "HARD_RULE" | "GUIDELINE" | "PREFERENCE" | "WARNING" | "P
 /** How a knowledge item's claim was OBTAINED — same enum/meaning as a Strategy Rule's classification, distinct from ruleType (what kind of statement it is). */
 export type Classification = "explicit" | "inferred" | "visual";
 
-/** Where a knowledge item applies — GLOBAL unless the source actively supports narrowing (e.g. one strategy, one instrument type, one timeframe/session, or one trader-experience level). */
+/**
+ * Where a knowledge item applies — every array empty means genuinely
+ * course-wide/global; the backend does NOT generate a GLOBAL/SCOPED label
+ * (a real diagnostic run showed Gemini could produce one that disagreed
+ * with its own arrays) — derive it here with `isKnowledgeItemScoped`
+ * instead of trusting a label.
+ */
 export interface KnowledgeItemScope {
-  level: "GLOBAL" | "SCOPED";
   strategies: string[];
   marketsOrInstruments: string[];
   timeframes: string[];
   sessions: string[];
   traderProfiles: string[];
+}
+
+/** True whenever ANY scope array is non-empty (SCOPED). All five empty means GLOBAL. Mirrors backend gemini/schema.ts's isKnowledgeItemScoped — the single source of truth for this derivation. */
+export function isKnowledgeItemScoped(scope: KnowledgeItemScope): boolean {
+  return scope.strategies.length > 0 || scope.marketsOrInstruments.length > 0 || scope.timeframes.length > 0 || scope.sessions.length > 0 || scope.traderProfiles.length > 0;
 }
 
 export type NumericalOperator = "EQ" | "GT" | "GTE" | "LT" | "LTE" | "BETWEEN" | "APPROX";
