@@ -5,7 +5,8 @@ import { getCourseByWhopId } from "../src/db/coursesRepo.js";
 import { listLessons, getLessonById } from "../src/db/lessonsRepo.js";
 import { getValidAccessToken, AuthRequiredError } from "../src/whop/sessionService.js";
 import { analyzeLesson, PipelineError, SchemaValidationError } from "../src/pipeline/analyzeLesson.js";
-import { LESSON_ANALYSIS_MAX_OUTPUT_TOKENS } from "../src/pipeline/limits.js";
+import { STRATEGY_ANALYSIS_MAX_OUTPUT_TOKENS, KNOWLEDGE_ANALYSIS_MAX_OUTPUT_TOKENS } from "../src/pipeline/limits.js";
+import { STRATEGY_ONLY_EXTRACTION_PROMPT } from "../src/gemini/schema.js";
 import { PROMPT_VERSION, SCHEMA_VERSION, EXTRACTOR_VERSION } from "../src/pipeline/analysisVersion.js";
 import {
   knowledgeItemCounts,
@@ -25,12 +26,14 @@ import type { GeminiClient, GeminiCompletionDiagnostics } from "../src/gemini/cl
 
 /**
  * READ-ONLY diagnostic for exactly ONE lesson, run against the real
- * production analyzeVideo() call + STRATEGY_RESPONSE_JSON_SCHEMA + the
- * real Whop video for that lesson — built for Phase 3.5A's pre-merge
- * real-data validation on PR #12. Reproduces the EXACT production
- * pipeline (analyzeLesson.ts, unmodified) end to end: Whop lesson lookup
- * -> signed Mux URL -> ffmpeg remux -> Gemini upload -> analyze -> Zod
- * validate — without ever calling the functions that persist a result.
+ * production analyzeLesson() pipeline (unmodified) — built for Phase
+ * 3.5A's pre-merge real-data validation on PR #12. Reproduces the EXACT
+ * production pipeline end to end: Whop lesson lookup -> signed Mux URL ->
+ * ffmpeg remux -> Gemini upload -> TWO independent Gemini calls against
+ * the same uploaded file (a dedicated strategy-extraction pass and a
+ * dedicated rich-knowledge pass — see gemini/schema.ts's two-pass
+ * changelog) -> Zod validate each pass, then the combined result ->
+ * without ever calling the functions that persist a result.
  *
  * This script NEVER calls createLessonAnalysis, createStrategyInstances,
  * createJob, or any other write to analysis_jobs/lesson_analyses/
@@ -80,11 +83,12 @@ import type { GeminiClient, GeminiCompletionDiagnostics } from "../src/gemini/cl
  *     TARGET_LESSON_TITLE="Sizing & Scaling Trades" \
  *     LESSON_ANALYSIS_DIAGNOSTIC=1 npx tsx scripts/lessonAnalysisDiagnostic.ts
  *
- * Logs only: lesson title/duration, model, prompt/schema/extractor
- * versions, configured max_output_tokens, pipeline stage transitions,
- * interaction_status, input/output/thinking tokens, an estimated cost
- * (src/pricing/geminiPricing.ts, computed only from token counts Gemini
- * itself reports), JSON-parse PASS/FAIL, Zod-validation PASS/FAIL,
+ * Logs only, split into STRATEGY_PASS / KNOWLEDGE_PASS / TOTAL sections:
+ * lesson title/duration, model, prompt/schema/extractor versions,
+ * configured per-pass max_output_tokens, pipeline stage transitions,
+ * per-pass interaction_status/output_chars/input/output/thinking
+ * tokens/estimated cost (src/pricing/geminiPricing.ts, computed only from
+ * token counts Gemini itself reports), combined_json_validation PASS/FAIL,
  * strategy_found/strategy_count, and knowledge-item/example/conflict
  * counts + which knowledge categories were populated — never the video
  * transcript, never the full prompt, never raw Gemini output, never
@@ -147,7 +151,7 @@ async function main(): Promise<void> {
     console.log(
       `config: model=${config.geminiModel} processing_mode=${config.geminiVideoProcessingMode} ` +
         `prompt_version=${PROMPT_VERSION} schema_version=${SCHEMA_VERSION} extractor_version=${EXTRACTOR_VERSION} ` +
-        `max_output_tokens=${LESSON_ANALYSIS_MAX_OUTPUT_TOKENS}`,
+        `strategy_max_output_tokens=${STRATEGY_ANALYSIS_MAX_OUTPUT_TOKENS} knowledge_max_output_tokens=${KNOWLEDGE_ANALYSIS_MAX_OUTPUT_TOKENS}`,
     );
 
     let accessToken: string;
@@ -163,22 +167,37 @@ async function main(): Promise<void> {
     }
     redactor.register(accessToken);
 
-    let interactionStatus = "unknown";
-    let outputChars: number | null = null;
+    interface PassDiagnostics {
+      interactionStatus: string;
+      outputChars: number | null;
+    }
+    const UNKNOWN_PASS_DIAGNOSTICS: PassDiagnostics = { interactionStatus: "unknown", outputChars: null };
+    let strategyPassDiag: PassDiagnostics = UNKNOWN_PASS_DIAGNOSTICS;
+    let knowledgePassDiag: PassDiagnostics = UNKNOWN_PASS_DIAGNOSTICS;
+
+    // Two independent analyzeVideo calls now happen per lesson (see
+    // pipeline/analyzeLesson.ts's two-pass architecture) — identified here
+    // by comparing the `prompt` argument against the known strategy-only
+    // prompt, so each call's diagnostics land in its own variable rather
+    // than one shared slot (safe under Promise.all's concurrency: each
+    // invocation's own closure only ever writes its own variable).
     const instrumentedGemini: GeminiClient = {
       ...pipelineDeps.gemini,
-      analyzeVideo: async (file, model, processingMode, maxOutputTokens) => {
+      analyzeVideo: async (file, model, processingMode, prompt, schema, maxOutputTokens) => {
+        const isStrategyPass = prompt === STRATEGY_ONLY_EXTRACTION_PROMPT;
         try {
-          const result = await pipelineDeps.gemini.analyzeVideo(file, model, processingMode, maxOutputTokens);
+          const result = await pipelineDeps.gemini.analyzeVideo(file, model, processingMode, prompt, schema, maxOutputTokens);
           const diag: GeminiCompletionDiagnostics | undefined = result.diagnostics;
-          interactionStatus = diag?.interactionStatus ?? "unknown";
-          outputChars = diag?.outputChars ?? result.text.length;
+          const update: PassDiagnostics = { interactionStatus: diag?.interactionStatus ?? "unknown", outputChars: diag?.outputChars ?? result.text.length };
+          if (isStrategyPass) strategyPassDiag = update;
+          else knowledgePassDiag = update;
           return result;
         } catch (err) {
           const diag = (err as { diagnostics?: GeminiCompletionDiagnostics } | undefined)?.diagnostics;
           if (diag) {
-            interactionStatus = diag.interactionStatus;
-            outputChars = diag.outputChars;
+            const update: PassDiagnostics = { interactionStatus: diag.interactionStatus, outputChars: diag.outputChars };
+            if (isStrategyPass) strategyPassDiag = update;
+            else knowledgePassDiag = update;
           }
           throw err;
         }
@@ -193,8 +212,7 @@ async function main(): Promise<void> {
         (stage) => console.log(`stage: ${stage}`),
       );
 
-      const { analysis, usage } = result;
-      const estimatedCostUsd = estimateCost(usage);
+      const { analysis, usage, passUsage } = result;
       const categoryCounts = knowledgeItemCounts(analysis);
       const classCounts = classificationCounts(analysis);
       const numCounts = numericalValueCounts(analysis);
@@ -204,13 +222,24 @@ async function main(): Promise<void> {
       console.log(`  duration_seconds=${analysis.lesson.duration_seconds ?? "unknown"}`);
       console.log(`  model=${config.geminiModel}`);
       console.log(`  prompt_version=${PROMPT_VERSION} schema_version=${SCHEMA_VERSION} extractor_version=${EXTRACTOR_VERSION}`);
-      console.log(`  max_output_tokens=${LESSON_ANALYSIS_MAX_OUTPUT_TOKENS}`);
-      console.log(`  interaction_status=${interactionStatus}`);
-      console.log(`  input_tokens=${usage.inputTokens ?? "?"} output_tokens=${usage.outputTokens ?? "?"} thinking_tokens=${usage.thinkingTokens ?? "?"}`);
-      console.log(`  estimated_cost_usd=${estimatedCostUsd ?? "unknown"}`);
-      console.log(`  output_chars=${outputChars ?? "?"}`);
-      console.log(`  json_parse=PASS zod_validation=PASS`);
+      console.log(`  json_parse=PASS zod_validation=PASS combined_json_validation=PASS`);
+      console.log("");
+
+      console.log("STRATEGY_PASS:");
+      console.log(`  interaction_status=${strategyPassDiag.interactionStatus}`);
+      console.log(`  output_chars=${strategyPassDiag.outputChars ?? "?"}`);
+      console.log(`  max_output_tokens=${STRATEGY_ANALYSIS_MAX_OUTPUT_TOKENS}`);
+      console.log(`  input_tokens=${passUsage.strategy.inputTokens ?? "?"} output_tokens=${passUsage.strategy.outputTokens ?? "?"} thinking_tokens=${passUsage.strategy.thinkingTokens ?? "?"}`);
+      console.log(`  estimated_cost_usd=${estimateCost(passUsage.strategy) ?? "unknown"}`);
       console.log(`  strategy_found=${analysis.strategy_found} strategy_count=${analysis.strategies.length}`);
+      console.log("");
+
+      console.log("KNOWLEDGE_PASS:");
+      console.log(`  interaction_status=${knowledgePassDiag.interactionStatus}`);
+      console.log(`  output_chars=${knowledgePassDiag.outputChars ?? "?"}`);
+      console.log(`  max_output_tokens=${KNOWLEDGE_ANALYSIS_MAX_OUTPUT_TOKENS}`);
+      console.log(`  input_tokens=${passUsage.knowledge.inputTokens ?? "?"} output_tokens=${passUsage.knowledge.outputTokens ?? "?"} thinking_tokens=${passUsage.knowledge.thinkingTokens ?? "?"}`);
+      console.log(`  estimated_cost_usd=${estimateCost(passUsage.knowledge) ?? "unknown"}`);
       console.log(`  knowledge_item_count=${analysis.knowledge.knowledgeItems.length}`);
       console.log(`  knowledge_categories_found=${categoryCounts.length > 0 ? categoryCounts.map((c) => `${c.label}:${c.count}`).join(", ") : "(none)"}`);
       console.log(`  example_count=${analysis.knowledge.examples.length}`);
@@ -226,6 +255,12 @@ async function main(): Promise<void> {
       if (strategyScopeNames.length > 0) {
         console.log(`  knowledge_strategy_scope_names=${strategyScopeNames.join(",")}`);
       }
+      console.log("");
+
+      console.log("TOTAL:");
+      console.log(`  input_tokens=${usage.inputTokens ?? "?"} output_tokens=${usage.outputTokens ?? "?"} thinking_tokens=${usage.thinkingTokens ?? "?"}`);
+      console.log(`  estimated_cost_usd=${estimateCost(usage) ?? "unknown"}`);
+
       if (strategyScopedKnowledgeWithoutExtractedStrategy(analysis)) {
         // DIAGNOSTIC WARNING ONLY — never a schema/validation failure (see
         // analysisSummary.ts's doc comment). A lesson can legitimately
@@ -241,15 +276,23 @@ async function main(): Promise<void> {
         console.log(`Wrote full validated analysis JSON to local file: ${outputFile} (local only — never uploaded to production storage).`);
       }
     } catch (err) {
+      const passStatusLine =
+        `  strategy_pass: interaction_status=${strategyPassDiag.interactionStatus} output_chars=${strategyPassDiag.outputChars ?? "?"}\n` +
+        `  knowledge_pass: interaction_status=${knowledgePassDiag.interactionStatus} output_chars=${knowledgePassDiag.outputChars ?? "?"}`;
       if (err instanceof PipelineError) {
         console.log(`RESULT: FAIL — stage=${err.stage}`);
-        console.log(`  interaction_status=${interactionStatus} output_chars=${outputChars ?? "?"}`);
+        console.log(passStatusLine);
         console.log(`  safe_error=${redactor.redact(err.message)}`);
       } else if (err instanceof SchemaValidationError) {
+        // err.message already identifies which pass failed (see
+        // analyzeLesson.ts's parseAndValidatePass: "...for the strategy
+        // pass"/"...for the knowledge pass"), or names the combined-object
+        // validation if both passes individually succeeded but the
+        // combination somehow didn't — printed verbatim below.
         const jsonParseFailed = err.message.includes("did not return valid JSON");
         console.log(`RESULT: FAIL — stage=validating_result`);
-        console.log(`  interaction_status=${interactionStatus} output_chars=${outputChars ?? "?"}`);
-        console.log(`  json_parse=${jsonParseFailed ? "FAIL" : "PASS"} zod_validation=${jsonParseFailed ? "n/a" : "FAIL"}`);
+        console.log(passStatusLine);
+        console.log(`  combined_json_validation=${jsonParseFailed ? "FAIL (json_parse)" : "FAIL (zod_validation)"}`);
         console.log(`  safe_error=${redactor.redact(err.message)}`);
       } else {
         console.log("RESULT: FAIL — unexpected error");

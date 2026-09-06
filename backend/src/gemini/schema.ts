@@ -405,6 +405,50 @@ export const LessonStrategyAnalysisSchema = z
 
 export type LessonStrategyAnalysis = z.infer<typeof LessonStrategyAnalysisSchema>;
 
+/**
+ * Two-pass extraction architecture (still v2 — see the version-number note
+ * above): repeated real diagnostic runs against the same lesson showed
+ * stochastic variability in how much strategy structure vs. knowledge
+ * detail a SINGLE Gemini call produces for one lesson from one run to the
+ * next (one real run: 2 distinct strategies + 20 knowledge items; a later
+ * run on the identical lesson: 1 merged strategy + 12 knowledge items) —
+ * task competition between two large, independent objectives asked of one
+ * generation. Rather than continuing to enlarge one shared prompt, lesson
+ * analysis now makes TWO INDEPENDENT Gemini calls against the SAME
+ * uploaded video file (see pipeline/analyzeLesson.ts): one dedicated
+ * entirely to strategy/setup extraction (`StrategyOnlyResultSchema` +
+ * `STRATEGY_ONLY_EXTRACTION_PROMPT`), one dedicated entirely to rich
+ * knowledge extraction (`KnowledgeOnlyResultSchema` +
+ * `KNOWLEDGE_ONLY_EXTRACTION_PROMPT`). Each pass has no visibility into
+ * the other's output — there is no shared context to compete over, which
+ * structurally eliminates the "already covered in knowledge, skip
+ * strategies" failure mode the single-prompt "Task A/B independence"
+ * instruction (still visible in the changelog above) was fighting rather
+ * than removing. Application code combines both results with the
+ * authoritative Whop lesson metadata into the SAME final shape as before
+ * and re-validates it against `LessonStrategyAnalysisSchema` (unchanged) —
+ * the persisted/API shape is identical either way.
+ */
+export const StrategyOnlyResultSchema = z
+  .object({
+    strategy_found: z.boolean(),
+    strategies: z.array(StrategySchema),
+  })
+  .refine((data) => data.strategy_found || data.strategies.length === 0, {
+    message: "strategies must be empty when strategy_found is false",
+    path: ["strategies"],
+  })
+  .refine((data) => !data.strategy_found || data.strategies.length >= 1, {
+    message: "strategies must contain at least one entry when strategy_found is true",
+    path: ["strategies"],
+  });
+export type StrategyOnlyResult = z.infer<typeof StrategyOnlyResultSchema>;
+
+export const KnowledgeOnlyResultSchema = z.object({
+  knowledge: LessonKnowledgeSchema,
+});
+export type KnowledgeOnlyResult = z.infer<typeof KnowledgeOnlyResultSchema>;
+
 /** JSON Schema mirror of the above, given to Gemini via response_format.schema. */
 const ruleJsonSchema = {
   type: "object",
@@ -592,44 +636,65 @@ const lessonKnowledgeJsonSchema = {
   required: ["summary", "knowledgeItems", "examples", "conflictsAndAmbiguities"],
 };
 
-export const STRATEGY_RESPONSE_JSON_SCHEMA = {
+/**
+ * Two-pass architecture (see StrategyOnlyResultSchema's changelog above):
+ * neither wire schema asks Gemini for `lesson` at all — the persisted
+ * `lesson` object is always overwritten with authoritative Whop metadata
+ * by application code regardless of what either pass might echo back (see
+ * pipeline/analyzeLesson.ts), so asking either pass to reproduce it would
+ * be exactly the wasted-output-budget pattern this file's PR #11 note
+ * already warns against.
+ */
+export const STRATEGY_ONLY_RESPONSE_JSON_SCHEMA = {
   type: "object",
   properties: {
-    lesson: {
-      type: "object",
-      properties: {
-        title: { type: "string" },
-        duration_seconds: { type: ["number", "null"] },
-      },
-      required: ["title", "duration_seconds"],
-    },
     strategy_found: { type: "boolean" },
     strategies: { type: "array", items: strategyJsonSchema },
-    knowledge: lessonKnowledgeJsonSchema,
   },
-  required: ["lesson", "strategy_found", "strategies", "knowledge"],
+  required: ["strategy_found", "strategies"],
 };
 
-export const STRATEGY_EXTRACTION_PROMPT = `You are analyzing one lesson video from a trading education course.
+export const KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    knowledge: lessonKnowledgeJsonSchema,
+  },
+  required: ["knowledge"],
+};
+
+export const STRATEGY_ONLY_EXTRACTION_PROMPT = `You are analyzing one lesson video from a trading education course.
+
+Analyze BOTH the spoken audio/instruction AND the visible on-screen trading charts and UI.
+
+Your ONLY task in this pass: extract every distinct, standalone, executable trading strategy/setup this lesson teaches. A separate, independent pass extracts general lesson knowledge (risk management, definitions, psychology, and so on) — you do not need to worry about that here, and you should not hold back strategy detail on the assumption that "it's covered elsewhere."
+
+A distinct strategy/setup exists when the instructor teaches a repeatable trading structure with meaningful execution logic — how to identify, enter, manage, and exit a trade — even if some details are left discretionary.
+
+ENUMERATE ALL DISTINCT SETUPS. Do not stop after finding the first plausible strategy. If the lesson teaches multiple substantively different setups, extract each one separately into "strategies". Two setups should generally remain separate when they have materially different setup construction, entry trigger, confirmation, invalidation, stop behavior, trade management, or target logic — even if they share market context, support/resistance concepts, trend requirements, or higher-timeframe levels. For example, a horizontal break/retest setup and a separate order-block continuation setup with its own validation/entry/trailing behavior may be two distinct strategies even though both depend on support/resistance and trending context — this is a generic rule, not specific to any one course or named strategy. Do NOT merge distinct setups simply because they share some underlying concepts. Do NOT split one setup into multiple merely because different example tickers were shown for it.
+
+Set strategy_found to true and strategies to a non-empty array when at least one such setup is taught; otherwise set strategy_found to false and strategies to an empty array. strategy_found=false is a fully valid, expected result for a lesson that teaches no repeatable setup with execution logic (e.g. a lesson purely about risk management, position sizing, or psychology).
+
+A strategy DOES NOT need to be perfectly complete or machine-executable to qualify — do not reject an otherwise coherent setup just because one field remains discretionary or unspecified (e.g. the exact stop buffer, a precise target formula, an exact indicator threshold, or exact position size). Leave the corresponding rule array empty, or note the ambiguity in "ambiguities", rather than inventing a value or rejecting the whole strategy. Preserve as much strategy detail as the source actually provides across every field below — do not compress several distinct rules into one vague rule merely to save space, and do not invent missing information.
+
+Do NOT turn an isolated definition or general principle into a strategy on its own — a definition of support, a definition of resistance, general psychology, risk-management theory in the abstract, a definition of "break of structure" or "order block", or a generic market-structure discussion, taught in isolation, is not a strategy. But when the instructor ASSEMBLES concepts like these into a repeatable setup with entry/execution logic (e.g. "resistance breaks and becomes support; wait for a retest of that new support with a bullish candle close, then enter, with a stop below the retest low and a target at the next resistance level") — that IS a strategy.
+
+For each strategy extract: strategy_name, market_or_instrument, timeframes, indicators, setup_conditions, entry_rules, confirmation_rules, stop_loss_rules, profit_target_rules, trade_management_rules, invalidation_rules, no_trade_conditions, market_context_rules, visual_discretionary_rules, examples_shown, ambiguities.
+
+"market_or_instrument" and "timeframes" represent genuine APPLICABILITY RESTRICTIONS, not a list of every ticker or timeframe shown on screen. Ask: would the instructor imply this strategy does NOT work outside this value? If the setup is really "any liquid stock or option, on an intraday chart" and the instructor happened to demonstrate it on AMD and NVDA, market_or_instrument is ["equities", "options"] (or similarly general), NOT ["equities", "AMD", "NVDA", "futures"] — AMD/NVDA belong in "examples_shown", not in the applicability fields. Only list a specific instrument/timeframe when the instructor actually restricts the setup to it (e.g. "this only works on 0-DTE SPX options").
+
+For every individual rule, provide a start_timestamp (MM:SS), an end_timestamp (MM:SS or null if a single instant), a "classification" (explicit/inferred/visual, reflecting how directly it was stated versus reasonably inferred from context or the chart), and a short evidence explanation referencing what was said or shown. Never invent a rule, quantity, or example that is not supported by the video.
+
+Respond ONLY with JSON matching the required schema.`;
+
+export const KNOWLEDGE_ONLY_EXTRACTION_PROMPT = `You are analyzing one lesson video from a trading education course.
 
 Analyze BOTH the spoken audio/instruction AND the visible on-screen trading charts and UI. This is knowledge reconstruction, not summarization.
 
-This lesson may or may not teach a complete, standalone, executable trading strategy — many valuable lessons (risk management, position sizing, trade management, psychology, preparation routines) correctly do NOT, and that is expected, not a failure. You must perform TWO INDEPENDENT EXTRACTION TASKS (Task A, Task B), both fully, on every lesson:
+Your task in this pass: extract MAXIMUM-FIDELITY trading knowledge from the ENTIRE lesson — every individually useful claim, rule, definition, warning, or example. A separate, independent pass identifies any standalone strategies taught; you do not decide that here, and you must extract full knowledge regardless of whether the lesson happens to teach a standalone setup or how much strategy structure that other pass finds. Content that is also part of a strategy elsewhere in the lesson should STILL be captured here in full — this is not a redundant task, it produces a different, complementary representation.
 
-*** TASK A AND TASK B ARE INDEPENDENT. THIS IS CRITICAL. ***
-A trading rule, setup, or concept may legitimately — and should — appear BOTH as part of a structured Strategy (Task A) AND as one or more KnowledgeItems (Task B). That is NOT undesirable duplication; the two representations serve different downstream purposes (a structured, executable setup vs. maximum-fidelity source knowledge). Never reason "this is already represented in knowledgeItems, so I don't need to also populate strategies" — that is the single most common mistake to avoid. Populating knowledgeItems thoroughly is never a substitute for Task A, and vice versa. Do both, completely, independently.
-
-TASK A — STANDALONE STRATEGY / SETUP EXTRACTION: if this video teaches one or more repeatable trading setups with meaningful execution logic (the instructor describes how to identify, enter, manage, and exit a trade — even if some details are left discretionary), extract them into "strategies": strategy_name, market_or_instrument, timeframes, indicators, setup_conditions, entry_rules, confirmation_rules, stop_loss_rules, profit_target_rules, trade_management_rules, invalidation_rules, no_trade_conditions, market_context_rules, visual_discretionary_rules, examples_shown, ambiguities. Set strategy_found to true and strategies to a non-empty array when such a setup is taught; otherwise set strategy_found to false and strategies to an empty array. strategy_found=false means ONLY "no repeatable setup with execution logic was taught here" — it does NOT mean the lesson has no useful content, and you must still fully populate "knowledge" below (Task B) regardless of strategy_found.
-
-  A strategy DOES NOT need to be perfectly complete or machine-executable to qualify — do not reject an otherwise coherent setup just because one field remains discretionary or unspecified (e.g. the exact stop buffer, a precise target formula, an exact indicator threshold, or exact position size). Leave the corresponding rule array empty, or note the ambiguity in "ambiguities", rather than inventing a value or rejecting the whole strategy. Preserve as much strategy detail as the source actually provides across every field above — do not compress several distinct rules into one vague rule merely to save space, and do not invent missing information.
-
-  Conversely, do NOT turn an isolated definition or general principle into a strategy on its own — a definition of support, a definition of resistance, general psychology, risk-management theory in the abstract, a definition of "break of structure" or "order block", or a generic market-structure discussion, taught in isolation, is knowledge (Task B), not a strategy. But when the instructor ASSEMBLES concepts like these into a repeatable setup with entry/execution logic (e.g. "resistance breaks and becomes support; wait for a retest of that new support with a bullish candle close, then enter, with a stop below the retest low and a target at the next resistance level") — that IS a strategy, and must be captured in "strategies" via Task A, even though the same concepts (the break-and-retest definition, the entry/stop/target rules, the examples shown) should ALSO be captured as KnowledgeItems and examples via Task B below.
-
-  "market_or_instrument" and "timeframes" represent genuine APPLICABILITY RESTRICTIONS, not a list of every ticker or timeframe shown on screen. Ask: would the instructor imply this strategy does NOT work outside this value? If the setup is really "any liquid stock or option, on an intraday chart" and the instructor happened to demonstrate it on AMD and NVDA, market_or_instrument is ["equities", "options"] (or similarly general), NOT ["equities", "AMD", "NVDA", "futures"] — AMD/NVDA belong in "examples_shown", not in the applicability fields. Only list a specific instrument/timeframe when the instructor actually restricts the setup to it (e.g. "this only works on 0-DTE SPX options").
-
-TASK B — LESSON KNOWLEDGE (always required, regardless of strategy_found): populate "knowledge" with every other piece of useful trading knowledge in this lesson, whether or not it is part of a standalone strategy:
+Populate "knowledge":
    - summary: a concise description of what the lesson teaches, its major themes, and its primary learning objectives.
-   - knowledgeItems: every individual claim, rule, or observation worth preserving — including content that would otherwise be lost when strategy_found is false, such as risk management, position sizing, scaling in/out, trade management, execution/order-flow mechanics, higher-timeframe analysis, pre-market preparation/routine, psychology/discipline, no-trade conditions, warnings/common mistakes, and definitions/terminology. Prefer MULTIPLE precise, atomic items over one broad summarized item when the lesson teaches materially different rules — never compress distinct entry/sizing/management/invalidation rules into one vague paragraph; keep concepts atomic enough that a later synthesis step can combine them without having already lost detail.
+   - knowledgeItems: every individual claim, rule, or observation worth preserving — risk management, position sizing, scaling in/out, trade management, execution/order-flow mechanics, higher-timeframe analysis, pre-market preparation/routine, psychology/discipline, no-trade conditions, warnings/common mistakes, and definitions/terminology. Prefer MULTIPLE precise, atomic items over one broad summarized item when the lesson teaches materially different rules — never compress distinct entry/sizing/management/invalidation rules into one vague paragraph; keep concepts atomic enough that a later synthesis step can combine them without having already lost detail.
 
      SPLIT ON MATERIALLY DIFFERENT APPLICABILITY: when the instructor gives DIFFERENT normative guidance to different trader profiles, instruments, strategies, sessions, or market contexts, prefer separate, individually-scoped KnowledgeItems over one item with the differing regimes crammed into "conditions"/"exceptions". For example, if the instructor says beginners should risk 1-5% of account value while experienced traders sizing momentum options may size by contract count/dollar amount without tracking account percentage at all, that is TWO items (one scoped to traderProfiles: ["beginner"], one scoped to traderProfiles: ["experienced"]) — not one item with the experienced-trader behavior buried as an exception to the beginner rule. If the two regimes genuinely conflict or the boundary between them is unclear, also add an entry to "conflictsAndAmbiguities". Reserve "exceptions" for a TRUE exception to one parent rule (a specific carve-out under the same applicability), not for a fundamentally different rule that applies to a different population — do not over-split a single coherent rule that only has one real exception into multiple items, either.
 
@@ -647,7 +712,7 @@ TASK B — LESSON KNOWLEDGE (always required, regardless of strategy_found): pop
        - inferred: you reasonably infer this from context, but it is not explicitly stated — never turn inferred, visual behavior into an "explicit" claim.
        - visual: materially derived from the chart/screen rather than verbal instruction alone.
 
-     Every item needs a "scope" describing WHERE it applies — never broaden a rule beyond what the source actually supports. Default to { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] } (every array empty means genuinely course-wide/global) and populate one or more arrays with a non-empty value whenever the rule is meaningfully limited — to one strategy, one instrument type, one timeframe, one session, or one trader-experience level. Do NOT convert an example-specific rule into a universal course rule: if the instructor says "with one Apple contract I would risk around $150," that is scoped (marketsOrInstruments: ["Apple options contract example"]), never a global max-risk rule. Distinguish beginners vs. experienced traders, options vs. futures, options vs. equities, 0-DTE vs. swing, one specific example contract/ticker, one specific setup (e.g. PMH/PML only, ORB only, opening-drive only), one timeframe only, and session-specific guidance (market-open only, premarket only) whenever the lesson draws that distinction.
+     Every item needs a "scope" describing WHERE it applies — never broaden a rule beyond what the source actually supports. Default to { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] } (every array empty means genuinely course-wide/global) and populate one or more arrays with a non-empty value whenever the rule is meaningfully limited — to one strategy, one instrument type, one timeframe, one session, or one trader-experience level. Do NOT convert an example-specific rule into a universal course rule: if the instructor says "with one Apple contract I would risk around $150," that is scoped (marketsOrInstruments: ["Apple options contract example"]), never a global max-risk rule. Distinguish beginners vs. experienced traders, options vs. futures, options vs. equities, 0-DTE vs. swing, one specific example contract/ticker, one specific setup (e.g. PMH/PML only, ORB only, opening-drive only), one timeframe only, and session-specific guidance (market-open only, premarket only) whenever the lesson draws that distinction. It is fine and expected for a knowledgeItem to reference a named strategy in scope.strategies — a separate pass independently decides whether that strategy also qualifies as a standalone setup; that is not your concern here.
 
      CRITICAL — SCOPE ARRAYS REPRESENT APPLICABILITY, NOT EXAMPLES. A ticker, instrument, timeframe, session, or trader type does NOT belong in a scope array merely because it appears as an example on screen or in speech. Before adding a value to marketsOrInstruments/timeframes/sessions/traderProfiles, ask: "would the instructor imply this rule does NOT apply outside this value?" If no — if the rule is really general and the instructor just happened to illustrate it with AAPL, AMD, AMZN, and TSLA — the scope array must stay empty (or contain only the genuine restriction, e.g. ["options"]), and those ticker names belong in "evidence"/"examples"/"context"/"rawText" instead, never in a scope array. Only add a specific value when the rule is ACTUALLY restricted to it (e.g. a rule the instructor states applies only to 0-DTE options, or only to one named strategy).
 
@@ -662,7 +727,5 @@ TASK B — LESSON KNOWLEDGE (always required, regardless of strategy_found): pop
    - conflictsAndAmbiguities: apparently conflicting statements, qualified rules, or unclear/context-dependent statements made WITHIN this one lesson. Do not silently reconcile contradictory guidance — preserve the source-level uncertainty faithfully; a later synthesis stage decides how to resolve it, not you.
 
 For every individual rule/item/example, provide a start_timestamp (MM:SS), an end_timestamp (MM:SS or null if a single instant), and a short evidence explanation referencing what was said or shown. Never invent a rule, quantity, exception, or example that is not supported by the video. Preserve uncertainty, ambiguity, and strategy/timeframe/market/session/instrument/trader-experience-specific variation rather than generalizing it away — the goal of this extraction is MAXIMUM FIDELITY to what the source actually supports, not the shortest or prettiest output.
-
-*** REMINDER: before responding, re-check Task A. *** If any KnowledgeItem above has a non-empty scope.strategies (i.e. you tagged content as belonging to a named strategy), re-confirm whether that same strategy also belongs in "strategies" via Task A — a named, repeatable setup with execution logic must be captured in BOTH places, never knowledge-only.
 
 Respond ONLY with JSON matching the required schema.`;

@@ -1,5 +1,4 @@
 import { GoogleGenAI, type Interactions } from "@google/genai";
-import { STRATEGY_EXTRACTION_PROMPT, STRATEGY_RESPONSE_JSON_SCHEMA } from "./schema.js";
 
 /**
  * Thin wrapper around the official @google/genai SDK, isolated behind an
@@ -142,16 +141,33 @@ export interface GeminiClient {
   uploadFile(filePath: string): Promise<GeminiFileRef>;
   waitUntilActive(file: GeminiFileRef, pollIntervalMs?: number): Promise<GeminiFileRef>;
   /**
+   * `prompt`/`schema` are explicit parameters (not hardcoded here) so the
+   * SAME uploaded video file can be analyzed by multiple independent
+   * Gemini calls with different prompts/schemas — see pipeline/
+   * analyzeLesson.ts's two-pass architecture (a dedicated strategy-
+   * extraction pass and a dedicated rich-knowledge pass against the same
+   * uploaded file, combined by application code afterward). Mirrors
+   * generateStructured's existing prompt/schema-as-parameters pattern
+   * below.
+   *
    * `maxOutputTokens`, when provided, is passed through as
    * `generation_config.max_output_tokens` — see pipeline/limits.ts's
-   * LESSON_ANALYSIS_MAX_OUTPUT_TOKENS. Previously always unset (server
-   * default); Phase 3.5's richer knowledge schema is enough larger than
-   * the old strategy-only schema that an explicit, visible budget (plus
-   * the same INCOMPLETE-status safety check generateStructured already
-   * has) is warranted the same way it was for synthesis — see
-   * GeminiIncompleteInteractionError and computeCompletionDiagnostics.
+   * STRATEGY_ANALYSIS_MAX_OUTPUT_TOKENS/KNOWLEDGE_ANALYSIS_MAX_OUTPUT_TOKENS.
+   * Previously always unset (server default); Phase 3.5's richer knowledge
+   * schema is enough larger than the old strategy-only schema that an
+   * explicit, visible budget (plus the same INCOMPLETE-status safety check
+   * generateStructured already has) is warranted the same way it was for
+   * synthesis — see GeminiIncompleteInteractionError and
+   * computeCompletionDiagnostics.
    */
-  analyzeVideo(file: GeminiFileRef, model: string, processingMode: "agentic" | "static", maxOutputTokens?: number): Promise<AnalyzeVideoResult>;
+  analyzeVideo(
+    file: GeminiFileRef,
+    model: string,
+    processingMode: "agentic" | "static",
+    prompt: string,
+    schema: object,
+    maxOutputTokens?: number,
+  ): Promise<AnalyzeVideoResult>;
   deleteFile(file: GeminiFileRef): Promise<void>;
   /**
    * Text-only, schema-constrained generation — no file upload/wait/delete
@@ -259,6 +275,8 @@ export function createGeminiClient(apiKey: string): GeminiClient {
     file: GeminiFileRef,
     model: string,
     processingMode: "agentic" | "static",
+    prompt: string,
+    schema: object,
     maxOutputTokens?: number,
   ): Promise<AnalyzeVideoResult> {
     try {
@@ -270,7 +288,7 @@ export function createGeminiClient(apiKey: string): GeminiClient {
       };
       const textContent: Interactions.TextContent = {
         type: "text",
-        text: STRATEGY_EXTRACTION_PROMPT,
+        text: prompt,
       };
 
       const interaction = await ai.interactions.create({
@@ -279,7 +297,7 @@ export function createGeminiClient(apiKey: string): GeminiClient {
         response_format: {
           type: "text",
           mime_type: "application/json",
-          schema: STRATEGY_RESPONSE_JSON_SCHEMA,
+          schema,
         },
         ...(maxOutputTokens != null ? { generation_config: { max_output_tokens: maxOutputTokens } } : {}),
       });

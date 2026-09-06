@@ -175,7 +175,11 @@ describe("runWorkerLoop", () => {
 
     const analysis = await findLatestByFingerprint(pool, fingerprint);
     expect(analysis?.strategyFound).toBe(true);
-    expect(analysis?.inputTokens).toBe(1000);
+    // Two independent Gemini calls now happen per analysis (strategy pass +
+    // knowledge pass — see pipeline/analyzeLesson.ts's two-pass
+    // architecture); the mock returns the same usage for both calls, so
+    // the persisted total is double the per-call figure.
+    expect(analysis?.inputTokens).toBe(2000);
     expect(analysis?.estimatedCost).toBeGreaterThan(0);
 
     const strategies = await listByAnalysisId(pool, analysis!.analysisId);
@@ -197,7 +201,8 @@ describe("runWorkerLoop", () => {
     const gemini = makeGemini();
     await runWorkerLoop(makeDeps({}, gemini));
 
-    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(2);
+    // 2 jobs x 2 Gemini calls each (strategy pass + knowledge pass).
+    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(4);
     const jobA = (await getJob(pool, (await findLatestByFingerprint(pool, "fp-a"))!.jobId))!;
     const jobB = (await getJob(pool, (await findLatestByFingerprint(pool, "fp-b"))!.jobId))!;
     expect(jobA.status).toBe("COMPLETED");
@@ -212,13 +217,14 @@ describe("runWorkerLoop", () => {
     const firstJob = await createJob(pool, lesson.id, fingerprint);
     const gemini = makeGemini();
     await runWorkerLoop(makeDeps({}, gemini));
-    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(1);
+    // 2 Gemini calls (strategy pass + knowledge pass) for this one job.
+    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(2);
     expect((await getJob(pool, firstJob.jobId))?.status).toBe("COMPLETED");
 
     // A second job for the SAME fingerprint (simulating a duplicate enqueue).
     const secondJob = await createJob(pool, lesson.id, fingerprint);
     await runWorkerLoop(makeDeps({}, gemini));
-    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(1); // still 1 — no second Gemini call
+    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(2); // still 2 — no second Gemini work at all
     expect((await getJob(pool, secondJob.jobId))?.status).toBe("COMPLETED");
   });
 
@@ -282,7 +288,8 @@ describe("runWorkerLoop", () => {
     const analysis = await findLatestByFingerprint(pool, fingerprint);
     expect(analysis?.status).toBe("no_strategy");
     expect(analysis?.strategyFound).toBe(false);
-    expect(analysis?.inputTokens).toBe(500);
+    // Summed across both Gemini calls (strategy pass + knowledge pass).
+    expect(analysis?.inputTokens).toBe(1000);
   });
 
   // Phase 3.5: a lesson can have strategy_found=false while still carrying
@@ -352,8 +359,9 @@ describe("runWorkerLoop", () => {
 
     await Promise.all([runWorkerLoop(depsA), runWorkerLoop(depsB)]);
 
-    // Both jobs were processed exactly once in total, by whichever execution won the lock.
-    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(2);
+    // Both jobs were processed exactly once in total (2 jobs x 2 Gemini
+    // calls each — strategy pass + knowledge pass), by whichever execution won the lock.
+    expect(gemini.analyzeVideo).toHaveBeenCalledTimes(4);
     const jobA = await findLatestByFingerprint(pool, "fp-lock-a");
     const jobB = await findLatestByFingerprint(pool, "fp-lock-b");
     expect(jobA).not.toBeNull();

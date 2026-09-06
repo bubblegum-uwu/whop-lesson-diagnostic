@@ -4,8 +4,12 @@ import {
   KnowledgeItemSchema,
   LessonKnowledgeSchema,
   LessonExampleSchema,
-  STRATEGY_RESPONSE_JSON_SCHEMA,
-  STRATEGY_EXTRACTION_PROMPT,
+  StrategyOnlyResultSchema,
+  KnowledgeOnlyResultSchema,
+  STRATEGY_ONLY_RESPONSE_JSON_SCHEMA,
+  KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA,
+  STRATEGY_ONLY_EXTRACTION_PROMPT,
+  KNOWLEDGE_ONLY_EXTRACTION_PROMPT,
 } from "../src/gemini/schema.js";
 
 function baseRule(overrides: Partial<Record<string, unknown>> = {}) {
@@ -348,7 +352,7 @@ describe("KnowledgeItemSchema — scope arrays (GLOBAL vs SCOPED is derived, nev
   it("never asks Gemini to generate a level field — the wire schema's scope properties are exactly the five arrays, nothing else", () => {
     const scopeProps = Object.keys(
       (
-        (STRATEGY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.knowledgeItems.items as { properties: { scope: { properties: object } } }).properties.scope as { properties: object }
+        (KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.knowledgeItems.items as { properties: { scope: { properties: object } } }).properties.scope as { properties: object }
       ).properties,
     );
     expect(scopeProps.sort()).toEqual(["marketsOrInstruments", "sessions", "strategies", "timeframes", "traderProfiles"].sort());
@@ -530,8 +534,8 @@ describe("provenance — timestamps, evidence, and no wasteful per-item duplicat
   // repetition PR #11 identified and fixed for synthesis. This is a
   // regression guard: none of the per-item wire schemas ask for it.
   it("never asks Gemini to reproduce lessonId/lessonTitle on knowledgeItems, examples, or numericalValues — that provenance is attached once by the application, not duplicated per item", () => {
-    const knowledgeItemProps = Object.keys((STRATEGY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.knowledgeItems.items as { properties: object }).properties);
-    const exampleProps = Object.keys((STRATEGY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.examples.items as { properties: object }).properties);
+    const knowledgeItemProps = Object.keys((KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.knowledgeItems.items as { properties: object }).properties);
+    const exampleProps = Object.keys((KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties.examples.items as { properties: object }).properties);
     for (const props of [knowledgeItemProps, exampleProps]) {
       expect(props).not.toContain("lessonId");
       expect(props).not.toContain("lessonTitle");
@@ -544,10 +548,18 @@ describe("provenance — timestamps, evidence, and no wasteful per-item duplicat
   // back to a per-category array shape instead of the collapsed
   // category-tagged `knowledgeItems` array.
   it("keeps the 13 knowledge categories collapsed into ONE knowledgeItems array in the wire schema, not 13 sibling arrays", () => {
-    const knowledgeProps = Object.keys(STRATEGY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties);
+    const knowledgeProps = Object.keys(KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA.properties.knowledge.properties);
     expect(knowledgeProps).toEqual(["summary", "knowledgeItems", "examples", "conflictsAndAmbiguities"]);
     expect(knowledgeProps).not.toContain("risk_management");
     expect(knowledgeProps).not.toContain("position_sizing");
+  });
+
+  // Two-pass architecture (see gemini/schema.ts's changelog): neither pass's
+  // wire schema asks Gemini for `lesson` — it's always overwritten with
+  // authoritative Whop metadata by application code regardless.
+  it("never asks either pass to reproduce lesson — that's attached by application code, not part of either wire schema", () => {
+    expect(Object.keys(STRATEGY_ONLY_RESPONSE_JSON_SCHEMA.properties)).not.toContain("lesson");
+    expect(Object.keys(KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA.properties)).not.toContain("lesson");
   });
 });
 
@@ -598,79 +610,192 @@ describe("strategy_found=false with strategy-scoped knowledge — structurally v
   });
 });
 
-// Non-brittle content assertions (deliberately substring/keyword checks,
-// never a full-prompt snapshot) confirming the regression-fix instructions
-// are actually present in the shipped prompt.
-describe("STRATEGY_EXTRACTION_PROMPT — Task A/Task B independence (regression fix)", () => {
-  it("explicitly states Task A and Task B are independent and that overlap is expected, not a reason to skip strategy extraction", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/INDEPENDENT/);
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/already represented in knowledgeItems/i);
+// Two-pass architecture (see gemini/schema.ts's changelog): strategy
+// extraction and knowledge extraction are now two INDEPENDENT Gemini
+// calls, each with its own self-contained prompt and no visibility into
+// the other's output — the "Task A and Task B are independent, don't
+// skip strategies because it's already in knowledge" cross-referencing
+// instruction from the single-shared-prompt era is no longer needed (and
+// no longer present): there is no shared context left to compete over.
+// These are deliberately non-brittle substring/keyword checks, never a
+// full-prompt snapshot, since we can't unit-test what the real Gemini API
+// returns.
+describe("STRATEGY_ONLY_EXTRACTION_PROMPT / KNOWLEDGE_ONLY_EXTRACTION_PROMPT — genuinely independent prompts", () => {
+  it("neither prompt references the other pass by name — they are self-contained, not cross-referencing halves of one shared prompt", () => {
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).not.toMatch(/Task A/);
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).not.toMatch(/Task B/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).not.toMatch(/Task A/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).not.toMatch(/Task B/);
   });
 
-  it("explicitly allows a strategy to qualify with some fields left discretionary, rather than requiring a perfectly complete setup", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/does not need to be perfectly complete/i);
+  it("the strategy prompt explicitly allows a strategy to qualify with some fields left discretionary, rather than requiring a perfectly complete setup", () => {
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).toMatch(/does not need to be perfectly complete/i);
   });
 
-  it("explicitly warns against turning an isolated definition or general principle into a strategy on its own", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/do not turn an isolated definition/i);
+  it("the strategy prompt explicitly warns against turning an isolated definition or general principle into a strategy on its own", () => {
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).toMatch(/do not turn an isolated definition/i);
   });
 
-  it("repeats the independence reminder near the end of the prompt (bookended), not stated only once where Task B's length can crowd it out", () => {
-    const matches = STRATEGY_EXTRACTION_PROMPT.match(/Task A/g) ?? [];
-    expect(matches.length).toBeGreaterThanOrEqual(3);
-  });
-});
-
-// Final semantic-precision pass: three narrower issues found in the SAME
-// real diagnostic output that confirmed the Task A/B regression fix above.
-// All three are prompt-only clarifications (no schema change) — these are
-// deliberately non-brittle substring/keyword checks, never a full-prompt
-// snapshot, since we can't unit-test what the real Gemini API returns.
-describe("STRATEGY_EXTRACTION_PROMPT — scope/applicability vs. examples (test requirements 1-2)", () => {
-  it("explicitly instructs that scope arrays represent applicability restrictions, not every ticker/instrument demonstrated as an example", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/SCOPE ARRAYS REPRESENT APPLICABILITY, NOT EXAMPLES/);
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/does NOT apply outside this value/i);
+  it("the strategy prompt explicitly instructs enumerating ALL distinct setups, not stopping after the first plausible one", () => {
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).toMatch(/ENUMERATE ALL DISTINCT SETUPS/);
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).toMatch(/do not stop after finding the first plausible strategy/i);
   });
 
-  it("gives the AAPL/AMD/AMZN/TSLA-style contamination as a concrete negative example for scope", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/AAPL, AMD, AMZN, and TSLA/);
+  it("the strategy prompt explicitly warns against merging distinct setups or splitting on example tickers alone", () => {
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).toMatch(/Do NOT merge distinct setups simply because they share some underlying concepts/);
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).toMatch(/Do NOT split one setup into multiple merely because different example tickers were shown/);
   });
 
-  it("explicitly clarifies Strategy.market_or_instrument/timeframes are applicability restrictions, not a list of every demonstrated instrument", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/APPLICABILITY RESTRICTIONS, not a list of every ticker/);
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/AMD\/NVDA belong in "examples_shown"/);
+  it("the knowledge prompt explicitly states it must extract full knowledge independently of what the strategy pass finds", () => {
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/A separate, independent pass identifies any standalone strategies/i);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/should STILL be captured here in full/i);
   });
 });
 
-describe("STRATEGY_EXTRACTION_PROMPT — BETWEEN vs. GTE operator selection (test requirements 3-5)", () => {
+// Final semantic-precision pass: three narrower issues found in real
+// diagnostic output. All three are prompt-only clarifications (no schema
+// change) — deliberately non-brittle substring/keyword checks, never a
+// full-prompt snapshot, since we can't unit-test what the real Gemini API
+// returns.
+describe("scope/applicability vs. examples (test requirements 1-2)", () => {
+  it("the knowledge prompt explicitly instructs that scope arrays represent applicability restrictions, not every ticker/instrument demonstrated as an example", () => {
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/SCOPE ARRAYS REPRESENT APPLICABILITY, NOT EXAMPLES/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/does NOT apply outside this value/i);
+  });
+
+  it("the knowledge prompt gives the AAPL/AMD/AMZN/TSLA-style contamination as a concrete negative example for scope", () => {
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/AAPL, AMD, AMZN, and TSLA/);
+  });
+
+  it("the strategy prompt explicitly clarifies market_or_instrument/timeframes are applicability restrictions, not a list of every demonstrated instrument", () => {
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).toMatch(/APPLICABILITY RESTRICTIONS, not a list of every ticker/);
+    expect(STRATEGY_ONLY_EXTRACTION_PROMPT).toMatch(/AMD\/NVDA belong in "examples_shown"/);
+  });
+});
+
+describe("BETWEEN vs. GTE operator selection (test requirements 3-5)", () => {
   it("instructs BETWEEN only for a true bounded range, both endpoints being genuine restrictions", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/BETWEEN is for a TRUE BOUNDED RANGE ONLY/);
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/risk between 1% and 5%/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/BETWEEN is for a TRUE BOUNDED RANGE ONLY/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/risk between 1% and 5%/);
   });
 
   it("instructs an open-ended 'more is better' concept must use GTE with the true lower bound, never BETWEEN with a false upper bound", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/two to three touches establish a level, and more touches make it stronger/i);
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/must be GTE with value=2.*value2=null/);
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/NEVER BETWEEN with value2=3/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/two to three touches establish a level, and more touches make it stronger/i);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/must be GTE with value=2.*value2=null/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/NEVER BETWEEN with value2=3/);
   });
 
   it("still preserves 'at least N' as GTE (unaffected baseline behavior)", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/"at least"\/"minimum" is GTE/);
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/at least 6 months/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/"at least"\/"minimum" is GTE/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/at least 6 months/);
   });
 });
 
-describe("STRATEGY_EXTRACTION_PROMPT — atomicity across applicability regimes (test requirement 6)", () => {
+describe("atomicity across applicability regimes (test requirement 6)", () => {
   it("explicitly instructs splitting materially different trader-profile/instrument/strategy/session regimes into separate scoped items", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/SPLIT ON MATERIALLY DIFFERENT APPLICABILITY/);
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/beginners should risk 1-5%.*experienced traders/i);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/SPLIT ON MATERIALLY DIFFERENT APPLICABILITY/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/beginners should risk 1-5%.*experienced traders/i);
   });
 
   it("reserves exceptions for a true carve-out under one parent rule, distinct from a fundamentally different rule for a different population", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/Reserve "exceptions" for a TRUE exception to one parent rule/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/Reserve "exceptions" for a TRUE exception to one parent rule/);
   });
 
   it("directs a genuine conflict between split regimes into conflictsAndAmbiguities", () => {
-    expect(STRATEGY_EXTRACTION_PROMPT).toMatch(/also add an entry to "conflictsAndAmbiguities"/);
+    expect(KNOWLEDGE_ONLY_EXTRACTION_PROMPT).toMatch(/also add an entry to "conflictsAndAmbiguities"/);
+  });
+});
+
+// Two-pass validation (test requirements 1-9 from the two-pass task):
+// each pass's own Zod schema validates independently, and the combined
+// object still validates through the unchanged final schema.
+describe("StrategyOnlyResultSchema / KnowledgeOnlyResultSchema — independent per-pass validation", () => {
+  it("StrategyOnlyResultSchema validates strategy_found:true + non-empty strategies on its own", () => {
+    const result = StrategyOnlyResultSchema.safeParse({ strategy_found: true, strategies: [baseStrategy()] });
+    expect(result.success).toBe(true);
+  });
+
+  it("StrategyOnlyResultSchema validates strategy_found:false + strategies:[] on its own", () => {
+    const result = StrategyOnlyResultSchema.safeParse({ strategy_found: false, strategies: [] });
+    expect(result.success).toBe(true);
+  });
+
+  it("StrategyOnlyResultSchema rejects strategy_found:true with empty strategies, independently of any knowledge pass", () => {
+    expect(StrategyOnlyResultSchema.safeParse({ strategy_found: true, strategies: [] }).success).toBe(false);
+  });
+
+  it("KnowledgeOnlyResultSchema validates rich knowledge independently, with no strategy_found/strategies fields at all", () => {
+    const knowledge = emptyKnowledge({ knowledgeItems: [baseKnowledgeItem()] });
+    const result = KnowledgeOnlyResultSchema.safeParse({ knowledge });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data).not.toHaveProperty("strategy_found");
+      expect(result.data).not.toHaveProperty("strategies");
+    }
+  });
+
+  it("combines a strategy_found:false StrategyOnlyResult with a rich KnowledgeOnlyResult into a valid final non-strategy lesson", () => {
+    const strategyOnly = StrategyOnlyResultSchema.parse({ strategy_found: false, strategies: [] });
+    const knowledgeOnly = KnowledgeOnlyResultSchema.parse({ knowledge: emptyKnowledge({ knowledgeItems: [baseKnowledgeItem()] }) });
+    const combined = {
+      lesson: { title: "Sizing & Scaling Trades", duration_seconds: 1900 },
+      strategy_found: strategyOnly.strategy_found,
+      strategies: strategyOnly.strategies,
+      knowledge: knowledgeOnly.knowledge,
+    };
+    const result = LessonStrategyAnalysisSchema.safeParse(combined);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.strategy_found).toBe(false);
+      expect(result.data.knowledge.knowledgeItems).toHaveLength(1);
+    }
+  });
+
+  it("combines a strategy_found:true StrategyOnlyResult with a rich KnowledgeOnlyResult into a valid final strategy lesson", () => {
+    const strategyOnly = StrategyOnlyResultSchema.parse({ strategy_found: true, strategies: [baseStrategy()] });
+    const knowledgeOnly = KnowledgeOnlyResultSchema.parse({ knowledge: emptyKnowledge({ knowledgeItems: [baseKnowledgeItem()] }) });
+    const combined = {
+      lesson: { title: "Support & Resistance, Key Levels & Market Trends", duration_seconds: 2618 },
+      strategy_found: strategyOnly.strategy_found,
+      strategies: strategyOnly.strategies,
+      knowledge: knowledgeOnly.knowledge,
+    };
+    const result = LessonStrategyAnalysisSchema.safeParse(combined);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.strategy_found).toBe(true);
+      expect(result.data.strategies).toHaveLength(1);
+      expect(result.data.knowledge.knowledgeItems).toHaveLength(1);
+    }
+  });
+
+  it("strategy_found/strategies in the combined object come exclusively from the strategy pass, never influenced by the knowledge pass", () => {
+    const strategyOnly = StrategyOnlyResultSchema.parse({ strategy_found: true, strategies: [baseStrategy({ strategy_name: "Break & Retest" })] });
+    // A knowledge pass with ZERO items naming any strategy — the combined
+    // object's strategies must still come through unchanged from Pass A.
+    const knowledgeOnly = KnowledgeOnlyResultSchema.parse({ knowledge: emptyKnowledge() });
+    const combined = LessonStrategyAnalysisSchema.parse({
+      lesson: { title: "X", duration_seconds: 100 },
+      strategy_found: strategyOnly.strategy_found,
+      strategies: strategyOnly.strategies,
+      knowledge: knowledgeOnly.knowledge,
+    });
+    expect(combined.strategy_found).toBe(true);
+    expect(combined.strategies[0]?.strategy_name).toBe("Break & Retest");
+  });
+
+  it("knowledge in the combined object comes exclusively from the knowledge pass, never reconstructed from strategies", () => {
+    const strategyOnly = StrategyOnlyResultSchema.parse({ strategy_found: false, strategies: [] });
+    const knowledgeOnly = KnowledgeOnlyResultSchema.parse({
+      knowledge: emptyKnowledge({ summary: "Distinctive knowledge-pass summary text.", knowledgeItems: [baseKnowledgeItem()] }),
+    });
+    const combined = LessonStrategyAnalysisSchema.parse({
+      lesson: { title: "X", duration_seconds: 100 },
+      strategy_found: strategyOnly.strategy_found,
+      strategies: strategyOnly.strategies,
+      knowledge: knowledgeOnly.knowledge,
+    });
+    expect(combined.knowledge.summary).toBe("Distinctive knowledge-pass summary text.");
+    expect(combined.knowledge.knowledgeItems).toHaveLength(1);
   });
 });
