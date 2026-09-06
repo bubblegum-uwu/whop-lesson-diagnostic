@@ -9,6 +9,7 @@ import { listCanonicalStrategiesByRun } from "../src/db/canonicalStrategiesRepo.
 import { getCoursePlaybookByRun } from "../src/db/coursePlaybooksRepo.js";
 import { runSynthesisLoop, type SynthesisWorkerDeps } from "../src/worker/synthesisLoop.js";
 import type { GeminiClient } from "../src/gemini/client.js";
+import { GeminiIncompleteInteractionError, computeCompletionDiagnostics } from "../src/gemini/client.js";
 import type { Strategy } from "../src/gemini/schema.js";
 import { createSecretRedactor } from "../src/lib/redact.js";
 import { computeSynthesisProgress } from "../src/synthesis/progress.js";
@@ -548,6 +549,62 @@ describe("runSynthesisLoop", () => {
     // Never any prompt content or raw Gemini output in what's persisted.
     expect(finalRun?.sanitizedError).not.toContain("not json — this is the real production failure mode");
     expect(finalRun?.currentItem).not.toContain("synthesizing ONE canonical trading strategy");
+  });
+
+  it("when the 2nd canonical strategy's interaction ends budget_exceeded, persists the specific safe status-aware error and no partial cluster/canonical-strategy rows", async () => {
+    const { run } = await seedRunReadyToClaim();
+    const usage1 = { inputTokens: 111, outputTokens: 22, thinkingTokens: 3 };
+    const clusterUsage = { inputTokens: 40, outputTokens: 8, thinkingTokens: 1 };
+
+    const gemini: GeminiClient = {
+      uploadFile: vi.fn(),
+      waitUntilActive: vi.fn(),
+      analyzeVideo: vi.fn(),
+      deleteFile: vi.fn(),
+      generateStructured: vi.fn(async (prompt: string, _model: string, _schema: object) => {
+        if (prompt.includes("clustering trading-strategy instances")) {
+          return {
+            text: JSON.stringify({
+              clusters: [
+                { clusterKey: "br", proposedCanonicalName: "Break & Retest", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" },
+                { clusterKey: "obs", proposedCanonicalName: "Order Block Sweep", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" },
+              ],
+            }),
+            usage: clusterUsage,
+            diagnostics: computeCompletionDiagnostics("completed", "{}"),
+          };
+        }
+        if (prompt.includes('clustered together as "Break & Retest"')) {
+          return { text: validCanonicalStrategyJson(), usage: usage1, diagnostics: computeCompletionDiagnostics("completed", validCanonicalStrategyJson()) };
+        }
+        if (prompt.includes('clustered together as "Order Block Sweep"')) {
+          // Realistic production data hit the configured output-token budget mid-object.
+          throw new GeminiIncompleteInteractionError("budget_exceeded", computeCompletionDiagnostics("budget_exceeded", '{"name":"Order Block Sweep","sections":['));
+        }
+        throw new Error(`Unexpected prompt: ${prompt.slice(0, 40)}`);
+      }),
+    };
+
+    await runSynthesisLoop(makeDeps(gemini));
+
+    const finalRun = await getSynthesisRun(pool, run.runId);
+    expect(finalRun?.status).toBe("FAILED");
+    expect(finalRun?.completedItems).toBe(1);
+    expect(finalRun?.currentItem).toBe("Order Block Sweep");
+
+    // The specific, status-aware safe error — never a bare "invalid JSON" with no context.
+    expect(finalRun?.sanitizedError).toContain('interaction_status=budget_exceeded');
+    expect(finalRun?.sanitizedError).toContain("stage=canonical_strategy");
+    expect(finalRun?.sanitizedError).toMatch(/max_output_tokens=\d+/);
+    expect(finalRun?.sanitizedError).not.toContain("Order Block Sweep\",\"sections\"");
+
+    // No partial canonical strategy or cluster row is EVER persisted, no matter which stage/cluster failed.
+    expect(await listStrategyClustersByRun(pool, run.runId)).toHaveLength(0);
+    expect(await listCanonicalStrategiesByRun(pool, run.runId)).toHaveLength(0);
+    expect(await getCoursePlaybookByRun(pool, run.runId)).toBeNull();
+
+    // Cluster 1's usage still survives, exactly like the malformed-JSON variant of this scenario above.
+    expect(finalRun?.inputTokens).toBe(clusterUsage.inputTokens + usage1.inputTokens);
   });
 
   it("persists progress durably after EACH completed canonical strategy — never batches or delays it until the whole stage finishes", async () => {

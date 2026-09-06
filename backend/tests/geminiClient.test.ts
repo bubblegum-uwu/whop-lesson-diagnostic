@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import type { Interactions } from "@google/genai";
-import { extractOutputText } from "../src/gemini/client.js";
+import { extractOutputText, computeCompletionDiagnostics } from "../src/gemini/client.js";
 
 function makeInteraction(overrides: Partial<Interactions.Interaction> = {}): Interactions.Interaction {
   return {
@@ -61,5 +61,46 @@ describe("extractOutputText (Interactions API response shape)", () => {
 
   it("returns undefined for a completely empty interaction", () => {
     expect(extractOutputText(makeInteraction())).toBeUndefined();
+  });
+});
+
+describe("computeCompletionDiagnostics (safe, content-free response-shape signals)", () => {
+  it("reports a well-formed complete JSON object accurately", () => {
+    const d = computeCompletionDiagnostics("completed", '{"a":1}');
+    expect(d).toEqual({
+      interactionStatus: "completed",
+      outputChars: 7,
+      isEmpty: false,
+      startsWithOpenBrace: true,
+      endsWithCloseBrace: true,
+      hasMarkdownFence: false,
+    });
+  });
+
+  it("flags an empty response", () => {
+    const d = computeCompletionDiagnostics("completed", "");
+    expect(d.isEmpty).toBe(true);
+    expect(d.outputChars).toBe(0);
+  });
+
+  it("flags text wrapped in a Markdown code fence", () => {
+    const d = computeCompletionDiagnostics("completed", '```json\n{"a":1}\n```');
+    expect(d.hasMarkdownFence).toBe(true);
+  });
+
+  it("detects a response that doesn't end with a closing brace — a truncation signal", () => {
+    const truncated = computeCompletionDiagnostics("incomplete", '{"a": [1, 2, 3,');
+    expect(truncated.startsWithOpenBrace).toBe(true);
+    expect(truncated.endsWithCloseBrace).toBe(false);
+  });
+
+  it("detects non-JSON content (doesn't start with an opening brace)", () => {
+    const notJson = computeCompletionDiagnostics("completed", "I cannot help with that.");
+    expect(notJson.startsWithOpenBrace).toBe(false);
+  });
+
+  it("never includes the response text itself anywhere in the diagnostics object", () => {
+    const d = computeCompletionDiagnostics("completed", "SECRET COURSE CONTENT that must never leak");
+    expect(JSON.stringify(d)).not.toContain("SECRET COURSE CONTENT");
   });
 });

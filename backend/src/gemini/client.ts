@@ -29,10 +29,69 @@ export class GeminiProcessingFailedError extends Error {
 }
 
 export class GeminiAnalysisError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** Set only for a structured-generation empty-response failure (see generateStructured) — analyzeVideo never sets this. */
+    public readonly diagnostics?: GeminiCompletionDiagnostics,
+  ) {
     super(message);
     this.name = "GeminiAnalysisError";
   }
+}
+
+/**
+ * The Interactions API's terminal-but-not-successful statuses (see
+ * `@google/genai`'s `InteractionStatus`) — a response in one of these
+ * states must never be handed to JSON.parse, since its `output_text` can
+ * be partial, stale, or entirely absent. Thrown by generateStructured()
+ * BEFORE any parsing is attempted, carrying only safe shape diagnostics
+ * (never the response text itself) so callers can tell "cut off by an
+ * output-token budget" apart from "the model returned something, but it
+ * wasn't JSON."
+ */
+export type GeminiIncompleteStatus = "failed" | "cancelled" | "incomplete" | "budget_exceeded";
+const INCOMPLETE_INTERACTION_STATUSES: ReadonlySet<string> = new Set<GeminiIncompleteStatus>([
+  "failed",
+  "cancelled",
+  "incomplete",
+  "budget_exceeded",
+]);
+
+/**
+ * Safe, content-free shape signals about a structured-generation response —
+ * enough to distinguish truncation/emptiness/non-JSON-content from a
+ * genuine parse bug, without ever capturing the response text itself.
+ */
+export interface GeminiCompletionDiagnostics {
+  /** The Interactions API's `status` field verbatim (e.g. "completed", "incomplete", "budget_exceeded"). */
+  interactionStatus: string;
+  outputChars: number;
+  isEmpty: boolean;
+  startsWithOpenBrace: boolean;
+  endsWithCloseBrace: boolean;
+  hasMarkdownFence: boolean;
+}
+
+export class GeminiIncompleteInteractionError extends Error {
+  constructor(
+    public readonly interactionStatus: string,
+    public readonly diagnostics: GeminiCompletionDiagnostics,
+  ) {
+    super(`Gemini interaction ended with status "${interactionStatus}" — response was not used.`);
+    this.name = "GeminiIncompleteInteractionError";
+  }
+}
+
+export function computeCompletionDiagnostics(interactionStatus: string, text: string): GeminiCompletionDiagnostics {
+  const trimmed = text.trim();
+  return {
+    interactionStatus,
+    outputChars: text.length,
+    isEmpty: text.length === 0,
+    startsWithOpenBrace: trimmed.startsWith("{"),
+    endsWithCloseBrace: trimmed.endsWith("}"),
+    hasMarkdownFence: trimmed.startsWith("```") || trimmed.includes("\n```"),
+  };
 }
 
 export interface GeminiUsage {
@@ -47,6 +106,11 @@ export interface AnalyzeVideoResult {
   usage: GeminiUsage;
 }
 
+export interface GenerateStructuredResult extends AnalyzeVideoResult {
+  /** Optional only so a test fake GeminiClient can omit it without friction — the real client (createGeminiClient below) always populates it. */
+  diagnostics?: GeminiCompletionDiagnostics;
+}
+
 export interface GeminiClient {
   uploadFile(filePath: string): Promise<GeminiFileRef>;
   waitUntilActive(file: GeminiFileRef, pollIntervalMs?: number): Promise<GeminiFileRef>;
@@ -57,8 +121,14 @@ export interface GeminiClient {
    * involved. Used by course-strategy synthesis (Phase 3.4), which
    * processes already-extracted structured JSON, never raw video, so it
    * deliberately never touches the video-specific methods above.
+   *
+   * `maxOutputTokens`, when provided, is passed through as the Interactions
+   * API's `generation_config.max_output_tokens` — an explicit, visible
+   * budget per synthesis stage (see synthesis/limits.ts) rather than
+   * leaving it unset and hoping the server default is enough for the
+   * richest stages.
    */
-  generateStructured(prompt: string, model: string, schema: object): Promise<AnalyzeVideoResult>;
+  generateStructured(prompt: string, model: string, schema: object, maxOutputTokens?: number): Promise<GenerateStructuredResult>;
 }
 
 /** Extracts token usage from `Interaction.usage` — never a second Gemini call. */
@@ -185,22 +255,33 @@ export function createGeminiClient(apiKey: string): GeminiClient {
     }
   }
 
-  async function generateStructured(prompt: string, model: string, schema: object): Promise<AnalyzeVideoResult> {
+  async function generateStructured(prompt: string, model: string, schema: object, maxOutputTokens?: number): Promise<GenerateStructuredResult> {
     try {
       const textContent: Interactions.TextContent = { type: "text", text: prompt };
       const interaction = await ai.interactions.create({
         model,
         input: [textContent],
         response_format: { type: "text", mime_type: "application/json", schema },
+        ...(maxOutputTokens != null ? { generation_config: { max_output_tokens: maxOutputTokens } } : {}),
       });
 
-      const text = extractOutputText(interaction);
-      if (!text) {
-        throw new GeminiAnalysisError("Gemini returned an empty response.");
+      const text = extractOutputText(interaction) ?? "";
+      const diagnostics = computeCompletionDiagnostics(interaction.status, text);
+
+      // Checked BEFORE emptiness/parsing — an interaction in one of these
+      // states can have partial, stale, or missing output_text; feeding it
+      // to JSON.parse would misreport a completion-level failure as a
+      // generic "invalid JSON" one, losing exactly the signal (status)
+      // needed to tell truncation apart from a genuine malformed response.
+      if (INCOMPLETE_INTERACTION_STATUSES.has(interaction.status)) {
+        throw new GeminiIncompleteInteractionError(interaction.status, diagnostics);
       }
-      return { text, usage: extractUsage(interaction) };
+      if (diagnostics.isEmpty) {
+        throw new GeminiAnalysisError("Gemini returned an empty response.", diagnostics);
+      }
+      return { text, usage: extractUsage(interaction), diagnostics };
     } catch (err) {
-      if (err instanceof GeminiAnalysisError) throw err;
+      if (err instanceof GeminiAnalysisError || err instanceof GeminiIncompleteInteractionError) throw err;
       throw new GeminiAnalysisError(
         `Gemini structured-generation request failed: ${err instanceof Error ? err.message : String(err)}`,
       );

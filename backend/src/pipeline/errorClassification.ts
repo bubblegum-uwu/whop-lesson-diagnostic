@@ -1,7 +1,7 @@
 import { WhopApiError } from "../whop/client.js";
 import { AuthRequiredError } from "../whop/sessionService.js";
 import { FfmpegRemuxError } from "../ffmpeg/remux.js";
-import { GeminiUploadError, GeminiProcessingFailedError, GeminiAnalysisError } from "../gemini/client.js";
+import { GeminiUploadError, GeminiProcessingFailedError, GeminiAnalysisError, GeminiIncompleteInteractionError } from "../gemini/client.js";
 import { SchemaValidationError, PipelineError } from "./analyzeLesson.js";
 import { SynthesisGeminiCallError } from "../synthesis/errors.js";
 
@@ -46,6 +46,16 @@ export function classifyError(err: unknown): ErrorClassification {
     // treated as permanent (bad/incompatible source); a timeout is transient
     // (could be a slow/overloaded upstream).
     return err.message.includes("timed out") ? "transient" : "permanent";
+  }
+  // The Interactions API reported the response itself as failed/cancelled/
+  // incomplete/budget_exceeded (see gemini/client.ts) — never a network- or
+  // rate-limit-level condition, so retrying the identical prompt against
+  // the identical configured budget would predictably fail the same way
+  // again. Permanent, same as the fallback below would already classify
+  // it, but explicit here since this is exactly the failure mode this PR
+  // exists to diagnose.
+  if (err instanceof GeminiIncompleteInteractionError) {
+    return "permanent";
   }
   if (err instanceof GeminiUploadError || err instanceof GeminiProcessingFailedError || err instanceof GeminiAnalysisError) {
     const message = err.message.toLowerCase();

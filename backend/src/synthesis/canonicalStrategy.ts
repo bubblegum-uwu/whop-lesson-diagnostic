@@ -53,8 +53,8 @@ export async function synthesizeCanonicalStrategy(
   members: StrategyInstanceRecord[],
 ): Promise<{ canonicalStrategy: CanonicalStrategy; usage: GeminiUsage }> {
   const prompt = buildPrompt(cluster, members);
-  const { rawText, usage } = await callGeminiForStage(deps, STAGE, prompt, RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA);
-  const parsed = parseStageJson(STAGE, rawText);
+  const { rawText, usage, diagnostics } = await callGeminiForStage(deps, STAGE, prompt, RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA);
+  const parsed = parseStageJson(STAGE, rawText, diagnostics);
   const raw = validateStageData(STAGE, parsed, RawCanonicalStrategySchema);
 
   const enriched = enrichCanonicalStrategy(raw, members);

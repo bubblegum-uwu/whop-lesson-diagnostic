@@ -133,9 +133,11 @@ async function main(): Promise<void> {
     };
 
     try {
-      const result = await runSynthesis({ gemini: instrumentedGemini, model: config.geminiModel }, input, (stage) => {
-        currentStage = stage;
-        console.log(`-- entering stage: ${stage} --`);
+      const result = await runSynthesis({ gemini: instrumentedGemini, model: config.geminiModel }, input, (event) => {
+        currentStage = event.stage;
+        console.log(
+          `-- stage=${event.stage} completed_items=${event.completedItems ?? "n/a"} total_items=${event.totalItems ?? "n/a"} --`,
+        );
       });
       console.log(
         `Dry-run completed successfully: ${result.clusters.length} cluster(s) synthesized. Nothing was persisted to the database.`,
