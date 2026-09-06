@@ -96,6 +96,11 @@ function SynthesisProgressCard({ run }: { run: SynthesisRunSummary }) {
           </span>
         )}
         <span>Elapsed: {formatElapsed(elapsedSeconds)}</span>
+        {/* run.estimatedCost is the same persisted, incrementally-updated column every
+            other run state reads (see backend/src/db/synthesisRunsRepo.ts's
+            updateSynthesisProgress) — never extrapolated client-side, and null (not yet
+            any completed Gemini call) is distinct from a real $0.00. */}
+        {run.estimatedCost != null && <span>Cost so far: {formatCost(run.estimatedCost)}</span>}
       </div>
 
       {run.heartbeatTier !== "none" && <p className={`synthesis-heartbeat-notice synthesis-heartbeat-${run.heartbeatTier}`}>{HEARTBEAT_MESSAGES[run.heartbeatTier]}</p>}
@@ -126,7 +131,7 @@ function SynthesisCompletedSummary({ run, canonicalStrategyCount, coverageStatus
       <strong>Completed</strong>
       <span>Duration: {minutes != null ? `${minutes} min` : "—"}</span>
       <span>Canonical Strategies: {canonicalStrategyCount}</span>
-      <span>Synthesis Cost: {formatCost(run.estimatedCost)}</span>
+      <span>Total Synthesis Cost: {formatCost(run.estimatedCost)}</span>
       {coverageStatus && <span>Coverage: {coverageStatus}</span>}
     </div>
   );
@@ -163,7 +168,9 @@ function SynthesisFailedPanel({ run, onRetry }: { run: SynthesisRunSummary; onRe
       <span>Progress reached: {run.overallProgress}%</span>
       <span>Duration: {minutes != null ? `${minutes} min` : "—"}</span>
       {lastHeartbeatSecondsBeforeFailure != null && <span>Last heartbeat: {lastHeartbeatSecondsBeforeFailure}s before failure</span>}
-      {run.estimatedCost != null && <span>Cost so far: {formatCost(run.estimatedCost)}</span>}
+      {/* "incurred" (not "so far") — this run is terminal; whatever was last persisted before
+          failure is the final cost, not a still-updating live figure. */}
+      {run.estimatedCost != null && <span>Cost incurred: {formatCost(run.estimatedCost)}</span>}
       <span>Safe error: {run.sanitizedError ?? "Unknown error."}</span>
       <button onClick={onRetry}>Retry Synthesis</button>
     </div>

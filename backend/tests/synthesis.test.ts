@@ -10,6 +10,7 @@ import { synthesizePlaybook } from "../src/synthesis/playbook.js";
 import { synthesizeDecisionFramework } from "../src/synthesis/decisionFramework.js";
 import { runSynthesis } from "../src/synthesis/runSynthesis.js";
 import { computeSourceAnalysisHash } from "../src/synthesis/fingerprint.js";
+import { CANONICAL_STRATEGY_THINKING_LEVEL } from "../src/synthesis/limits.js";
 import { SynthesisSchemaValidationError, SynthesisGeminiCallError } from "../src/synthesis/errors.js";
 import { callGeminiForStage } from "../src/synthesis/geminiStage.js";
 import { classifyError } from "../src/pipeline/errorClassification.js";
@@ -262,8 +263,11 @@ function validRawCanonicalStrategyJson(overrides: Record<string, unknown> = {}) 
             classification: "explicit",
             supportLevel: "MULTI_SOURCE",
             supportCount: 2,
-            sources: [{ lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e" }],
-            conflictSources: [],
+            // "s1" is the reference key keySourceData assigns to makeInstance()'s
+            // single default entry_rules[0] — see canonicalStrategy.ts's v4
+            // sourceKeys wire format (schema.ts's changelog).
+            sourceKeys: ["s1"],
+            conflictSourceKeys: [],
           },
         ],
       },
@@ -291,6 +295,52 @@ describe("synthesis/canonicalStrategy", () => {
     expect(canonicalStrategy.name).toBe("Break & Retest");
     expect(canonicalStrategy.entryRules[0].supportLevel).toBe("MULTI_SOURCE");
     expect(returnedUsage).toEqual(usage);
+  });
+
+  it("passes options.thinkingLevel through to generateStructured's 5th param, and omits it (server default) when not given", async () => {
+    const generateStructured = vi.fn(async () => ({ text: validRawCanonicalStrategyJson(), usage }));
+    const gemini = makeGemini({ generateStructured });
+    const cluster: ClusterProposal = {
+      clusterKey: "br",
+      proposedCanonicalName: "Break & Retest",
+      memberInstanceIds: [1],
+      similarityRationale: "r",
+      differencesNotes: "",
+    };
+
+    await synthesizeCanonicalStrategy({ gemini, model: "m" }, cluster, [makeInstance()]);
+    expect(generateStructured).toHaveBeenLastCalledWith(expect.any(String), "m", expect.any(Object), expect.any(Number), undefined);
+
+    await synthesizeCanonicalStrategy({ gemini, model: "m" }, cluster, [makeInstance()], { thinkingLevel: "low" });
+    expect(generateStructured).toHaveBeenLastCalledWith(expect.any(String), "m", expect.any(Object), expect.any(Number), "low");
+  });
+
+  it("tags every source rule in the prompt with a reference key and instructs Gemini to cite keys, not restate evidence/timestamps", async () => {
+    let capturedPrompt = "";
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        capturedPrompt = prompt;
+        return { text: validRawCanonicalStrategyJson(), usage };
+      }),
+    });
+    const cluster: ClusterProposal = {
+      clusterKey: "br",
+      proposedCanonicalName: "Break & Retest",
+      memberInstanceIds: [1],
+      similarityRationale: "r",
+      differencesNotes: "",
+    };
+
+    await synthesizeCanonicalStrategy({ gemini, model: "m" }, cluster, [makeInstance()]);
+
+    // The single default entry rule is tagged with reference key "s1" ...
+    expect(capturedPrompt).toContain('"key": "s1"');
+    // ... and its own evidence/timestamp still appear as INPUT (Gemini needs
+    // to read them to reason), but the instructions steer output toward
+    // citing the key instead of restating them.
+    expect(capturedPrompt).toContain('"evidence": "e"');
+    expect(capturedPrompt).toContain("sourceKeys");
+    expect(capturedPrompt).toContain("Do NOT restate lessonId, timestamps, or evidence text yourself");
   });
 });
 
@@ -458,6 +508,46 @@ describe("synthesis/runSynthesis (end-to-end orchestration)", () => {
     }
   });
 
+  it("passes thinkingLevel=\"low\" ONLY to canonical_strategy's Gemini call — every other stage omits it entirely, preserving the server default", async () => {
+    const clusterJson = JSON.stringify({
+      clusters: [{ clusterKey: "br", proposedCanonicalName: "Break & Retest", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" }],
+    });
+    const thinkingLevelByStage: Record<string, unknown> = {};
+    const generateStructured = vi.fn(async (prompt: string, _model: string, _schema: object, _maxOutputTokens?: number, thinkingLevel?: unknown) => {
+      if (prompt.includes("clustering trading-strategy instances")) {
+        thinkingLevelByStage.cluster_chunk = thinkingLevel;
+        return { text: clusterJson, usage };
+      }
+      if (prompt.includes("synthesizing ONE canonical trading strategy")) {
+        thinkingLevelByStage.canonical_strategy = thinkingLevel;
+        return { text: validRawCanonicalStrategyJson(), usage };
+      }
+      if (prompt.includes("Core Trading Framework")) {
+        thinkingLevelByStage.core_framework = thinkingLevel;
+        return { text: validCoreFrameworkJson(), usage };
+      }
+      if (prompt.includes("Comprehensive Trading Playbook")) {
+        thinkingLevelByStage.playbook = thinkingLevel;
+        return { text: validPlaybookJson(), usage };
+      }
+      thinkingLevelByStage.decision_framework = thinkingLevel;
+      return { text: validDecisionFrameworkJson(), usage };
+    });
+    const gemini = makeGemini({ generateStructured });
+
+    await runSynthesis(
+      { gemini, model: "m" },
+      { courseTitle: "Trading Accelerator", instances: [makeInstance()], lessons: [{ id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" }], noStandaloneSetupLessonIds: [] },
+    );
+
+    expect(CANONICAL_STRATEGY_THINKING_LEVEL).toBe("low");
+    expect(thinkingLevelByStage.canonical_strategy).toBe(CANONICAL_STRATEGY_THINKING_LEVEL);
+    expect(thinkingLevelByStage.cluster_chunk).toBeUndefined();
+    expect(thinkingLevelByStage.core_framework).toBeUndefined();
+    expect(thinkingLevelByStage.playbook).toBeUndefined();
+    expect(thinkingLevelByStage.decision_framework).toBeUndefined();
+  });
+
   it("reports no coverage gap when every lesson taught a standalone setup", async () => {
     const gemini = makeGemini({
       generateStructured: vi.fn(async (prompt: string) => {
@@ -574,10 +664,36 @@ describe("pipeline/errorClassification unwraps SynthesisGeminiCallError", () => 
 });
 
 describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
+  // Plain default rule content (makeStrategy()'s single entry_rules[0]) —
+  // keySourceData assigns "s1" to member 1's rule and "s2" to member 2's
+  // rule (both members' first non-empty category is entry_rules, so
+  // counting proceeds member-by-member in that order).
   const members: StrategyInstanceRecord[] = [
     makeInstance({ strategyInstanceId: 1, lessonId: 10, lessonTitle: "Break and Retest Basics" }),
     makeInstance({ strategyInstanceId: 2, lessonId: 20, lessonTitle: "Advanced Retests" }),
   ];
+
+  // Same shape, but with DISTINCT entry-rule evidence/timestamps per member
+  // — needed to prove resolveSourceKeys actually threads through the right
+  // per-instance data rather than coincidentally returning identical values.
+  const distinctMembers: StrategyInstanceRecord[] = [
+    makeInstance({
+      strategyInstanceId: 1,
+      lessonId: 10,
+      lessonTitle: "Break and Retest Basics",
+      strategy: makeStrategy({
+        entry_rules: [{ description: "Enter on retest", classification: "explicit", confidence: 0.9, start_timestamp: "1:00", end_timestamp: null, evidence: "e1" }],
+      }),
+    }),
+    makeInstance({
+      strategyInstanceId: 2,
+      lessonId: 20,
+      lessonTitle: "Advanced Retests",
+      strategy: makeStrategy({
+        entry_rules: [{ description: "Enter on retest", classification: "explicit", confidence: 0.9, start_timestamp: "2:00", end_timestamp: null, evidence: "e2" }],
+      }),
+    }),
+  ]; // -> s1: lesson 10/instance 1/"1:00"/"e1", s2: lesson 20/instance 2/"2:00"/"e2"
 
   function rawStrategy(overrides: Partial<RawCanonicalStrategy> = {}): RawCanonicalStrategy {
     return {
@@ -601,61 +717,59 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
       classification: "explicit" as const,
       supportLevel: "MULTI_SOURCE" as const,
       supportCount: 2,
-      sources: [],
-      conflictSources: [],
+      sourceKeys: [] as string[],
+      conflictSourceKeys: [] as string[],
       ...overrides,
     };
   }
 
-  it("reattaches lessonTitle and strategyInstanceId to every rule source from already-known member data, never fabricated", () => {
-    const raw = rawStrategy({
-      sections: [
-        {
-          category: "entryRules",
-          rules: [
-            rawRule({
-              sources: [
-                { lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e1" },
-                { lessonId: 20, startTimestamp: "2:00", endTimestamp: null, evidence: "e2" },
-              ],
-            }),
-          ],
-        },
-      ],
-    });
+  it("resolves lessonTitle/strategyInstanceId/timestamps/evidence for every cited sourceKey from already-known member data, never fabricated", () => {
+    const raw = rawStrategy({ sections: [{ category: "entryRules", rules: [rawRule({ sourceKeys: ["s1", "s2"] })] }] });
 
-    const enriched = enrichCanonicalStrategy(raw, members);
+    const enriched = enrichCanonicalStrategy(raw, distinctMembers);
     expect(enriched.entryRules[0].sources).toEqual([
       { lessonId: 10, lessonTitle: "Break and Retest Basics", strategyInstanceId: 1, startTimestamp: "1:00", endTimestamp: null, evidence: "e1" },
       { lessonId: 20, lessonTitle: "Advanced Retests", strategyInstanceId: 2, startTimestamp: "2:00", endTimestamp: null, evidence: "e2" },
     ]);
   });
 
-  it("leaves strategyInstanceId null when a lesson contributed more than one instance to the cluster, rather than guessing", () => {
+  it("drops a sourceKey Gemini invented (not present in the prompt's own data) rather than fabricating a source for it", () => {
+    const raw = rawStrategy({ sections: [{ category: "entryRules", rules: [rawRule({ sourceKeys: ["s1", "s999"] })] }] });
+    const enriched = enrichCanonicalStrategy(raw, distinctMembers);
+    expect(enriched.entryRules[0].sources).toEqual([
+      { lessonId: 10, lessonTitle: "Break and Retest Basics", strategyInstanceId: 1, startTimestamp: "1:00", endTimestamp: null, evidence: "e1" },
+    ]);
+  });
+
+  it("resolves strategyInstanceId exactly even when a lesson contributed more than one instance to the cluster — a rule-level key has no ambiguity to guess at", () => {
     const ambiguousMembers: StrategyInstanceRecord[] = [
-      makeInstance({ strategyInstanceId: 1, lessonId: 10, lessonTitle: "Multi-Strategy Lesson" }),
-      makeInstance({ strategyInstanceId: 2, lessonId: 10, lessonTitle: "Multi-Strategy Lesson" }),
-    ];
+      makeInstance({
+        strategyInstanceId: 1,
+        lessonId: 10,
+        lessonTitle: "Multi-Strategy Lesson",
+        strategy: makeStrategy({ entry_rules: [{ description: "Rule A", classification: "explicit", confidence: 0.9, start_timestamp: "1:00", end_timestamp: null, evidence: "eA" }] }),
+      }),
+      makeInstance({
+        strategyInstanceId: 2,
+        lessonId: 10,
+        lessonTitle: "Multi-Strategy Lesson",
+        strategy: makeStrategy({ entry_rules: [{ description: "Rule B", classification: "explicit", confidence: 0.9, start_timestamp: "5:00", end_timestamp: null, evidence: "eB" }] }),
+      }),
+    ]; // -> s1: instance 1's rule, s2: instance 2's rule (same lessonId=10 for both)
     const raw = rawStrategy({
       sourceLessonIds: [10],
-      sections: [
-        {
-          category: "setup",
-          rules: [
-            rawRule({
-              description: "Setup rule",
-              supportLevel: "SINGLE_SOURCE",
-              supportCount: 1,
-              sources: [{ lessonId: 10, startTimestamp: null, endTimestamp: null, evidence: "e" }],
-            }),
-          ],
-        },
-      ],
+      sections: [{ category: "setup", rules: [rawRule({ description: "Setup rule", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["s2"] })] }],
     });
 
     const enriched = enrichCanonicalStrategy(raw, ambiguousMembers);
-    expect(enriched.setup[0].sources[0].strategyInstanceId).toBeNull();
-    expect(enriched.setup[0].sources[0].lessonTitle).toBe("Multi-Strategy Lesson");
+    expect(enriched.setup[0].sources[0]).toEqual({
+      lessonId: 10,
+      lessonTitle: "Multi-Strategy Lesson",
+      strategyInstanceId: 2,
+      startTimestamp: "5:00",
+      endTimestamp: null,
+      evidence: "eB",
+    });
   });
 
   it("defaults every rule category Gemini didn't mention to an empty array, never fabricated", () => {
@@ -681,37 +795,20 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
 
   it("preserves unresolved conflicts with full reattached source provenance on both sides", () => {
     const raw = rawStrategy({
-      conflicts: [
-        {
-          description: "One source says enter immediately, another waits for confirmation.",
-          sources: [
-            { lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "enter immediately" },
-            { lessonId: 20, startTimestamp: "3:00", endTimestamp: null, evidence: "wait for confirmation" },
-          ],
-        },
-      ],
+      conflicts: [{ description: "One source says enter immediately, another waits for confirmation.", sourceKeys: ["s1", "s2"] }],
     });
 
-    const enriched = enrichCanonicalStrategy(raw, members);
+    const enriched = enrichCanonicalStrategy(raw, distinctMembers);
     expect(enriched.conflicts).toHaveLength(1);
     expect(enriched.conflicts[0].description).toBe(raw.conflicts[0].description);
     expect(enriched.conflicts[0].sources).toEqual([
-      { lessonId: 10, lessonTitle: "Break and Retest Basics", strategyInstanceId: 1, startTimestamp: "1:00", endTimestamp: null, evidence: "enter immediately" },
-      { lessonId: 20, lessonTitle: "Advanced Retests", strategyInstanceId: 2, startTimestamp: "3:00", endTimestamp: null, evidence: "wait for confirmation" },
+      { lessonId: 10, lessonTitle: "Break and Retest Basics", strategyInstanceId: 1, startTimestamp: "1:00", endTimestamp: null, evidence: "e1" },
+      { lessonId: 20, lessonTitle: "Advanced Retests", strategyInstanceId: 2, startTimestamp: "2:00", endTimestamp: null, evidence: "e2" },
     ]);
   });
 
   it("end-to-end: synthesizeCanonicalStrategy enriches Gemini's raw response and still validates against the full, unchanged CanonicalStrategySchema", async () => {
-    const rawJson = JSON.stringify(
-      rawStrategy({
-        sections: [
-          {
-            category: "entryRules",
-            rules: [rawRule({ sources: [{ lessonId: 10, startTimestamp: "1:00", endTimestamp: null, evidence: "e" }] })],
-          },
-        ],
-      }),
-    );
+    const rawJson = JSON.stringify(rawStrategy({ sections: [{ category: "entryRules", rules: [rawRule({ sourceKeys: ["s1"] })] }] }));
     const gemini = makeGemini({ generateStructured: vi.fn(async () => ({ text: rawJson, usage })) });
     const cluster: ClusterProposal = {
       clusterKey: "br",
@@ -724,7 +821,8 @@ describe("synthesis/canonicalStrategy enrichCanonicalStrategy", () => {
     const { canonicalStrategy } = await synthesizeCanonicalStrategy({ gemini, model: "m" }, cluster, members);
 
     // The persisted, validated shape carries the full rich provenance — lessonTitle and
-    // strategyInstanceId — even though Gemini itself was never asked to restate them.
+    // strategyInstanceId — even though Gemini itself was never asked to restate them,
+    // only to cite the reference key ("s1") of the source rule it drew on.
     expect(canonicalStrategy.entryRules[0].sources[0]).toEqual({
       lessonId: 10,
       lessonTitle: "Break and Retest Basics",

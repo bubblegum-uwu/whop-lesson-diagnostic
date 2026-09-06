@@ -239,75 +239,97 @@ export const CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA = {
 
 // ---- Stage 3 raw wire format ------------------------------------------------
 //
-// v2 (the previous shape here) asked Gemini for 11 separate sibling arrays
-// — one per rule category — each an array of the full nested rule/source
-// shape. A real-Gemini smoke test (tests/synthesisRealApiSmoke.test.ts)
-// confirmed that schema IS rejected with a 400 by the actual API, not just
-// a theoretical risk. Because these 11 properties are written out as
+// v2 (superseded): asked Gemini for 11 separate sibling arrays — one per
+// rule category — each an array of the full nested rule/source shape. A
+// real-Gemini smoke test (tests/synthesisRealApiSmoke.test.ts) confirmed
+// that schema IS rejected with a 400 by the actual API, not just a
+// theoretical risk. Because these 11 properties are written out as
 // separate JSON Schema object literals (JSON has no $ref-sharing on the
 // wire — each of the 11 is a full independent copy when serialized), the
 // v2 schema included roughly 11x more copies of the same deeply nested
-// rule/source shape than necessary. v3 collapses them into a SINGLE
-// `sections` array, each entry tagged with which of the 11 categories it
-// belongs to — the same information, restructured so the nested rule shape
-// appears exactly once in the schema instead of eleven times. This has not
-// itself been re-verified against the real API in this environment (no
-// Gemini API key available here) — see the PR for the exact command to
-// confirm it, and tests/synthesisRealApiSmoke.test.ts's bisection ladder
-// for isolating exactly which structural factor (duplication count, nested
-// depth, sources vs conflictSources, enums) was actually responsible.
+// rule/source shape than necessary.
 //
-// Every rule's `sources`/`conflictSources` still only need lessonId +
-// timestamps + evidence; lessonTitle and strategyInstanceId — already
-// known for every member of this cluster — are filled in deterministically
-// by canonicalStrategy.ts's enrichment step, same as v2. No provenance,
-// conflict, or persisted field is dropped by any of this — only how
-// Gemini's own output is grouped changed; the final, persisted
-// CanonicalStrategy shape/CanonicalStrategySchema above is untouched.
-
-const rawSourceRefJsonSchema = {
-  type: "object",
-  properties: {
-    lessonId: { type: "number" },
-    startTimestamp: { type: "string" },
-    endTimestamp: { type: "string" },
-    evidence: { type: "string" },
-  },
-  required: ["lessonId", "evidence"],
-};
-
-export const RawSourceRefSchema = z.object({
-  lessonId: z.number(),
-  startTimestamp: nullableString(),
-  endTimestamp: nullableString(),
-  evidence: z.string(),
-});
-export type RawSourceRef = z.infer<typeof RawSourceRefSchema>;
+// v3 (superseded for sources/conflictSources — see v4 below): collapsed
+// the 11 sibling arrays into a SINGLE `sections` array, each entry tagged
+// with which of the 11 categories it belongs to — the same information,
+// restructured so the nested rule shape appears exactly once in the schema
+// instead of eleven times. Every rule's `sources`/`conflictSources` still
+// asked Gemini to RESTATE lessonId + timestamps + evidence text per source
+// citation (only lessonTitle/strategyInstanceId were already elided,
+// filled in deterministically afterward).
+//
+// v4 (current) — root-cause fix for real output-token amplification, not
+// just a bigger budget: a real diagnostic run against the actual first
+// production cluster ("Break and Retest (B&R) with Key Levels and Order
+// Blocks", a ONE-MEMBER cluster) showed canonical_strategy producing
+// output_tokens=31032/thinking_tokens=17222 against a 32768-token budget —
+// abnormally large for a single lesson's already-known rules. Root cause:
+// every source citation required Gemini to RE-EMIT evidence text (a
+// quoted sentence, potentially tens of tokens) that was ALREADY present,
+// verbatim, in the prompt's input (see gemini/schema.ts's RuleSchema —
+// every original Stage-1 rule already carries its own lessonId/
+// timestamps/evidence). Gemini was being asked to copy text it had
+// already read back out as generated output, once per source citation,
+// for potentially every synthesized rule.
+//
+// v4 assigns each individual ORIGINAL Stage-1 rule (across all of a
+// cluster's members) a short, stable reference "key" (e.g. "s7") when
+// building the prompt (see canonicalStrategy.ts's keySourceData) — Gemini
+// now cites WHICH original rule(s) support a synthesized rule via
+// "sourceKeys"/"conflictSourceKeys" (short string arrays) instead of
+// restating lessonId, timestamps, and evidence per citation. Application
+// code (canonicalStrategy.ts's enrichCanonicalStrategy) resolves each key
+// back to the exact lessonId/strategyInstanceId/timestamps/evidence using
+// data already known BEFORE the Gemini call — never re-derived, never
+// fabricated. This also makes strategyInstanceId attribution exact in
+// every case (previously left null when a lesson contributed more than
+// one instance to a cluster, since lessonId alone was ambiguous — a key
+// now points at one specific instance's one specific rule, so there's
+// nothing to disambiguate).
+//
+// No provenance, conflict, or persisted field is dropped by any of this —
+// only how Gemini's own output cites its sources changed; the final,
+// persisted CanonicalStrategy shape/CanonicalStrategySchema above is
+// completely untouched, and still carries the full SourceRef object
+// (lessonId/lessonTitle/strategyInstanceId/timestamps/evidence) for every
+// rule and conflict.
 
 const rawSynthesizedRuleJsonSchema = {
-  ...synthesizedRuleJsonSchema,
+  type: "object",
   properties: {
-    ...synthesizedRuleJsonSchema.properties,
-    sources: { type: "array", items: rawSourceRefJsonSchema },
-    conflictSources: { type: "array", items: rawSourceRefJsonSchema },
+    description: { type: "string" },
+    classification: { type: "string", enum: ["explicit", "inferred", "visual", "synthesized"] },
+    supportLevel: {
+      type: "string",
+      enum: ["SINGLE_SOURCE", "MULTI_SOURCE", "REPEATED_EXPLICIT", "VARIANT", "CONFLICTING", "INFERRED"],
+    },
+    supportCount: { type: "integer" },
+    sourceKeys: { type: "array", items: { type: "string" } },
+    conflictSourceKeys: { type: "array", items: { type: "string" } },
   },
+  required: ["description", "classification", "supportLevel", "supportCount", "sourceKeys", "conflictSourceKeys"],
 };
 const rawSynthesizedRuleArray = { type: "array", items: rawSynthesizedRuleJsonSchema };
 
-export const RawSynthesizedRuleSchema = SynthesizedRuleSchema.extend({
-  sources: z.array(RawSourceRefSchema),
-  conflictSources: z.array(RawSourceRefSchema),
+export const RawSynthesizedRuleSchema = SynthesizedRuleSchema.omit({ sources: true, conflictSources: true }).extend({
+  /** Reference keys (e.g. "s7") into the original per-rule data Gemini was shown for this cluster's members — resolved to full SourceRef objects by canonicalStrategy.ts's enrichCanonicalStrategy. An unknown key is dropped defensively, never fabricated into a source. */
+  sourceKeys: z.array(z.string()),
+  conflictSourceKeys: z.array(z.string()),
 });
 export type RawSynthesizedRule = z.infer<typeof RawSynthesizedRuleSchema>;
 
 const rawConflictJsonSchema = {
-  ...conflictJsonSchema,
-  properties: { ...conflictJsonSchema.properties, sources: { type: "array", items: rawSourceRefJsonSchema } },
+  type: "object",
+  properties: {
+    description: { type: "string" },
+    sourceKeys: { type: "array", items: { type: "string" } },
+  },
+  required: ["description", "sourceKeys"],
 };
 
 export const RawConflictSchema = z.object({
   description: z.string().min(1),
-  sources: z.array(RawSourceRefSchema),
+  sourceKeys: z.array(z.string()),
 });
 export type RawConflict = z.infer<typeof RawConflictSchema>;
 

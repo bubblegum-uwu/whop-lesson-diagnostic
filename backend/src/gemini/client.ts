@@ -29,11 +29,33 @@ export class GeminiProcessingFailedError extends Error {
 }
 
 export class GeminiAnalysisError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** Set only for a structured-generation empty-response failure (see generateStructured) — analyzeVideo never sets this. */
+    public readonly diagnostics?: GeminiCompletionDiagnostics,
+  ) {
     super(message);
     this.name = "GeminiAnalysisError";
   }
 }
+
+/**
+ * The Interactions API's terminal-but-not-successful statuses (see
+ * `@google/genai`'s `InteractionStatus`) — a response in one of these
+ * states must never be handed to JSON.parse, since its `output_text` can
+ * be partial, stale, or entirely absent. Thrown by generateStructured()
+ * BEFORE any parsing is attempted, carrying only safe shape diagnostics
+ * (never the response text itself) so callers can tell "cut off by an
+ * output-token budget" apart from "the model returned something, but it
+ * wasn't JSON."
+ */
+export type GeminiIncompleteStatus = "failed" | "cancelled" | "incomplete" | "budget_exceeded";
+const INCOMPLETE_INTERACTION_STATUSES: ReadonlySet<string> = new Set<GeminiIncompleteStatus>([
+  "failed",
+  "cancelled",
+  "incomplete",
+  "budget_exceeded",
+]);
 
 export interface GeminiUsage {
   inputTokens: number | null;
@@ -41,10 +63,80 @@ export interface GeminiUsage {
   thinkingTokens: number | null;
 }
 
+/**
+ * Mirrors `@google/genai`'s `ThinkingLevel` for the Interactions API's
+ * `generation_config.thinking_level` — confirmed present on the SDK's own
+ * `GenerationConfig` type (genai.d.ts). Optional and unset by default
+ * everywhere in this codebase (see synthesis/geminiStage.ts): omitting it
+ * preserves whatever the server-side default is (observed as "medium" for
+ * gemini-3.8-flash), so adding this plumbing does not by itself change any
+ * stage's behavior. Exists so canonical_strategy specifically can be
+ * experimentally run at a lower thinking level (see
+ * scripts/canonicalStrategyDiagnostic.ts's variant support) without
+ * globally lowering thinking for every synthesis stage.
+ */
+export type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
+
+/**
+ * Safe, content-free shape signals about a structured-generation response —
+ * enough to distinguish truncation/emptiness/non-JSON-content from a
+ * genuine parse bug, without ever capturing the response text itself.
+ *
+ * `usage` is included here — not just on the success path's top-level
+ * result — specifically so it survives an INCOMPLETE/budget_exceeded
+ * failure too: Gemini's thinking tokens are billed as output and share the
+ * same max_output_tokens budget as the visible response (confirmed for
+ * this model family; see synthesis/limits.ts's changelog), so a truncated
+ * response with a small outputChars count but a large thinkingTokens count
+ * is exactly the signature of "the budget went almost entirely to
+ * thinking." Without usage on the failure path, that signature would be
+ * invisible — which is exactly what happened on the first real diagnostic
+ * run this repo saw: output_chars=1990 for a 4096-token budget, with no
+ * token counts to explain where the rest of the budget went.
+ */
+export interface GeminiCompletionDiagnostics {
+  /** The Interactions API's `status` field verbatim (e.g. "completed", "incomplete", "budget_exceeded"). */
+  interactionStatus: string;
+  outputChars: number;
+  isEmpty: boolean;
+  startsWithOpenBrace: boolean;
+  endsWithCloseBrace: boolean;
+  hasMarkdownFence: boolean;
+  usage: GeminiUsage;
+}
+
+export class GeminiIncompleteInteractionError extends Error {
+  constructor(
+    public readonly interactionStatus: string,
+    public readonly diagnostics: GeminiCompletionDiagnostics,
+  ) {
+    super(`Gemini interaction ended with status "${interactionStatus}" — response was not used.`);
+    this.name = "GeminiIncompleteInteractionError";
+  }
+}
+
+export function computeCompletionDiagnostics(interactionStatus: string, text: string, usage: GeminiUsage): GeminiCompletionDiagnostics {
+  const trimmed = text.trim();
+  return {
+    interactionStatus,
+    outputChars: text.length,
+    isEmpty: text.length === 0,
+    startsWithOpenBrace: trimmed.startsWith("{"),
+    endsWithCloseBrace: trimmed.endsWith("}"),
+    hasMarkdownFence: trimmed.startsWith("```") || trimmed.includes("\n```"),
+    usage,
+  };
+}
+
 export interface AnalyzeVideoResult {
   /** The raw JSON text produced by the model (not yet schema-validated). */
   text: string;
   usage: GeminiUsage;
+}
+
+export interface GenerateStructuredResult extends AnalyzeVideoResult {
+  /** Optional only so a test fake GeminiClient can omit it without friction — the real client (createGeminiClient below) always populates it. */
+  diagnostics?: GeminiCompletionDiagnostics;
 }
 
 export interface GeminiClient {
@@ -57,8 +149,25 @@ export interface GeminiClient {
    * involved. Used by course-strategy synthesis (Phase 3.4), which
    * processes already-extracted structured JSON, never raw video, so it
    * deliberately never touches the video-specific methods above.
+   *
+   * `maxOutputTokens`, when provided, is passed through as the Interactions
+   * API's `generation_config.max_output_tokens` — an explicit, visible
+   * budget per synthesis stage (see synthesis/limits.ts) rather than
+   * leaving it unset and hoping the server default is enough for the
+   * richest stages.
+   *
+   * `thinkingLevel`, when provided, is passed through as
+   * `generation_config.thinking_level` — see GeminiThinkingLevel's doc
+   * comment. Optional and unused by every stage today; exists for
+   * canonical_strategy's experimental low-thinking variant.
    */
-  generateStructured(prompt: string, model: string, schema: object): Promise<AnalyzeVideoResult>;
+  generateStructured(
+    prompt: string,
+    model: string,
+    schema: object,
+    maxOutputTokens?: number,
+    thinkingLevel?: GeminiThinkingLevel,
+  ): Promise<GenerateStructuredResult>;
 }
 
 /** Extracts token usage from `Interaction.usage` — never a second Gemini call. */
@@ -185,22 +294,54 @@ export function createGeminiClient(apiKey: string): GeminiClient {
     }
   }
 
-  async function generateStructured(prompt: string, model: string, schema: object): Promise<AnalyzeVideoResult> {
+  async function generateStructured(
+    prompt: string,
+    model: string,
+    schema: object,
+    maxOutputTokens?: number,
+    thinkingLevel?: GeminiThinkingLevel,
+  ): Promise<GenerateStructuredResult> {
     try {
       const textContent: Interactions.TextContent = { type: "text", text: prompt };
+      const generationConfig =
+        maxOutputTokens != null || thinkingLevel != null
+          ? {
+              generation_config: {
+                ...(maxOutputTokens != null ? { max_output_tokens: maxOutputTokens } : {}),
+                ...(thinkingLevel != null ? { thinking_level: thinkingLevel } : {}),
+              },
+            }
+          : {};
       const interaction = await ai.interactions.create({
         model,
         input: [textContent],
         response_format: { type: "text", mime_type: "application/json", schema },
+        ...generationConfig,
       });
 
-      const text = extractOutputText(interaction);
-      if (!text) {
-        throw new GeminiAnalysisError("Gemini returned an empty response.");
+      const text = extractOutputText(interaction) ?? "";
+      const usage = extractUsage(interaction);
+      const diagnostics = computeCompletionDiagnostics(interaction.status, text, usage);
+
+      // Checked BEFORE emptiness/parsing — an interaction in one of these
+      // states can have partial, stale, or missing output_text; feeding it
+      // to JSON.parse would misreport a completion-level failure as a
+      // generic "invalid JSON" one, losing exactly the signal (status)
+      // needed to tell truncation apart from a genuine malformed response.
+      // Usage is captured above BEFORE this check specifically so it's
+      // still visible even here — Gemini bills thinking tokens as output,
+      // sharing the same max_output_tokens budget as the visible response,
+      // so a truncated response's thinkingTokens count is often the real
+      // explanation for why outputChars looks small relative to the budget.
+      if (INCOMPLETE_INTERACTION_STATUSES.has(interaction.status)) {
+        throw new GeminiIncompleteInteractionError(interaction.status, diagnostics);
       }
-      return { text, usage: extractUsage(interaction) };
+      if (diagnostics.isEmpty) {
+        throw new GeminiAnalysisError("Gemini returned an empty response.", diagnostics);
+      }
+      return { text, usage, diagnostics };
     } catch (err) {
-      if (err instanceof GeminiAnalysisError) throw err;
+      if (err instanceof GeminiAnalysisError || err instanceof GeminiIncompleteInteractionError) throw err;
       throw new GeminiAnalysisError(
         `Gemini structured-generation request failed: ${err instanceof Error ? err.message : String(err)}`,
       );

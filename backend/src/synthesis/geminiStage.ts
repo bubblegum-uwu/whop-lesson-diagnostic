@@ -1,7 +1,9 @@
 import type { z } from "zod";
-import type { GeminiClient, GeminiUsage } from "../gemini/client.js";
+import type { GeminiClient, GeminiUsage, GeminiCompletionDiagnostics, GeminiThinkingLevel } from "../gemini/client.js";
+import { GeminiIncompleteInteractionError, GeminiAnalysisError } from "../gemini/client.js";
 import { SynthesisSchemaValidationError, SynthesisGeminiCallError } from "./errors.js";
 import { SYNTHESIS_SCHEMA_VERSION } from "./version.js";
+import { SYNTHESIS_MAX_OUTPUT_TOKENS, type SynthesisStageForLimits } from "./limits.js";
 
 export interface SynthesisStageDeps {
   gemini: GeminiClient;
@@ -18,6 +20,11 @@ function schemaIdFor(stage: string): string {
   return `${stage}_${SYNTHESIS_SCHEMA_VERSION}`;
 }
 
+/** The explicit max_output_tokens budget for a stage (see synthesis/limits.ts) — undefined for a stage name this map doesn't recognize, in which case the Interactions API's own server-side default applies, same as before this file existed. */
+function maxOutputTokensFor(stage: string): number | undefined {
+  return SYNTHESIS_MAX_OUTPUT_TOKENS[stage as SynthesisStageForLimits];
+}
+
 /**
  * Calls Gemini for one stage, with diagnostic context attached to any
  * failure. This is the ONLY place in the synthesis pipeline that calls
@@ -26,27 +33,44 @@ function schemaIdFor(stage: string): string {
  * GeminiAnalysisError with no indication of which stage was even running,
  * because nothing here caught it before it left this function. See
  * SynthesisGeminiCallError's own doc comment for the exact fields it adds.
+ *
+ * Also passes each stage's explicit max_output_tokens budget (synthesis/
+ * limits.ts) through to generateStructured(), and forwards
+ * GeminiIncompleteInteractionError's safe completion diagnostics into the
+ * thrown SynthesisGeminiCallError when the underlying failure carried them
+ * — never the response text itself.
+ *
+ * `thinkingLevel` is an optional passthrough (see GeminiThinkingLevel) —
+ * every current call site omits it, which preserves the server-side
+ * default exactly as before this parameter existed. It exists so
+ * canonical_strategy's experimental low-thinking variant (see
+ * canonicalStrategy.ts / scripts/canonicalStrategyDiagnostic.ts) can be
+ * tested without changing any other stage's behavior.
  */
 export async function callGeminiForStage(
   deps: SynthesisStageDeps,
   stage: string,
   prompt: string,
   jsonSchema: object,
-): Promise<{ rawText: string; usage: GeminiUsage }> {
+  thinkingLevel?: GeminiThinkingLevel,
+): Promise<{ rawText: string; usage: GeminiUsage; diagnostics: GeminiCompletionDiagnostics | undefined }> {
+  const maxOutputTokens = maxOutputTokensFor(stage);
   try {
-    const result = await deps.gemini.generateStructured(prompt, deps.model, jsonSchema);
-    return { rawText: result.text, usage: result.usage };
+    const result = await deps.gemini.generateStructured(prompt, deps.model, jsonSchema, maxOutputTokens, thinkingLevel);
+    return { rawText: result.text, usage: result.usage, diagnostics: result.diagnostics };
   } catch (err) {
-    throw new SynthesisGeminiCallError(stage, deps.model, schemaIdFor(stage), prompt.length, err);
+    const diagnostics =
+      err instanceof GeminiIncompleteInteractionError ? err.diagnostics : err instanceof GeminiAnalysisError ? err.diagnostics : undefined;
+    throw new SynthesisGeminiCallError(stage, deps.model, schemaIdFor(stage), prompt.length, err, maxOutputTokens, diagnostics);
   }
 }
 
-/** JSON.parse with stage-tagged error on failure — never logs the offending text. */
-export function parseStageJson(stage: string, rawText: string): unknown {
+/** JSON.parse with stage-tagged error on failure — never logs the offending text, but does attach safe completion diagnostics (output length, brace-matching, etc.) when the caller has them, so a parse failure can be told apart from truncation. */
+export function parseStageJson(stage: string, rawText: string, diagnostics?: GeminiCompletionDiagnostics): unknown {
   try {
     return JSON.parse(rawText);
   } catch {
-    throw new SynthesisSchemaValidationError(`Gemini did not return valid JSON for stage "${stage}".`, stage);
+    throw new SynthesisSchemaValidationError(`Gemini did not return valid JSON for stage "${stage}".`, stage, diagnostics);
   }
 }
 
@@ -78,8 +102,8 @@ export async function callStructuredStage<Schema extends z.ZodTypeAny>(
   jsonSchema: object,
   zodSchema: Schema,
 ): Promise<StageCallResult<z.infer<Schema>>> {
-  const { rawText, usage } = await callGeminiForStage(deps, stage, prompt, jsonSchema);
-  const parsed = parseStageJson(stage, rawText);
+  const { rawText, usage, diagnostics } = await callGeminiForStage(deps, stage, prompt, jsonSchema);
+  const parsed = parseStageJson(stage, rawText, diagnostics);
   const data = validateStageData(stage, parsed, zodSchema);
   return { data, usage };
 }
