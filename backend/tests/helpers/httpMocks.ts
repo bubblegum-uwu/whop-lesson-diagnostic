@@ -21,6 +21,7 @@ export function makeResponse(): RecordedResponse {
       recordedBody = body;
       return res;
     }),
+    end: vi.fn(() => res),
   } as unknown as Response;
 
   return { res, statusCode: () => recordedStatus, body: () => recordedBody };

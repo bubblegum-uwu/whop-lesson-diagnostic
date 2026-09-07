@@ -3,6 +3,7 @@
  * conventions as courseApi.ts: every call requires the operator's current
  * Whop access token as a bearer header.
  */
+import type { KnowledgeItemScope, NumericalValue } from "./courseApi";
 
 function authHeaders(accessToken: string): HeadersInit {
   return { Authorization: `Bearer ${accessToken}` };
@@ -66,6 +67,20 @@ export interface NoStandaloneSetupLesson {
   title: string;
 }
 
+/** Phase 3.5B — whether the FULL course is current v2/current-fingerprint before running production synthesis. Read-only/informational here; does not itself block POST /api/course/synthesize. */
+export interface SynthesisPreflight {
+  lessonCount: number;
+  latestSuccessfulAnalysisCount: number;
+  currentAnalysisCount: number;
+  staleAnalysisCount: number;
+  missingAnalysisCount: number;
+  staleLessonIds: number[];
+  staleLessonTitles: string[];
+  missingLessonIds: number[];
+  missingLessonTitles: string[];
+  ready: boolean;
+}
+
 export interface SynthesisStatus {
   course: { title: string } | null;
   counts: { totalLessons: number; analyzed: number; processing: number; queued: number; failed: number };
@@ -74,6 +89,7 @@ export interface SynthesisStatus {
   latestCompletedRun: SynthesisRunSummary | null;
   isOutOfDate: boolean;
   canSynthesizeNow: boolean;
+  preflight: SynthesisPreflight;
 }
 
 export async function getSynthesisStatus(backendUrl: string, accessToken: string): Promise<SynthesisStatus | null> {
@@ -110,6 +126,9 @@ export interface SourceRef {
 
 export type SupportLevel = "SINGLE_SOURCE" | "MULTI_SOURCE" | "REPEATED_EXPLICIT" | "VARIANT" | "CONFLICTING" | "INFERRED";
 
+/** Real-audit fix (Phase 3.5B v4) — WHY `scope` is null matters as much as the fact itself. See backend scopeBasis.ts. "VERIFIED_GLOBAL": every citation was scope-aware and none were scoped — trustworthy. "SCOPED": at least one citation was scoped — `scope` is their union. "UNVERIFIED": the rule cites no scope-aware evidence at all (e.g. only pre-3.5B per-lesson Strategy rules, never scope-tagged) — must never be treated as safely global even though `scope` is also null in this case. */
+export type ScopeBasis = "VERIFIED_GLOBAL" | "SCOPED" | "UNVERIFIED";
+
 export interface SynthesizedRule {
   description: string;
   classification: "explicit" | "inferred" | "visual" | "synthesized";
@@ -117,6 +136,13 @@ export interface SynthesizedRule {
   supportCount: number;
   sources: SourceRef[];
   conflictSources: SourceRef[];
+  /** Phase 3.5B — deterministically attached from whichever cited rich-knowledge source(s) support this rule; empty for a rule derived only from a pre-3.5B strategy-instance rule. */
+  exceptions: string[];
+  numericalValues: NumericalValue[];
+  /** The union of every cited source's scope — null when this rule carries no scope-bearing citation. */
+  scope: KnowledgeItemScope | null;
+  /** Real-audit fix (Phase 3.5B v4) — see ScopeBasis above. Optional so responses predating this field still type-check; absence should be treated the same as the backend's effectiveScopeBasis fallback (null scope = VERIFIED_GLOBAL, non-null = SCOPED). */
+  scopeBasis?: ScopeBasis;
 }
 
 export interface Conflict {
@@ -140,11 +166,27 @@ export interface CanonicalStrategy {
   invalidationRules: SynthesizedRule[];
   noTradeConditions: SynthesizedRule[];
   visualDiscretionaryRules: SynthesizedRule[];
+  /**
+   * Phase 3.5B — populated from strategy-scoped rich KnowledgeItems (see
+   * strategyScopeMapping.ts) drawn from ANY contributing lesson, not just
+   * this cluster's own strategy instances. Same SynthesizedRule shape as
+   * the 11 categories above.
+   */
+  riskManagementRules: SynthesizedRule[];
+  positionSizingRules: SynthesizedRule[];
+  scalingInRules: SynthesizedRule[];
+  scalingOutRules: SynthesizedRule[];
+  runnerManagementRules: SynthesizedRule[];
+  warnings: SynthesizedRule[];
+  instructorPreferences: SynthesizedRule[];
   variants: { description: string; sourceLessonIds: number[] }[];
   examples: { description: string; sourceLessonId: number }[];
   ambiguities: string[];
   conflicts: Conflict[];
+  /** Real-audit fix (Phase 3.5B) — lessons whose standalone strategy instance is a member of this cluster (taught the setup), computed deterministically. Distinct from `supportingKnowledgeLessonIds` below — see Source Index. */
   sourceLessonIds: number[];
+  /** Real-audit fix (Phase 3.5B) — lessons that contributed matched strategy-scoped supporting knowledge to this cluster WITHOUT necessarily teaching the standalone setup themselves. */
+  supportingKnowledgeLessonIds: number[];
 }
 
 export interface ClusterInfo {
@@ -192,7 +234,30 @@ export interface FrameworkCoverage {
   lessonsMissingSupportingKnowledgeExtraction: number;
   missingSupportingKnowledgeLessonIds: number[];
   missingSupportingKnowledgeLessonTitles: string[];
+  /** Phase 3.5B — human-readable labels of tracked knowledge dimensions (risk management, position sizing, psychology, etc.) with zero supporting evidence anywhere in the course; this, not lesson/strategy counts, now drives `status`. */
+  missingFrameworkDimensions: string[];
   coverageNote: string;
+}
+
+/** Real-audit fix (Phase 3.5B) — a signal fully independent of FrameworkCoverage.status: whether every distinct strategy name referenced by scope.strategies was resolved to a canonical-strategy cluster. Never infer one from the other's wording. */
+export interface StrategyScopeMappingSummary {
+  distinctRawNameCount: number;
+  matchedRawNameCount: number;
+  unmatchedRawNameCount: number;
+  matchedRawNames: string[];
+  unmatchedRawNames: string[];
+  totalStrategyScopedItemCount: number;
+  matchedItemCount: number;
+  unmatchedItemCount: number;
+  completeness: FrameworkCoverageStatus;
+}
+
+/** Real-audit fix (Phase 3.5B v3/v4) — a playbook section using absolute-claim language ("all"/"every"/"always"/"universal"/...) whose prose either contains a real scoped vocabulary term OR significantly overlaps a known non-global (SCOPED/UNVERIFIED) rule's own description (see universalSectionAudit.ts). Scanned across every section, not just "master_trading_checklist". Best-effort secondary check on top of the primary fix (playbook.ts restricting/annotating what Gemini is shown). */
+export interface UniversalSectionScopeLeak {
+  sectionKey: string;
+  matchedTerms: string[];
+  /** Real-audit fix (Phase 3.5B v4) — descriptions of non-global rules this section's prose significantly overlaps under absolute-claim language, even with zero literal vocabulary-term matches. */
+  matchedNonGlobalRules: string[];
 }
 
 export interface CoursePlaybook {
@@ -200,6 +265,8 @@ export interface CoursePlaybook {
   sections: PlaybookSection[];
   conflictsAndAmbiguities: Conflict[];
   frameworkCoverage: FrameworkCoverage;
+  strategyScopeMapping: StrategyScopeMappingSummary;
+  universalSectionScopeLeaks: UniversalSectionScopeLeak[];
 }
 
 export interface DecisionNode {
@@ -209,11 +276,19 @@ export interface DecisionNode {
   description: string | null;
   next: string[];
   branches: { label: string; next: string }[];
+  /** Real-audit fix (Phase 3.5B v3) — the pooled CoreFramework/canonical-strategy rule key(s) this node was actually built from; `scope` below is derived deterministically as the union of these keys' own already-known scope, never self-reported by Gemini (see decisionFramework.ts). */
+  sourceKeys: string[];
+  /** All arrays empty means this node's known scope carries no restriction; a non-empty array means it's conditioned on that restriction and must never sit on the unconditional path before strategy selection (see decisionScopeAudit.ts). Empty here does NOT by itself mean "safe to treat as global" — see `scopeBasis`. */
+  scope: KnowledgeItemScope;
+  /** Real-audit fix (Phase 3.5B v4) — see ScopeBasis above. A node can have an empty `scope` yet still be "UNVERIFIED" (built from citations with no scope-aware evidence at all), in which case it must be treated the same as a scoped node for gate-placement purposes. */
+  scopeBasis: ScopeBasis;
 }
 
 export interface DecisionFramework {
   nodes: DecisionNode[];
   readableSteps: string[];
+  /** Real-audit fix (Phase 3.5B v3) — deterministic post-check output: any entry here is a bug in the returned graph — either a scoped node structurally placed on the unconditional global path ("scoped_source"), or a substantive node citing no source at all ("ungrounded", never treated as global by default). Should be empty by construction. */
+  scopeLeaks: { nodeId: string; label: string; reason: "ungrounded" | "unverified_source" | "scoped_source"; scope: KnowledgeItemScope }[];
 }
 
 export interface CourseSynthesisData {
