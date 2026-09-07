@@ -2660,6 +2660,198 @@ describe("Real-audit v9 — conditional/subset/preference evidence language does
   });
 });
 
+/**
+ * Production incident fix — the FIRST real production synthesis failed at
+ * the playbook stage with assertMasterChecklistSourcesGlobal throwing on a
+ * rule ("Do not exit trades prematurely out of impatience during
+ * consolidation; hold positions strictly until either the predefined
+ * profit target or the stop loss is hit.", supportLevel=MULTI_SOURCE,
+ * distinctLessons=1) that coreFramework.ts had itself just classified
+ * VERIFIED_GLOBAL. Root cause: coreFramework.ts's buildRuleFromKeys checked
+ * each cited KnowledgeItem's own `statement` text for positive-proof
+ * language, while the backstop re-derived the same check from the rule's
+ * FINAL emitted `sources`, each carrying a DIFFERENT text field
+ * (`evidence`, the verbatim transcript quote) — a citation whose
+ * `statement` paraphrase says "every trade" but whose quoted `evidence`
+ * doesn't repeat that wording satisfies the first check and fails the
+ * second. Fix: coreFramework.ts's buildRuleFromKeys now runs a SECOND,
+ * source/evidence-based pass (scopeBasis.ts's
+ * finalizeScopeBasisFromEmittedSources — the exact same helper the
+ * backstop itself now calls) immediately after its existing statement-based
+ * check, so a rule can only leave CoreFramework VERIFIED_GLOBAL once BOTH
+ * checks agree. These tests reproduce the exact production failure shape
+ * end-to-end through extractCoreFramework, prove the rule is downgraded
+ * (never dropped) and excluded from the Master Trading Checklist, prove
+ * synthesis no longer throws for it, and prove a genuinely-verified rule
+ * (the course-wide 2R rule, with realistic matching evidence text) still
+ * reaches VERIFIED_GLOBAL and the checklist.
+ */
+describe("Production incident — a rule's FINAL emitted sources/evidence, not just its citations' statement text, must independently satisfy the VERIFIED_GLOBAL positive-proof gate before CoreFramework ever marks it VERIFIED_GLOBAL", () => {
+  async function buildCoreFrameworkFromSingleKnowledgeItem(item: ReturnType<typeof makeKnowledgeItem>) {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      { analysisId: 1, lessonId: 10, lessonTitle: "Lesson 10", knowledge: { summary: "s", knowledgeItems: [item], examples: [], conflictsAndAmbiguities: [] } },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "trade_management",
+                  title: "Trade Management",
+                  rules: [
+                    {
+                      description: "Do not exit trades prematurely out of impatience during consolidation; hold positions strictly until either the predefined profit target or the stop loss is hit.",
+                      classification: "explicit",
+                      supportLevel: "MULTI_SOURCE",
+                      supportCount: 1,
+                      sourceKeys: ["k1"],
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    return extractCoreFramework({ gemini, model: "m" }, [], [], [...normalized.globalItems, ...normalized.otherScopedItems]);
+  }
+
+  it("exact production failure shape: a MULTI_SOURCE rule with 1 distinct lesson, whose citation's `statement` carries positive-universal language but whose quoted `evidence` does not, ends up NOT VERIFIED_GLOBAL — never UNVERIFIED-crashing synthesis", async () => {
+    // statement paraphrases the rule as unconditional ("every trade"), but the actual quoted
+    // transcript evidence just describes the instructor's general point without that phrasing —
+    // exactly the field mismatch the production incident hit.
+    const item = makeKnowledgeItem({
+      statement: "Hold every trade until the profit target or stop loss is hit — do not exit early out of impatience.",
+      evidence: "Yeah, so during consolidation, you don't want to panic and close out early — just let it play out to target or stop.",
+      scope: emptyScope(),
+    });
+    const { coreFramework } = await buildCoreFrameworkFromSingleKnowledgeItem(item);
+    const rule = coreFramework.sections[0].rules[0];
+    expect(rule.scopeBasis).not.toBe("VERIFIED_GLOBAL");
+    expect(rule.scopeBasis).toBe("UNVERIFIED");
+    // The rule itself, its evidence, and its provenance are never dropped — only reclassified.
+    expect(rule.description).toBe(
+      "Do not exit trades prematurely out of impatience during consolidation; hold positions strictly until either the predefined profit target or the stop loss is hit.",
+    );
+    expect(rule.sources).toHaveLength(1);
+    expect(rule.sources[0].lessonId).toBe(10);
+  });
+
+  it("the downgraded rule is excluded from selectVerifiedGlobalCoreFrameworkRules / the Master Trading Checklist source pool", async () => {
+    const item = makeKnowledgeItem({
+      statement: "Hold every trade until the profit target or stop loss is hit — do not exit early out of impatience.",
+      evidence: "Just let it play out to target or stop, don't panic during consolidation.",
+      scope: emptyScope(),
+    });
+    const { coreFramework } = await buildCoreFrameworkFromSingleKnowledgeItem(item);
+    const { selectVerifiedGlobalCoreFrameworkRules, assertMasterChecklistSourcesGlobal, buildMasterTradingChecklistSection } = await import("../src/synthesis/runSynthesis.js");
+    const verifiedGlobalRules = selectVerifiedGlobalCoreFrameworkRules(coreFramework);
+    expect(verifiedGlobalRules).toHaveLength(0);
+    // The now-correctly-typed selection never trips the backstop, and the checklist correctly
+    // reports no genuinely course-wide principle was found rather than fabricating one.
+    expect(() => assertMasterChecklistSourcesGlobal(verifiedGlobalRules)).not.toThrow();
+    const section = buildMasterTradingChecklistSection(verifiedGlobalRules);
+    expect(section.content).toContain("No genuinely course-wide");
+  });
+
+  it("full runSynthesis(...) does not throw SynthesisInvariantError for the exact production failure shape — synthesis completes instead of failing at the playbook stage", async () => {
+    const item = makeKnowledgeItem({
+      statement: "Hold every trade until the profit target or stop loss is hit — do not exit early out of impatience.",
+      evidence: "Just let it play out to target or stop, don't panic during consolidation.",
+      scope: emptyScope(),
+    });
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      { analysisId: 1, lessonId: 10, lessonTitle: "Lesson 10", knowledge: { summary: "s", knowledgeItems: [item], examples: [], conflictsAndAmbiguities: [] } },
+    ];
+    const instance = makeInstance({ strategyInstanceId: 1, lessonId: 20, lessonTitle: "Break and Retest Lesson", strategyName: "Break and Retest", strategy: makeStrategy({ strategy_name: "Break and Retest" }) });
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("clustering trading-strategy instances")) {
+          return { text: JSON.stringify({ clusters: [{ clusterKey: "br", proposedCanonicalName: "Break and Retest", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" }] }), usage };
+        }
+        if (prompt.includes("synthesizing ONE canonical trading strategy")) {
+          return { text: rawCanonicalStrategyJson("Break and Retest"), usage };
+        }
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "trade_management",
+                  title: "Trade Management",
+                  rules: [
+                    {
+                      description: "Do not exit trades prematurely out of impatience during consolidation; hold positions strictly until either the predefined profit target or the stop loss is hit.",
+                      classification: "explicit",
+                      supportLevel: "MULTI_SOURCE",
+                      supportCount: 1,
+                      sourceKeys: ["k1"],
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        if (prompt.includes("Comprehensive Trading Playbook")) return { text: JSON.stringify({ title: "P", sections: [], conflictsAndAmbiguities: [] }), usage };
+        return { text: JSON.stringify({ nodes: [], readableSteps: [] }), usage };
+      }),
+    });
+
+    const input: RunSynthesisInput = {
+      courseTitle: "Trading Accelerator",
+      instances: [instance],
+      lessons: [
+        { id: 20, title: "Break and Retest Lesson", chapterTitle: null, sourceUrl: "https://x" },
+        { id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://y" },
+      ],
+      noStandaloneSetupLessonIds: [],
+      knowledgeSources,
+    };
+    const result = await runSynthesis({ gemini, model: "m" }, input);
+
+    // The production-shape rule must have been downgraded and excluded from the checklist, not
+    // silently dropped nor allowed to throw a SynthesisInvariantError partway through synthesis.
+    const coreRule = result.coreFramework.sections.flatMap((s) => s.rules).find((r) => r.description.startsWith("Do not exit trades prematurely"));
+    expect(coreRule).toBeDefined();
+    expect(coreRule!.scopeBasis).not.toBe("VERIFIED_GLOBAL");
+    const checklist = result.playbook.sections.find((s) => s.key === "master_trading_checklist");
+    expect(checklist!.content).not.toContain("Do not exit trades prematurely");
+  });
+
+  it("proof: a genuinely verified rule (the course-wide 2R rule) whose evidence text ALSO independently satisfies the positive-proof gate remains VERIFIED_GLOBAL and eligible for the Master Trading Checklist", async () => {
+    const item = makeKnowledgeItem({
+      statement: "Whenever you're trading, target at least a two R multiple.",
+      evidence: "Whenever you're trading, you always want to target at least a two R multiple — no exceptions.",
+      scope: emptyScope(),
+    });
+    const { coreFramework } = await buildCoreFrameworkFromSingleKnowledgeItem(item);
+    const rule = coreFramework.sections[0].rules[0];
+    expect(rule.scopeBasis).toBe("VERIFIED_GLOBAL");
+
+    const { selectVerifiedGlobalCoreFrameworkRules, assertMasterChecklistSourcesGlobal, buildMasterTradingChecklistSection } = await import("../src/synthesis/runSynthesis.js");
+    const verifiedGlobalRules = selectVerifiedGlobalCoreFrameworkRules(coreFramework);
+    expect(verifiedGlobalRules).toHaveLength(1);
+    expect(() => assertMasterChecklistSourcesGlobal(verifiedGlobalRules)).not.toThrow();
+    const section = buildMasterTradingChecklistSection(verifiedGlobalRules);
+    expect(section.content).toContain(rule.description);
+  });
+});
+
 describe("Real-audit v4, Proof 2 — the 2R rule resolves from real evidence, never forced to scope:null", () => {
   it("a 2R rule cited from an options/beginner-scoped KnowledgeItem preserves that exact scope and SCOPED basis through CoreFramework", async () => {
     const knowledgeSources: LessonKnowledgeSource[] = [
@@ -2998,7 +3190,16 @@ describe("Real-audit v5, Proof 2 (continued) — a VERIFIED_GLOBAL rule survives
           summary: "s",
           knowledgeItems: [
             // k1 — genuinely global: general expectancy/trade-management teaching with no restriction.
-            makeKnowledgeItem({ statement: "Whenever you're trading, target at least a two R multiple.", scope: emptyScope() }),
+            // evidence carries the same positive-universal wording as statement (a real
+            // transcript quote and its extracted paraphrase typically agree) — production
+            // incident fix: the final VERIFIED_GLOBAL gate now ALSO re-checks each source's own
+            // `evidence` text (see scopeBasis.ts's finalizeScopeBasisFromEmittedSources), not just
+            // the KnowledgeItem's `statement`, so a fixture's evidence must be realistic too.
+            makeKnowledgeItem({
+              statement: "Whenever you're trading, target at least a two R multiple.",
+              evidence: "Whenever you're trading, you want to target at least a two R multiple.",
+              scope: emptyScope(),
+            }),
             // k2 — scoped corroboration: the SAME principle, options/beginner-specific.
             makeKnowledgeItem({ statement: "Beginners trading options should target at least a two R multiple.", scope: emptyScope({ marketsOrInstruments: ["options"], traderProfiles: ["beginner"] }) }),
           ],
