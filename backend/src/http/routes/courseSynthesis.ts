@@ -50,11 +50,11 @@ async function computeCurrentSourceState(deps: CourseSynthesisRouteDeps, courseI
 
   // Phase 3.5B — reports whether the FULL course is current v2/current
   // fingerprint before a human decides to run production synthesis (see
-  // synthesis/preflight.ts). Read-only and additive to this response —
-  // does not itself change POST /api/course/synthesize's gating, which
-  // still uses the existing hash/force mechanism; the read-only real-data
-  // diagnostic (scripts/synthesisDiagnostic.ts) is the place that hard
-  // refuses to run against a stale/incomplete dataset.
+  // synthesis/preflight.ts). Consumed two ways: GET .../synthesis-status
+  // surfaces it read-only for the UI, and POST .../synthesize (below) hard
+  // refuses to create a synthesis_run when it isn't ready — the same
+  // readiness check the read-only diagnostic (scripts/synthesisDryRun.ts)
+  // already enforced, now also enforced on the production write path.
   const preflight = computeSynthesisPreflight(lessons, latestByLesson, deps.geminiModel);
 
   return { lessons, analysisIds, noStandaloneSetupLessons, hash, preflight };
@@ -176,6 +176,15 @@ interface SynthesizeBody {
  * for lesson analysis. Never blocks on the run actually finishing — this
  * always returns immediately, mirroring analysisJobs.ts's enqueue handler.
  * Never fires automatically: the only caller is this explicit user action.
+ *
+ * Final pre-merge safety fix — before any of that, refuses with 409
+ * "preflight_not_ready" (stale/missing counts+details included) when
+ * synthesis/preflight.ts's computeSynthesisPreflight reports the course
+ * isn't ready (a lesson has no usable analysis, or its latest analysis
+ * predates the current extractor version). No synthesis_run row is created
+ * and the worker Job is never triggered in that case — even with `force`,
+ * which only ever bypasses the unchanged-hash short-circuit below, never
+ * data readiness.
  */
 export function createSynthesizeHandler(deps: CourseSynthesisRouteDeps) {
   return async function synthesizeHandler(req: Request, res: Response): Promise<void> {
@@ -192,6 +201,28 @@ export function createSynthesizeHandler(deps: CourseSynthesisRouteDeps) {
     if (currentSource.analysisIds.length === 0) {
       res.status(409).json({
         error: { message: "No lessons have finished analysis yet — nothing to synthesize.", type: "nothing_to_synthesize" },
+      });
+      return;
+    }
+
+    // Final pre-merge safety fix — this is the SAME readiness check the read-only diagnostic
+    // (scripts/synthesisDryRun.ts) already enforces (see synthesis/preflight.ts), now also
+    // enforced here so production synthesis can never run against a course with a missing or
+    // stale (pre-current-extractor-version) lesson analysis. Must run BEFORE any synthesis_run
+    // row is created or worker synthesis is triggered — including when `force` is passed:
+    // `force` only bypasses the unchanged-hash short-circuit below, never data readiness.
+    if (!currentSource.preflight.ready) {
+      res.status(409).json({
+        error: {
+          message: "The course is not ready for synthesis — some lesson analyses are missing or stale. Re-analyze the listed lessons under the current extractor version before synthesizing.",
+          type: "preflight_not_ready",
+          staleAnalysisCount: currentSource.preflight.staleAnalysisCount,
+          missingAnalysisCount: currentSource.preflight.missingAnalysisCount,
+          staleLessonIds: currentSource.preflight.staleLessonIds,
+          staleLessonTitles: currentSource.preflight.staleLessonTitles,
+          missingLessonIds: currentSource.preflight.missingLessonIds,
+          missingLessonTitles: currentSource.preflight.missingLessonTitles,
+        },
       });
       return;
     }
