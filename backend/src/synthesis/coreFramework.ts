@@ -5,7 +5,7 @@ import { callGeminiForStage, parseStageJson, validateStageData, type SynthesisSt
 import type { StrategyInstanceRecord } from "./normalize.js";
 import type { KnowledgeItemRecord } from "./knowledgeNormalize.js";
 import { resolveKeys, type CitableFact } from "./sourceRegistry.js";
-import { aggregateScopeBasis, finalizeScopeBasis } from "./scopeBasis.js";
+import { aggregateScopeBasis, finalizeScopeBasis, finalizeScopeBasisFromEmittedSources } from "./scopeBasis.js";
 import {
   RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   RawCoreFrameworkSchema,
@@ -217,7 +217,30 @@ function buildRuleFromKeys(
     // distinct unscoped-evidence lesson IDs, or explicit positive universal
     // language), not merely the absence of a detected restriction — see
     // scopeBasis.ts's finalizeScopeBasis.
-    scopeBasis: finalizeScopeBasis(scopeBasis, raw.description, raw.supportLevel, unscopedEvidenceLessonIds, citationHadPositiveLanguage),
+    //
+    // Production incident fix — this first pass checks each cited
+    // KnowledgeItem's own `statement` text (via aggregateScopeBasis above).
+    // runSynthesis.ts's assertMasterChecklistSourcesGlobal backstop
+    // independently re-derives the same positive-proof inputs from this
+    // rule's FINAL emitted `sources` — each SourceRef's `evidence` (the
+    // verbatim transcript quote attached in buildKeyedPool above), a
+    // DIFFERENT field that does not always literally repeat the same
+    // wording as `statement`. The first production run hit exactly this
+    // gap: a rule passed the statement-based test here but failed the
+    // evidence-based test there, and only got caught by that backstop
+    // throwing a hard synthesis error. A second pass below, using the same
+    // shared helper the backstop itself calls, closes the gap at its
+    // origin — a rule can only leave this function VERIFIED_GLOBAL once it
+    // passes BOTH tests, so the backstop should never need to downgrade
+    // anything reaching it from here again. See
+    // scopeBasis.ts's finalizeScopeBasisFromEmittedSources for the full
+    // root-cause writeup.
+    scopeBasis: finalizeScopeBasisFromEmittedSources(
+      finalizeScopeBasis(scopeBasis, raw.description, raw.supportLevel, unscopedEvidenceLessonIds, citationHadPositiveLanguage),
+      raw.description,
+      raw.supportLevel,
+      sources,
+    ),
   };
 }
 

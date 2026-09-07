@@ -13,7 +13,7 @@ import { buildClusterCandidates, resolveStrategyScopeNames, type ScopeMappingRes
 import { SynthesisInvariantError } from "./errors.js";
 import { collectScopeVocabulary, collectNonGlobalRuleDescriptions } from "./frameworkScopeSplit.js";
 import { findPlaybookApplicabilityLeaks } from "./playbookApplicabilityAudit.js";
-import { effectiveScopeBasis, finalizeScopeBasis, containsExplicitPositiveUniversalLanguage, containsConditionalEvidenceLanguage } from "./scopeBasis.js";
+import { effectiveScopeBasis, finalizeScopeBasisFromEmittedSources } from "./scopeBasis.js";
 import type { KnowledgeItemScope } from "../gemini/schema.js";
 import type {
   CanonicalStrategy,
@@ -589,6 +589,19 @@ export function selectVerifiedGlobalCoreFrameworkRules(coreFramework: CoreFramew
  * aggregateScopeBasis's own v9 filter, so a rule whose sources are all
  * "a lot of people..."/"some people..." framing can't pass this
  * independent re-check by distinct lesson count alone.
+ *
+ * Production incident fix — this re-derivation is now the shared
+ * scopeBasis.ts helper `finalizeScopeBasisFromEmittedSources`, which
+ * coreFramework.ts's buildRuleFromKeys ALSO calls (as a second pass, right
+ * after its existing statement-based finalizeScopeBasis check) before ever
+ * marking a rule VERIFIED_GLOBAL. The first production synthesis run threw
+ * here because the origin and this backstop used two independently
+ * hand-written re-implementations that read different text fields
+ * (KnowledgeItem.statement vs. SourceRef.evidence) and could disagree —
+ * sharing one implementation removes that drift risk entirely. This
+ * function itself keeps throwing exactly as before: it is the backstop of
+ * last resort, not merely a warning, and must never be weakened or reduced
+ * to catching/suppressing the exception it raises.
  */
 export function assertMasterChecklistSourcesGlobal(rules: SynthesizedRule[]): void {
   for (const rule of rules) {
@@ -597,11 +610,9 @@ export function assertMasterChecklistSourcesGlobal(rules: SynthesizedRule[]): vo
         `Master Trading Checklist would include a non-VERIFIED_GLOBAL rule ("${rule.description}", scopeBasis=${rule.scopeBasis ?? "unset"}) — this must never happen, since the checklist is built exclusively from a VERIFIED_GLOBAL-only selection.`,
       );
     }
-    const lessonIds = rule.sources.filter((s) => !containsConditionalEvidenceLanguage(s.evidence)).map((s) => s.lessonId);
-    const citationHadPositiveLanguage = rule.sources.some((s) => containsExplicitPositiveUniversalLanguage(s.evidence));
-    if (finalizeScopeBasis("VERIFIED_GLOBAL", rule.description, rule.supportLevel, lessonIds, citationHadPositiveLanguage) !== "VERIFIED_GLOBAL") {
+    if (finalizeScopeBasisFromEmittedSources("VERIFIED_GLOBAL", rule.description, rule.supportLevel, rule.sources) !== "VERIFIED_GLOBAL") {
       throw new SynthesisInvariantError(
-        `Master Trading Checklist would include a rule marked VERIFIED_GLOBAL whose own emitted description/evidence fails the final restriction or positive-proof gate ("${rule.description}", supportLevel=${rule.supportLevel}, distinctLessons=${new Set(lessonIds).size}) — this must never happen; every VERIFIED_GLOBAL rule is required to pass finalizeScopeBasis, including its v8/v9 positive-proof requirement.`,
+        `Master Trading Checklist would include a rule marked VERIFIED_GLOBAL whose own emitted description/evidence fails the final restriction or positive-proof gate ("${rule.description}", supportLevel=${rule.supportLevel}, distinctLessons=${new Set(rule.sources.map((s) => s.lessonId)).size}) — this must never happen; every VERIFIED_GLOBAL rule is required to pass finalizeScopeBasis, including its v8/v9 positive-proof requirement.`,
       );
     }
   }

@@ -264,6 +264,65 @@ export function finalizeScopeBasis(
   return basis;
 }
 
+/**
+ * Production incident fix (Phase 3.5B, first production run) — the FIRST
+ * real production synthesis failed at the playbook stage with
+ * runSynthesis.ts's assertMasterChecklistSourcesGlobal backstop throwing on
+ * a rule ("Do not exit trades prematurely out of impatience during
+ * consolidation; hold positions strictly until either the predefined
+ * profit target or the stop loss is hit.", supportLevel=MULTI_SOURCE,
+ * distinctLessons=1) that coreFramework.ts's buildRuleFromKeys had itself
+ * just classified VERIFIED_GLOBAL moments earlier. Root cause: the two
+ * checkpoints re-derived `finalizeScopeBasis`'s positive-proof inputs from
+ * TWO DIFFERENT TEXT FIELDS on the same underlying citations —
+ * buildRuleFromKeys/aggregateScopeBasis reads each cited KnowledgeItem's
+ * own `statement` (the extracted claim text, e.g. a paraphrase that may
+ * itself say "every trade"), while assertMasterChecklistSourcesGlobal reads
+ * each resolved SourceRef's `evidence` (the verbatim transcript quote
+ * attached in coreFramework.ts's buildKeyedPool, which does not
+ * necessarily repeat the same wording). A citation can satisfy the
+ * positive-proof test against one field and fail it against the other —
+ * this is not a fluke, it is a structural inconsistency between two
+ * checkpoints nominally running "the same" gate.
+ *
+ * Fix: this function packages the SAME re-derivation
+ * assertMasterChecklistSourcesGlobal already performed (see below) as a
+ * reusable helper — filter `sources` for conditional/subset language,
+ * count distinct lessons, check for explicit positive language — so BOTH
+ * checkpoints call the exact same code against the exact same field
+ * (`SourceRef.evidence`, the rule's own FINAL emitted provenance) instead
+ * of two independently-written re-implementations that can silently drift.
+ * coreFramework.ts's buildRuleFromKeys now runs this as a SECOND,
+ * source-based pass immediately after its existing statement-based
+ * finalizeScopeBasis call — chaining is safe because finalizeScopeBasis
+ * only ever downgrades an already-VERIFIED_GLOBAL basis, never promotes —
+ * so a rule can only reach the playbook as VERIFIED_GLOBAL once it has
+ * passed BOTH the statement-based test at extraction time AND the
+ * evidence-based test the Master Checklist backstop independently applies.
+ * This closes the gap at its origin; assertMasterChecklistSourcesGlobal
+ * itself is UNCHANGED and remains the final backstop, not weakened or
+ * merely caught/suppressed.
+ *
+ * Always downgrades to UNVERIFIED, never SCOPED, never CONFLICTING's
+ * distinct handling changed: a rule reaching this function is by
+ * definition already VERIFIED_GLOBAL, which means aggregateScopeBasis's
+ * own `scope` union was null (SCOPED is a mutually exclusive outcome) —
+ * there is no real restricted-scope data to fall back on, and inventing
+ * one would violate "do not broaden or invent scope." UNVERIFIED is the
+ * only honest, conservative reclassification, matching finalizeScopeBasis's
+ * own long-standing contract.
+ */
+export function finalizeScopeBasisFromEmittedSources(
+  basis: ScopeBasis,
+  description: string,
+  supportLevel: string | undefined,
+  sources: { lessonId: number; evidence: string }[],
+): ScopeBasis {
+  const lessonIds = sources.filter((s) => !containsConditionalEvidenceLanguage(s.evidence)).map((s) => s.lessonId);
+  const citationHadPositiveLanguage = sources.some((s) => containsExplicitPositiveUniversalLanguage(s.evidence));
+  return finalizeScopeBasis(basis, description, supportLevel, lessonIds, citationHadPositiveLanguage);
+}
+
 export function unionScope(a: KnowledgeItemScope, b: KnowledgeItemScope): KnowledgeItemScope {
   const uniq = (arr: string[]) => [...new Set(arr)];
   return {
