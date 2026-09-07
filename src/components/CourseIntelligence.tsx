@@ -475,9 +475,9 @@ export function CourseIntelligence({ backendUrl, accessToken, connected }: Cours
 
       {data && (
         <>
-          <div className="course-toolbar ci-tabs">
+          <div className="ci-tabs">
             {TABS.map((tab) => (
-              <button key={tab} className={tab === activeTab ? "" : "link-button"} onClick={() => setActiveTab(tab)}>
+              <button key={tab} className={tab === activeTab ? "ci-tab active" : "ci-tab"} onClick={() => setActiveTab(tab)}>
                 {tab}
               </button>
             ))}

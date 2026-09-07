@@ -390,7 +390,7 @@ export default function App() {
     <Routes>
       <Route path="/" element={<LandingPage />} />
       <Route element={<AppShellLayout />}>
-        <Route path="/projects" element={<ProjectsPage />} />
+        <Route path="/projects" element={<ProjectsPage connected={courseState.connected} lessonCount={courseState.lessons.length} />} />
         <Route path="/usage" element={<UsagePage />} />
         <Route
           path="/projects/:projectId/sources"

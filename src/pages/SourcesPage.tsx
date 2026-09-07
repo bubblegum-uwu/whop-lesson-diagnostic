@@ -1,4 +1,5 @@
 import { ProjectHeader } from "./ProjectHeader";
+import { WhopIcon, YouTubeIcon, DiscordIcon } from "../components/ProviderIcons";
 import { DashboardSummary } from "../components/DashboardSummary";
 import { CourseTable, type CourseTableProps } from "../components/CourseTable";
 import { FindWhopUserId, type FindWhopUserIdState } from "../components/FindWhopUserId";
@@ -66,26 +67,35 @@ export function SourcesPage(props: SourcesPageProps) {
 
       <h2 className="knovera-section-title">Source Providers</h2>
       <div className="knovera-provider-grid">
-        <div className="knovera-provider-card operational">
+        <div className="kv-card knovera-provider-card operational">
           <div className="knovera-provider-card-top">
-            <h3>Whop</h3>
-            <span className="knovera-badge-operational">Operational</span>
+            <div className="knovera-provider-card-icon-row">
+              <WhopIcon className="knovera-provider-icon" />
+              <h3>Whop</h3>
+            </div>
+            <span className="kv-badge kv-badge-accent">Operational</span>
           </div>
           <p className="knovera-provider-desc">
             {props.courseTitle ?? "The Trading Accelerator"} — course lessons, synced and analyzed via Whop.
           </p>
         </div>
-        <div className="knovera-provider-card">
+        <div className="kv-card knovera-provider-card">
           <div className="knovera-provider-card-top">
-            <h3>YouTube</h3>
-            <span className="knovera-badge-soon">Coming Soon</span>
+            <div className="knovera-provider-card-icon-row">
+              <YouTubeIcon className="knovera-provider-icon" />
+              <h3>YouTube</h3>
+            </div>
+            <span className="kv-badge kv-badge-muted">Coming Soon</span>
           </div>
           <p className="knovera-provider-desc">Analyze a list of YouTube video URLs.</p>
         </div>
-        <div className="knovera-provider-card">
+        <div className="kv-card knovera-provider-card">
           <div className="knovera-provider-card-top">
-            <h3>Discord</h3>
-            <span className="knovera-badge-soon">Coming Soon</span>
+            <div className="knovera-provider-card-icon-row">
+              <DiscordIcon className="knovera-provider-icon" />
+              <h3>Discord</h3>
+            </div>
+            <span className="kv-badge kv-badge-muted">Coming Soon</span>
           </div>
           <p className="knovera-provider-desc">Analyze video shared in Discord posts/channels.</p>
         </div>
