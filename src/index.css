@@ -1210,3 +1210,491 @@ button:disabled {
 .synthesis-failed-panel button {
   margin-top: 0.5rem;
 }
+
+/* ==========================================================================
+   Phase 4A — Knovera product shell (landing, app nav, Projects/Sources/
+   Synthesis/Usage pages). Additive only — every rule above this point is
+   the pre-existing app and is untouched. Reuses the same dark palette
+   (#0f1115 background, #e7e9ee text, #2b2f3a borders, #7fd0ff accent)
+   rather than introducing a second visual language.
+   ========================================================================== */
+
+.knovera-shell {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.knovera-topnav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.75rem;
+  border-bottom: 1px solid #202430;
+  background: #0f1115;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.knovera-topnav-brand {
+  font-size: 1.05rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: #e7e9ee;
+  text-decoration: none;
+}
+
+.knovera-topnav-links {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.knovera-topnav-link {
+  color: #a7adba;
+  text-decoration: none;
+  font-size: 0.92rem;
+  font-weight: 500;
+  padding: 0.3rem 0;
+  border-bottom: 2px solid transparent;
+}
+
+.knovera-topnav-link:hover {
+  color: #e7e9ee;
+}
+
+.knovera-topnav-link.active {
+  color: #7fd0ff;
+  border-bottom-color: #7fd0ff;
+}
+
+.knovera-main {
+  flex: 1;
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 2rem 1.75rem 4rem;
+  box-sizing: border-box;
+}
+
+.knovera-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+/* ---- Landing ------------------------------------------------------------ */
+
+.knovera-landing {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(ellipse 900px 500px at 50% -10%, rgba(127, 208, 255, 0.12), transparent),
+    #0f1115;
+  padding: 3rem 1.5rem;
+  box-sizing: border-box;
+}
+
+.knovera-landing-inner {
+  max-width: 760px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.knovera-landing-mark {
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  background: linear-gradient(120deg, #7fd0ff, #cbb8ff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  margin-bottom: 1.5rem;
+}
+
+.knovera-landing-tagline {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #e7e9ee;
+  margin: 0 0 2rem;
+}
+
+.knovera-landing-hero {
+  font-size: clamp(1.5rem, 3.4vw, 2.35rem);
+  font-weight: 600;
+  line-height: 1.42;
+  color: #d4d8e0;
+  margin: 0 0 1.5rem;
+  letter-spacing: -0.01em;
+}
+
+.knovera-landing-support {
+  color: #8b91a0;
+  font-size: 1rem;
+  margin: 0 0 2.5rem;
+}
+
+.knovera-cta {
+  background: linear-gradient(120deg, #7fd0ff, #a7b8ff);
+  color: #0f1115;
+  border: none;
+  border-radius: 999px;
+  padding: 0.85rem 2.25rem;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 8px 30px -8px rgba(127, 208, 255, 0.45);
+}
+
+.knovera-cta:hover {
+  filter: brightness(1.05);
+}
+
+.knovera-cta-secondary {
+  background: #171a21;
+  color: #e7e9ee;
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  padding: 0.55rem 1.1rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.knovera-cta-secondary:hover:not(:disabled) {
+  border-color: #7fd0ff;
+  color: #7fd0ff;
+}
+
+.knovera-cta-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---- Projects ------------------------------------------------------------ */
+
+.knovera-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.knovera-page-header h1 {
+  margin: 0;
+}
+
+.knovera-project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 1.1rem;
+}
+
+.knovera-project-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  align-items: flex-start;
+  background: #14161b;
+  border: 1px solid #2b2f3a;
+  border-radius: 12px;
+  padding: 1.4rem;
+}
+
+.knovera-project-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 0.75rem;
+}
+
+.knovera-project-card-top h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.knovera-badge-type {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #7fbfe0;
+  background: #17232f;
+  border-radius: 999px;
+  padding: 0.25rem 0.65rem;
+  white-space: nowrap;
+}
+
+.knovera-badge-soon {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #e0c67f;
+  background: #332c17;
+  border-radius: 999px;
+  padding: 0.22rem 0.6rem;
+  white-space: nowrap;
+}
+
+.knovera-badge-operational {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #7fe0a0;
+  background: #17331f;
+  border-radius: 999px;
+  padding: 0.22rem 0.6rem;
+  white-space: nowrap;
+}
+
+/* ---- New Project dialog --------------------------------------------------- */
+
+.knovera-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(6, 7, 10, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1.5rem;
+}
+
+.knovera-dialog {
+  background: #171a21;
+  border: 1px solid #2b2f3a;
+  border-radius: 14px;
+  padding: 1.75rem;
+  max-width: 420px;
+  width: 100%;
+}
+
+.knovera-dialog h2 {
+  margin: 0 0 0.25rem;
+}
+
+.knovera-dialog-subtitle {
+  color: #a7adba;
+  font-size: 0.88rem;
+  margin: 0 0 1.25rem;
+}
+
+.knovera-type-options {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.knovera-type-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background: #14161b;
+  border: 1px solid #2b2f3a;
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  color: #e7e9ee;
+  font-size: 0.92rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.knovera-type-option.selected {
+  border-color: #7fd0ff;
+}
+
+.knovera-type-option-name {
+  flex: 1;
+}
+
+.knovera-dialog-notice {
+  margin-top: 1.1rem;
+  color: #e0c67f;
+  background: #1c1a10;
+  border: 1px solid #332c17;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  font-size: 0.85rem;
+}
+
+.knovera-dialog-actions {
+  margin-top: 1.25rem;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---- Project workspace header (Sources/Synthesis) ------------------------- */
+
+.knovera-project-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.knovera-back-link {
+  color: #8b91a0;
+  text-decoration: none;
+  font-size: 0.85rem;
+  margin-bottom: 0.5rem;
+}
+
+.knovera-back-link:hover {
+  color: #e7e9ee;
+}
+
+.knovera-project-header h1 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.knovera-project-type {
+  margin: 0 0 0.75rem;
+  color: #a7adba;
+  font-size: 0.9rem;
+}
+
+.knovera-project-tabs {
+  display: flex;
+  gap: 0.5rem;
+  border-bottom: 1px solid #2b2f3a;
+}
+
+.knovera-project-tab {
+  color: #a7adba;
+  text-decoration: none;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 2px solid transparent;
+}
+
+.knovera-project-tab:hover {
+  color: #e7e9ee;
+}
+
+.knovera-project-tab.active {
+  color: #7fd0ff;
+  border-bottom-color: #7fd0ff;
+}
+
+/* ---- Sources page ---------------------------------------------------------- */
+
+.knovera-section-title {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #c7cad3;
+}
+
+.knovera-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.knovera-provider-card {
+  background: #14161b;
+  border: 1px solid #2b2f3a;
+  border-radius: 10px;
+  padding: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.knovera-provider-card.operational {
+  border-color: #234030;
+}
+
+.knovera-provider-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.knovera-provider-card-top h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.knovera-provider-desc {
+  margin: 0;
+  color: #8b91a0;
+  font-size: 0.85rem;
+}
+
+.knovera-diagnostic-tools {
+  border: 1px dashed #2b2f3a;
+  border-radius: 10px;
+  padding: 0.85rem 1.1rem;
+}
+
+.knovera-diagnostic-tools summary {
+  cursor: pointer;
+  color: #a7adba;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.knovera-diagnostic-tools[open] summary {
+  margin-bottom: 0.9rem;
+}
+
+/* ---- Usage page ------------------------------------------------------------ */
+
+.knovera-usage-month {
+  color: #a7adba;
+  margin: -0.5rem 0 0.5rem;
+}
+
+.knovera-usage-table {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #2b2f3a;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.knovera-usage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1.1rem;
+  background: #14161b;
+}
+
+.knovera-usage-row + .knovera-usage-row {
+  border-top: 1px solid #2b2f3a;
+}
+
+.knovera-usage-project {
+  font-weight: 600;
+}
+
+.knovera-usage-pending {
+  color: #8b91a0;
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+@media (max-width: 640px) {
+  .knovera-topnav {
+    padding: 0.85rem 1.1rem;
+  }
+
+  .knovera-main {
+    padding: 1.5rem 1.1rem 3rem;
+  }
+
+  .knovera-project-header h1 {
+    font-size: 1.3rem;
+  }
+}

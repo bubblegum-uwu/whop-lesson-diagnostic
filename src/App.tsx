@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { ConfigForm } from "./components/ConfigForm";
-import { DiagnosticResult } from "./components/DiagnosticResult";
-import { ErrorResult } from "./components/ErrorResult";
-import { AnalyzeLesson } from "./components/AnalyzeLesson";
-import { CourseTable } from "./components/CourseTable";
-import { DashboardSummary } from "./components/DashboardSummary";
-import { CourseIntelligence } from "./components/CourseIntelligence";
-import { FindWhopUserId, type FindWhopUserIdState } from "./components/FindWhopUserId";
+import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import { AppShellLayout } from "./components/AppShell";
+import { LandingPage } from "./pages/LandingPage";
+import { ProjectsPage } from "./pages/ProjectsPage";
+import { SourcesPage } from "./pages/SourcesPage";
+import { SynthesisPage } from "./pages/SynthesisPage";
+import { UsagePage } from "./pages/UsagePage";
+import type { FindWhopUserIdState } from "./components/FindWhopUserId";
 import {
   startWhopOAuth,
   exchangeCodeForTokens,
@@ -90,6 +90,7 @@ export default function App() {
   const redirectUri = useMemo(getRedirectUri, []);
   const clientId = useMemo(getWhopClientId, []);
   const backendUrl = useMemo(getBackendUrl, []);
+  const navigate = useNavigate();
 
   const [state, setState] = useState<AppState>({
     phase: "config",
@@ -155,6 +156,11 @@ export default function App() {
         message:
           "Returned from Whop but no pending sign-in was found for this session. Please start again.",
       });
+      // Phase 4A addition — see runIdentifyCallbackFlow's comment below: this
+      // state now renders on the Sources page (Diagnostic Tools), not inline
+      // on whatever route happened to be active, so it needs the same
+      // post-callback navigation the other three flows already get.
+      navigate("/projects/mastermind/sources");
       return;
     }
 
@@ -187,6 +193,12 @@ export default function App() {
       });
     } finally {
       clearConfig();
+      // Phase 4A addition — a pure post-completion in-app navigation call, not
+      // part of the OAuth mechanics above (token exchange/parsing/session
+      // establishment are all untouched). Sends the user to the page that now
+      // displays this flow's result (see SourcesPage's "Diagnostic Tools"),
+      // since window.history.replaceState above clears the hash back to "/".
+      navigate("/projects/mastermind/sources");
     }
   }
 
@@ -218,6 +230,8 @@ export default function App() {
     } finally {
       clearConfig();
       setCourseState((prev) => ({ ...prev, connecting: false }));
+      // Phase 4A addition — see runIdentifyCallbackFlow's comment above.
+      navigate("/projects/mastermind/sources");
     }
   }
 
@@ -249,6 +263,8 @@ export default function App() {
       });
     } finally {
       clearConfig();
+      // Phase 4A addition — see runIdentifyCallbackFlow's comment above.
+      navigate("/projects/mastermind/sources");
     }
   }
 
@@ -366,76 +382,51 @@ export default function App() {
     );
   }
 
+  // Phase 4A — routing/shell only. Every handler/effect above is unchanged
+  // from the pre-Phase-4 App.tsx; this return just decides WHERE the same
+  // state/handlers get rendered. See src/pages/ for the new page components
+  // and src/components/AppShell.tsx for the top nav wrapper.
   return (
-    <div className={backendUrl ? "app-shell app-shell-wide" : "app-shell"}>
-      <FindWhopUserId state={identifyState} onStart={handleFindUserId} />
-
-      {backendUrl && (
-        <>
-          <DashboardSummary summary={courseState.summary} />
-          <CourseIntelligence backendUrl={backendUrl} accessToken={courseState.accessToken} connected={courseState.connected} />
-          <CourseTable
-            courseTitle={courseState.courseTitle}
-            lessons={courseState.lessons}
-            connected={courseState.connected}
-            syncing={courseState.syncing}
-            authRequired={courseState.authRequired}
-            lastSyncedAt={courseState.lastSyncedAt}
-            summary={courseState.summary}
-            onSignIn={handleCourseSignIn}
-            onSync={handleCourseSync}
-            onDisconnect={handleCourseDisconnect}
-            onEnqueue={handleEnqueue}
-            onRetry={handleRetry}
-            onCancel={handleCancel}
-            onLoadAnalysis={handleLoadAnalysis}
-          />
-        </>
-      )}
-      {courseState.errorMessage && <div className="error-box">{courseState.errorMessage}</div>}
-
-      {state.phase === "config" && (
-        <ConfigForm
-          redirectUri={redirectUri}
-          onSubmit={handleSubmit}
-          submitting={state.submitting}
-          errorMessage={state.errorMessage}
-        />
-      )}
-
-      {state.phase === "exchanging" && <p className="status-line">Exchanging authorization code for tokens…</p>}
-      {state.phase === "fetching" && <p className="status-line">Fetching lesson from Whop…</p>}
-
-      {state.phase === "result" && (
-        <>
-          <DiagnosticResult payload={state.payload} />
-          {backendUrl && (
-            <AnalyzeLesson
+    <Routes>
+      <Route path="/" element={<LandingPage />} />
+      <Route element={<AppShellLayout />}>
+        <Route path="/projects" element={<ProjectsPage />} />
+        <Route path="/usage" element={<UsagePage />} />
+        <Route
+          path="/projects/:projectId/sources"
+          element={
+            <SourcesPage
+              courseTitle={courseState.courseTitle}
+              lessons={courseState.lessons}
+              connected={courseState.connected}
+              syncing={courseState.syncing}
+              authRequired={courseState.authRequired}
+              lastSyncedAt={courseState.lastSyncedAt}
+              summary={courseState.summary}
+              courseErrorMessage={courseState.errorMessage}
+              onSignIn={handleCourseSignIn}
+              onSync={handleCourseSync}
+              onDisconnect={handleCourseDisconnect}
+              onEnqueue={handleEnqueue}
+              onRetry={handleRetry}
+              onCancel={handleCancel}
+              onLoadAnalysis={handleLoadAnalysis}
+              identifyState={identifyState}
+              onFindUserId={handleFindUserId}
               backendUrl={backendUrl}
-              lessonUrl={state.lessonUrl}
-              accessToken={state.accessToken}
+              diagnosticState={state}
+              redirectUri={redirectUri}
+              onDiagnosticSubmit={handleSubmit}
+              onDiagnosticReset={handleReset}
             />
-          )}
-          <button onClick={handleReset}>Start over</button>
-        </>
-      )}
-
-      {state.phase === "api_error" && (
-        <>
-          <ErrorResult outcome={state.outcome} />
-          <button onClick={handleReset}>Start over</button>
-        </>
-      )}
-
-      {state.phase === "fatal_error" && (
-        <>
-          <div className="error-panel" role="alert">
-            <h2>ERROR</h2>
-            <p>{state.message}</p>
-          </div>
-          <button onClick={handleReset}>Start over</button>
-        </>
-      )}
-    </div>
+          }
+        />
+        <Route
+          path="/projects/:projectId/synthesis"
+          element={<SynthesisPage backendUrl={backendUrl} accessToken={courseState.accessToken} connected={courseState.connected} />}
+        />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
