@@ -44,6 +44,27 @@ export class SynthesisSchemaValidationError extends Error {
 }
 
 /**
+ * Thrown when a DETERMINISTIC invariant this codebase computes itself is
+ * violated — never a Gemini output-validation failure (see
+ * SynthesisSchemaValidationError for that). Exists specifically for the
+ * "playbook canonical strategy count == canonicalStrategies.length"
+ * invariant (see runSynthesis.ts's buildCanonicalStrategyLibrarySection)
+ * introduced after a real audit found the playbook silently omitting a
+ * canonical strategy from Gemini-authored prose. Should be structurally
+ * impossible to trigger given how the library section is built (it's
+ * generated directly FROM canonicalStrategies, never asked of Gemini) —
+ * this is a defensive guard against a future refactor reintroducing the
+ * same class of silent-omission bug, not a condition expected to fire in
+ * normal operation.
+ */
+export class SynthesisInvariantError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SynthesisInvariantError";
+  }
+}
+
+/**
  * Wraps any failure from GeminiClient.generateStructured() with the stage
  * context it would otherwise lose entirely — before this existed, a real
  * Gemini API failure (as happened in production: a bare "Gemini

@@ -110,6 +110,43 @@ import type { GeminiThinkingLevel } from "../gemini/client.js";
  * wire format. playbook/core_framework/decision_framework are also
  * unchanged by v5 — no real usage data exists yet for any of them.
  *
+ * v6 (current) — core_framework raised, 16384 -> 65536, after a real
+ * production dry run reached this stage (the first five stages, including
+ * the previously-unstable clustering, all completed successfully) and was
+ * truncated:
+ *
+ *   stage=core_framework max_output_tokens=16384 output_tokens=15717
+ *   interaction_status=incomplete ends_with_brace=false
+ *
+ * output_tokens=15717 against a 16384 budget is ~95.9% consumed — the same
+ * shared thinking/output-budget truncation signature documented above for
+ * cluster_chunk (v1/v2) and canonical_strategy (v3), now confirmed for
+ * core_framework too now that real data actually exercises it. Raised
+ * directly to the model's documented 65536 ceiling for the same reason
+ * canonical_strategy/playbook were: there is no principled smaller number
+ * to try first when the failure mode is thinking consuming the budget
+ * before the visible JSON finishes. No other stage's behavior, prompt, or
+ * schema changed as part of this — only this one budget.
+ *
+ * v7 (current) — decision_framework raised, 16384 -> 65536, after a real
+ * production dry run reached this stage (core_framework and playbook, both
+ * raised in v6, both completed successfully) and was truncated:
+ *
+ *   stage=decision_framework max_output_tokens=16384 output_tokens=4811
+ *   thinking_tokens=11557 interaction_status=incomplete ends_with_brace=false
+ *
+ * output_tokens=4811 + thinking_tokens=11557 = 16368 against a 16384
+ * budget is ~99.9% consumed — the same shared thinking/output-budget
+ * truncation signature documented above for cluster_chunk (v1/v2),
+ * canonical_strategy (v3), and core_framework (v6), now confirmed for
+ * decision_framework too now that real data actually exercises it. Raised
+ * directly to the model's documented 65536 ceiling for the same reason —
+ * there is no principled smaller number to try first when the failure mode
+ * is thinking consuming the budget before the visible JSON finishes. No
+ * other stage's behavior, prompt, schema, scope logic, clustering,
+ * core_framework, playbook, decision-graph logic, or thinking
+ * configuration changed as part of this — only this one budget.
+ *
  * tests/synthesisCanonicalLoadTest.test.ts and
  * scripts/canonicalStrategyDiagnostic.ts (both opt-in, real API) exist
  * specifically to keep calibrating these; re-run them after any change
@@ -138,8 +175,8 @@ export const SYNTHESIS_MAX_OUTPUT_TOKENS = {
    * an accidental runaway generation.
    */
   canonical_strategy: 32768,
-  /** Pooled cross-strategy rule categories — less comparison-heavy than clustering (pooling already-canonicalized rules, not raw pairwise comparison). Kept at v2's 16384 — no evidence yet it's undersized. */
-  core_framework: 16384,
+  /** v6: RAISED from 16384 to 65536 after a real production dry run confirmed truncation at 16384 (output_tokens=15717, incomplete, ends_with_brace=false) — see the v6 changelog above. */
+  core_framework: 65536,
   /**
    * Raised to 65536 alongside canonical_strategy, though NOT yet directly
    * confirmed insufficient at 32768 by a real diagnostic run — this stage
@@ -155,8 +192,8 @@ export const SYNTHESIS_MAX_OUTPUT_TOKENS = {
    * usage data.
    */
   playbook: 65536,
-  /** Decision nodes + a readable-steps array. Kept at v2's 16384 — no evidence yet it's undersized, and structurally smaller/less comparison-heavy than canonical_strategy or playbook. */
-  decision_framework: 16384,
+  /** v7: RAISED from 16384 to 65536 after a real production dry run confirmed truncation at 16384 (output_tokens=4811, thinking_tokens=11557, incomplete, ends_with_brace=false) — see the v7 changelog above. */
+  decision_framework: 65536,
 } as const;
 
 export type SynthesisStageForLimits = keyof typeof SYNTHESIS_MAX_OUTPUT_TOKENS;

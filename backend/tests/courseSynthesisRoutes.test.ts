@@ -12,6 +12,7 @@ import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthes
 import type { JobTrigger } from "../src/jobs/runJobTrigger.js";
 import type { Strategy } from "../src/gemini/schema.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
+import { computeAnalysisFingerprint } from "../src/pipeline/fingerprint.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 import { makeResponse } from "./helpers/httpMocks.js";
 
@@ -53,8 +54,20 @@ async function makeCourse(whopCourseId: string) {
   return upsertCourse(pool, { whopCourseId, whopExperienceId: "exp_1", slug: "trading-accelerator", title: "The Trading Accelerator" });
 }
 
-/** syncLessons() archives any previously-synced lesson not present in THIS call's list, so every call here re-includes every lesson already synced for the course — a full sync of the current set, not an incremental add. */
-async function addAnalyzedLesson(courseId: number, opts: { strategyFound: boolean; title?: string }) {
+/**
+ * syncLessons() archives any previously-synced lesson not present in THIS
+ * call's list, so every call here re-includes every lesson already synced
+ * for the course — a full sync of the current set, not an incremental add.
+ *
+ * By default this persists a CURRENT analysis (its analysisFingerprint
+ * matches what computeAnalysisFingerprint would produce today for this
+ * exact lesson/model), so existing POST /api/course/synthesize callers stay
+ * "preflight ready" without having to think about fingerprinting. Pass
+ * `stale: true` to deliberately persist a pre-current-extractor-version
+ * (v1) analysis instead — for the tests that specifically exercise the
+ * preflight staleness gate.
+ */
+async function addAnalyzedLesson(courseId: number, opts: { strategyFound: boolean; title?: string; stale?: boolean }) {
   const existing = await listLessons(pool, courseId);
   await syncLessons(pool, courseId, [
     ...existing.map((l) => ({
@@ -112,7 +125,10 @@ async function addAnalyzedLesson(courseId: number, opts: { strategyFound: boolea
     promptVersion: "v1",
     extractorVersion: "v1",
     schemaVersion: "v1",
-    analysisFingerprint: randomId("fp"),
+    // A random fingerprint never matches computeAnalysisFingerprint's live output — i.e. always
+    // "stale" per synthesis/preflight.ts. Compute the CURRENT fingerprint by default so this
+    // helper produces a preflight-ready analysis unless the caller explicitly asks for `stale`.
+    analysisFingerprint: opts.stale ? randomId("fp") : computeAnalysisFingerprint({ whopLessonId: lesson.whopLessonId, geminiModel: GEMINI_MODEL }),
     startedAt: new Date(),
     completedAt: new Date(),
     processingDurationSeconds: 60,
@@ -173,6 +189,58 @@ describe("GET /api/course/synthesis-status", () => {
     const result = body() as { noStandaloneSetupLessons: { title: string }[] };
     expect(result.noStandaloneSetupLessons).toHaveLength(1);
     expect(result.noStandaloneSetupLessons[0].title).toBe("Sizing & Scaling Trades");
+  });
+
+  it("Phase 3.5B: reports a preflight that flags stale (pre-3.5A v1) analyses and lessons never analyzed at all", async () => {
+    const whopCourseId = randomId("cors");
+    const course = await makeCourse(whopCourseId);
+    // stale: true — genuinely stale relative to today's version, per computeAnalysisFingerprint.
+    await addAnalyzedLesson(course.id, { strategyFound: true, stale: true });
+    // A lesson synced but never analyzed at all.
+    await syncLessons(pool, course.id, [
+      ...(await listLessons(pool, course.id)).map((l) => ({
+        whopLessonId: l.whopLessonId,
+        title: l.title,
+        lessonType: l.lessonType,
+        visibility: l.visibility,
+        chapterWhopId: l.chapterWhopId,
+        chapterTitle: l.chapterTitle,
+        chapterOrder: l.chapterOrder,
+        courseOrder: l.courseOrder,
+        durationSeconds: l.durationSeconds,
+        videoAssetStatus: l.videoAssetStatus,
+        videoAvailable: l.videoAvailable,
+        sourceUrl: l.sourceUrl,
+      })),
+      {
+        whopLessonId: randomId("lesn"),
+        title: "Never Analyzed Lesson",
+        lessonType: "video",
+        visibility: "visible",
+        chapterWhopId: null,
+        chapterTitle: null,
+        chapterOrder: null,
+        courseOrder: 2,
+        durationSeconds: 300,
+        videoAssetStatus: "ready",
+        videoAvailable: true,
+        sourceUrl: "https://whop.com/x/lessons/z/",
+      },
+    ]);
+
+    const handler = createSynthesisStatusHandler(deps(whopCourseId));
+    const { res, body } = makeResponse();
+    await handler({} as Request, res);
+
+    const result = body() as {
+      preflight: { lessonCount: number; currentAnalysisCount: number; staleAnalysisCount: number; missingAnalysisCount: number; missingLessonTitles: string[]; ready: boolean };
+    };
+    expect(result.preflight.lessonCount).toBe(2);
+    expect(result.preflight.currentAnalysisCount).toBe(0);
+    expect(result.preflight.staleAnalysisCount).toBe(1);
+    expect(result.preflight.missingAnalysisCount).toBe(1);
+    expect(result.preflight.missingLessonTitles).toEqual(["Never Analyzed Lesson"]);
+    expect(result.preflight.ready).toBe(false);
   });
 
   it("flags an existing completed synthesis as OUT OF DATE once the underlying lesson-analysis set changes", async () => {
@@ -428,6 +496,130 @@ describe("POST /api/course/synthesize", () => {
     expect(secondResult.created).toBe(true);
     expect(secondResult.run.runId).not.toBe(firstRun.runId);
   });
+
+  /**
+   * Final pre-merge safety fix — POST /api/course/synthesize now runs the
+   * same preflight readiness check the read-only diagnostic
+   * (scripts/synthesisDryRun.ts) already enforced (see
+   * synthesis/preflight.ts), refusing to create a synthesis_run when any
+   * lesson's latest analysis is missing or stale (pre-current-extractor-
+   * version). Phase 3.5B synthesis semantics themselves are untouched —
+   * these tests only cover the new preflight gate on the write path.
+   */
+  describe("preflight safety gate", () => {
+    async function countSynthesisRuns(courseId: number): Promise<number> {
+      const { rows } = await pool.query<{ count: string }>(`SELECT count(*)::text AS count FROM synthesis_runs WHERE course_id = $1`, [courseId]);
+      return Number(rows[0].count);
+    }
+
+    it("ready (every lesson current) => run creation still works exactly as before", async () => {
+      const whopCourseId = randomId("cors");
+      const course = await makeCourse(whopCourseId);
+      await addAnalyzedLesson(course.id, { strategyFound: true });
+      const jobTrigger = makeJobTrigger();
+
+      const handler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+      const { res, statusCode, body } = makeResponse();
+      await handler({ body: {} } as Request, res);
+
+      expect(statusCode()).toBe(202);
+      const result = body() as { created: boolean; run: { status: string } };
+      expect(result.created).toBe(true);
+      expect(result.run.status).toBe("QUEUED");
+      expect(jobTrigger.triggerRun).toHaveBeenCalledTimes(1);
+      expect(await countSynthesisRuns(course.id)).toBe(1);
+    });
+
+    it("stale (a lesson's latest analysis predates the current extractor version) => rejected with 409 preflight_not_ready, zero synthesis_run created, worker never triggered", async () => {
+      const whopCourseId = randomId("cors");
+      const course = await makeCourse(whopCourseId);
+      // stale: true persists a random fingerprint that will never match today's
+      // computeAnalysisFingerprint — genuinely stale.
+      await addAnalyzedLesson(course.id, { strategyFound: true, stale: true });
+      const jobTrigger = makeJobTrigger();
+
+      const handler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+      const { res, statusCode, body } = makeResponse();
+      await handler({ body: {} } as Request, res);
+
+      expect(statusCode()).toBe(409);
+      const result = body() as { error: { type: string; staleAnalysisCount: number; missingAnalysisCount: number; staleLessonTitles: string[] } };
+      expect(result.error.type).toBe("preflight_not_ready");
+      expect(result.error.staleAnalysisCount).toBe(1);
+      expect(result.error.missingAnalysisCount).toBe(0);
+      expect(result.error.staleLessonTitles).toEqual(["Break and Retest"]);
+      expect(jobTrigger.triggerRun).not.toHaveBeenCalled();
+      expect(await countSynthesisRuns(course.id)).toBe(0);
+    });
+
+    it("missing (a synced lesson has no analysis at all, while another lesson is current) => rejected with 409 preflight_not_ready, zero synthesis_run created, worker never triggered", async () => {
+      const whopCourseId = randomId("cors");
+      const course = await makeCourse(whopCourseId);
+      await addAnalyzedLesson(course.id, { strategyFound: true });
+      // A second lesson synced but never analyzed — analysisIds.length stays > 0 (from the
+      // first lesson), so this exercises the preflight gate specifically, not the pre-existing
+      // "nothing_to_synthesize" (zero analyses at all) check above it.
+      await syncLessons(pool, course.id, [
+        ...(await listLessons(pool, course.id)).map((l) => ({
+          whopLessonId: l.whopLessonId,
+          title: l.title,
+          lessonType: l.lessonType,
+          visibility: l.visibility,
+          chapterWhopId: l.chapterWhopId,
+          chapterTitle: l.chapterTitle,
+          chapterOrder: l.chapterOrder,
+          courseOrder: l.courseOrder,
+          durationSeconds: l.durationSeconds,
+          videoAssetStatus: l.videoAssetStatus,
+          videoAvailable: l.videoAvailable,
+          sourceUrl: l.sourceUrl,
+        })),
+        {
+          whopLessonId: randomId("lesn"),
+          title: "Never Analyzed Lesson",
+          lessonType: "video",
+          visibility: "visible",
+          chapterWhopId: null,
+          chapterTitle: null,
+          chapterOrder: null,
+          courseOrder: 2,
+          durationSeconds: 300,
+          videoAssetStatus: "ready",
+          videoAvailable: true,
+          sourceUrl: "https://whop.com/x/lessons/z/",
+        },
+      ]);
+      const jobTrigger = makeJobTrigger();
+
+      const handler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+      const { res, statusCode, body } = makeResponse();
+      await handler({ body: {} } as Request, res);
+
+      expect(statusCode()).toBe(409);
+      const result = body() as { error: { type: string; missingAnalysisCount: number; missingLessonTitles: string[] } };
+      expect(result.error.type).toBe("preflight_not_ready");
+      expect(result.error.missingAnalysisCount).toBe(1);
+      expect(result.error.missingLessonTitles).toEqual(["Never Analyzed Lesson"]);
+      expect(jobTrigger.triggerRun).not.toHaveBeenCalled();
+      expect(await countSynthesisRuns(course.id)).toBe(0);
+    });
+
+    it("stale/missing is refused even when `force: true` is passed — force only bypasses the unchanged-hash short-circuit, never data readiness", async () => {
+      const whopCourseId = randomId("cors");
+      const course = await makeCourse(whopCourseId);
+      await addAnalyzedLesson(course.id, { strategyFound: true, stale: true });
+      const jobTrigger = makeJobTrigger();
+
+      const handler = createSynthesizeHandler(deps(whopCourseId, jobTrigger));
+      const { res, statusCode, body } = makeResponse();
+      await handler({ body: { force: true } } as Request, res);
+
+      expect(statusCode()).toBe(409);
+      expect((body() as { error: { type: string } }).error.type).toBe("preflight_not_ready");
+      expect(jobTrigger.triggerRun).not.toHaveBeenCalled();
+      expect(await countSynthesisRuns(course.id)).toBe(0);
+    });
+  });
 });
 
 describe("GET /api/course/synthesis", () => {
@@ -475,11 +667,19 @@ describe("GET /api/course/synthesis", () => {
       invalidationRules: [],
       noTradeConditions: [],
       visualDiscretionaryRules: [],
+      riskManagementRules: [],
+      positionSizingRules: [],
+      scalingInRules: [],
+      scalingOutRules: [],
+      runnerManagementRules: [],
+      warnings: [],
+      instructorPreferences: [],
       variants: [],
       examples: [],
       ambiguities: [],
       conflicts: [],
       sourceLessonIds: [1],
+      supportingKnowledgeLessonIds: [],
     });
     await createCoursePlaybook(pool, {
       runId: claimed!.runId,
@@ -496,10 +696,25 @@ describe("GET /api/course/synthesis", () => {
           lessonsMissingSupportingKnowledgeExtraction: 0,
           missingSupportingKnowledgeLessonIds: [],
           missingSupportingKnowledgeLessonTitles: [],
+          missingFrameworkDimensions: [],
           coverageNote: "current",
         },
+        strategyScopeMapping: {
+          distinctRawNameCount: 0,
+          matchedRawNameCount: 0,
+          unmatchedRawNameCount: 0,
+          matchedRawNames: [],
+          unmatchedRawNames: [],
+          totalStrategyScopedItemCount: 0,
+          matchedItemCount: 0,
+          unmatchedItemCount: 0,
+          completeness: "COMPLETE",
+        },
+        universalApplicabilityLeaks: [],
+        unverifiedUniversalClaims: [],
+        scopedApplicabilityLeaks: [],
       },
-      decisionFramework: { nodes: [], readableSteps: [] },
+      decisionFramework: { nodes: [], readableSteps: [], scopeLeaks: [] },
     });
     await markSynthesisCompleted(pool, claimed!.runId, "owner-a", { inputTokens: 1, outputTokens: 1, thinkingTokens: 0, estimatedCost: 0.001, processingDurationSeconds: 5 });
     void runId;

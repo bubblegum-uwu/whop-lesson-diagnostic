@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NumericalValueSchema, KnowledgeItemScopeSchema } from "../gemini/schema.js";
 
 /**
  * Zod schemas for every Gemini-produced synthesis artifact (Stages 2-6),
@@ -45,6 +46,10 @@ export const SupportLevel = z.enum([
 ]);
 export type SupportLevelValue = z.infer<typeof SupportLevel>;
 
+/** See scopeBasis.ts's doc comment for the full real-audit history this exists to fix. */
+export const ScopeBasisSchema = z.enum(["VERIFIED_GLOBAL", "SCOPED", "UNVERIFIED"]);
+export type ScopeBasisValue = z.infer<typeof ScopeBasisSchema>;
+
 export const SynthesizedRuleSchema = z.object({
   description: z.string().min(1),
   classification: z.enum(["explicit", "inferred", "visual", "synthesized"]),
@@ -52,6 +57,34 @@ export const SynthesizedRuleSchema = z.object({
   supportCount: z.number().int().min(0),
   sources: z.array(SourceRefSchema),
   conflictSources: z.array(SourceRefSchema),
+  /**
+   * Phase 3.5B additive fields — NEVER asked of Gemini directly (no wire
+   * schema requires them); populated deterministically by enrichment code
+   * from the KnowledgeItem(s) a rule's sourceKeys/conflictSourceKeys cite
+   * (see sourceRegistry.ts), the same "don't make Gemini reproduce data the
+   * application already has" principle this file already applies to
+   * provenance. Default [] / null for every rule not derived from a
+   * knowledge citation (e.g. the pre-3.5B strategy-instance-only
+   * categories), so no existing behavior changes for those.
+   */
+  exceptions: z.array(z.string()).optional().default([]),
+  numericalValues: z.array(NumericalValueSchema).optional().default([]),
+  /** The union of every cited KnowledgeItem's scope — null when this rule carries no scope-bearing citation. Preserves instrument/timeframe/session/traderProfile restrictions that must survive synthesis rather than being flattened into a universal rule. */
+  scope: KnowledgeItemScopeSchema.nullable().optional().default(null),
+  /**
+   * Real-audit fix (Phase 3.5B v4) — WHY `scope` is null matters as much as
+   * the fact itself: "VERIFIED_GLOBAL" (every citation was scope-aware and
+   * none were scoped) is trustworthy; "UNVERIFIED" (the rule cites no
+   * scope-aware evidence at all — e.g. only pre-3.5B per-lesson Strategy
+   * rules, which were never scope-tagged) must NEVER be treated the same
+   * as verified-global downstream, even though `scope` is null in both
+   * cases. Always computed by aggregateScopeBasis (scopeBasis.ts), never
+   * asked of Gemini. Optional (no default) specifically so pre-this-field
+   * test fixtures fall back to effectiveScopeBasis's old null-means-global
+   * behavior rather than silently changing meaning — see that function's
+   * doc comment.
+   */
+  scopeBasis: ScopeBasisSchema.optional(),
 });
 export type SynthesizedRule = z.infer<typeof SynthesizedRuleSchema>;
 
@@ -170,11 +203,49 @@ export const CanonicalStrategySchema = z.object({
   invalidationRules: z.array(SynthesizedRuleSchema),
   noTradeConditions: z.array(SynthesizedRuleSchema),
   visualDiscretionaryRules: z.array(SynthesizedRuleSchema),
+  /**
+   * Phase 3.5B additive categories — populated from strategy-scoped rich
+   * KnowledgeItems (see strategyScopeMapping.ts) drawn from ANY contributing
+   * lesson, not just the cluster's own strategy_instances rows. Same
+   * SynthesizedRule shape as the 11 categories above; defaults to [] for a
+   * cluster with no matching knowledge, so this is purely additive to
+   * existing consumers (a canonical strategy already worked with these
+   * absent — it just wasn't as rich as the source material allowed).
+   */
+  riskManagementRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  positionSizingRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  scalingInRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  scalingOutRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  runnerManagementRules: z.array(SynthesizedRuleSchema).optional().default([]),
+  warnings: z.array(SynthesizedRuleSchema).optional().default([]),
+  instructorPreferences: z.array(SynthesizedRuleSchema).optional().default([]),
   variants: z.array(VariantSchema),
   examples: z.array(ExampleSchema),
   ambiguities: z.array(z.string()),
   conflicts: z.array(ConflictSchema),
+  /**
+   * Real-audit fix (Phase 3.5B) — lessons whose STANDALONE STRATEGY INSTANCE
+   * is a member of this cluster (i.e. this lesson taught the setup itself).
+   * Computed DETERMINISTICALLY by enrichCanonicalStrategy from `members`,
+   * never asked of or trusted from Gemini — a real audit found Gemini's own
+   * `sourceLessonIds` conflating "taught this strategy" with "contributed
+   * supporting knowledge to this strategy" (e.g. a lesson with
+   * strategy_found=false, contributing only strategy-scoped knowledge,
+   * showing up here as if it taught the setup). See
+   * `supportingKnowledgeLessonIds` for the separate, second concept.
+   */
   sourceLessonIds: z.array(z.number()),
+  /**
+   * Real-audit fix (Phase 3.5B) — lessons that contributed strategy-scoped
+   * supporting KnowledgeItems to this cluster (via strategyScopeMapping.ts)
+   * WITHOUT themselves teaching the standalone strategy — e.g. a lesson on
+   * general market context that happens to mention "with Break & Retest,
+   * risk 1%". Computed deterministically from `scopedKnowledge`, never from
+   * Gemini. Disjoint in intent from `sourceLessonIds`, though the same
+   * lesson id may legitimately appear in both if it both taught the setup
+   * AND separately contributed matched scoped knowledge.
+   */
+  supportingKnowledgeLessonIds: z.array(z.number()).optional().default([]),
 });
 export type CanonicalStrategy = z.infer<typeof CanonicalStrategySchema>;
 
@@ -311,7 +382,7 @@ const rawSynthesizedRuleJsonSchema = {
 };
 const rawSynthesizedRuleArray = { type: "array", items: rawSynthesizedRuleJsonSchema };
 
-export const RawSynthesizedRuleSchema = SynthesizedRuleSchema.omit({ sources: true, conflictSources: true }).extend({
+export const RawSynthesizedRuleSchema = SynthesizedRuleSchema.omit({ sources: true, conflictSources: true, scopeBasis: true }).extend({
   /** Reference keys (e.g. "s7") into the original per-rule data Gemini was shown for this cluster's members — resolved to full SourceRef objects by canonicalStrategy.ts's enrichCanonicalStrategy. An unknown key is dropped defensively, never fabricated into a source. */
   sourceKeys: z.array(z.string()),
   conflictSourceKeys: z.array(z.string()),
@@ -333,7 +404,16 @@ export const RawConflictSchema = z.object({
 });
 export type RawConflict = z.infer<typeof RawConflictSchema>;
 
-/** The 11 CanonicalStrategy rule-category keys — see CanonicalStrategySchema above. Exported so canonicalStrategy.ts's enrichment step can iterate them without re-listing them a third time. */
+/**
+ * The CanonicalStrategy rule-category keys — see CanonicalStrategySchema
+ * above. Exported so canonicalStrategy.ts's enrichment step can iterate them
+ * without re-listing them a third time. The last 7 are Phase 3.5B additions
+ * (populated from strategy-scoped rich KnowledgeItems, not strategy_instances
+ * rules) — added to the SAME enum/sections mechanism rather than a parallel
+ * one, since that mechanism (schema.ts's v3 changelog) already exists
+ * specifically to let Gemini tag an arbitrary rule with its category without
+ * needing N separate sibling JSON Schema arrays.
+ */
 export const RULE_CATEGORY_KEYS = [
   "marketContext",
   "prerequisites",
@@ -346,6 +426,13 @@ export const RULE_CATEGORY_KEYS = [
   "invalidationRules",
   "noTradeConditions",
   "visualDiscretionaryRules",
+  "riskManagementRules",
+  "positionSizingRules",
+  "scalingInRules",
+  "scalingOutRules",
+  "runnerManagementRules",
+  "warnings",
+  "instructorPreferences",
 ] as const;
 export type RuleCategoryKey = (typeof RULE_CATEGORY_KEYS)[number];
 
@@ -376,7 +463,22 @@ export const RawCanonicalStrategySchema = CanonicalStrategySchema.omit({
   invalidationRules: true,
   noTradeConditions: true,
   visualDiscretionaryRules: true,
+  riskManagementRules: true,
+  positionSizingRules: true,
+  scalingInRules: true,
+  scalingOutRules: true,
+  runnerManagementRules: true,
+  warnings: true,
+  instructorPreferences: true,
   conflicts: true,
+  // Real-audit fix (Phase 3.5B) — sourceLessonIds/supportingKnowledgeLessonIds
+  // are now ALWAYS computed deterministically by enrichCanonicalStrategy from
+  // `members`/`scopedKnowledge` (never trusted from Gemini's own output — a
+  // real audit found Gemini conflating "taught this strategy" with
+  // "contributed supporting knowledge to it" in this exact field). Omitted
+  // here so Gemini is never even asked for them.
+  sourceLessonIds: true,
+  supportingKnowledgeLessonIds: true,
 }).extend({
   sections: z.array(RawRuleSectionSchema),
   conflicts: z.array(RawConflictSchema),
@@ -395,9 +497,8 @@ export const RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA = {
     examples: { type: "array", items: exampleJsonSchema },
     ambiguities: { type: "array", items: { type: "string" } },
     conflicts: { type: "array", items: rawConflictJsonSchema },
-    sourceLessonIds: { type: "array", items: { type: "number" } },
   },
-  required: ["name", "purpose", "markets", "timeframes", "sections", "variants", "examples", "ambiguities", "conflicts", "sourceLessonIds"],
+  required: ["name", "purpose", "markets", "timeframes", "sections", "variants", "examples", "ambiguities", "conflicts"],
 };
 
 // ---- Stage 4: core framework ----------------------------------------------
@@ -428,13 +529,96 @@ export const CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
   required: ["sections"],
 };
 
+/**
+ * Phase 3.5B — keyed wire format for core framework, same "sourceKeys
+ * instead of restated evidence" pattern canonical_strategy already uses
+ * (schema.ts's v4 changelog). Introduced because Phase 3.5B roughly
+ * doubles/triples this stage's pooled input (adding ~300-500 course-wide
+ * KnowledgeItems on top of the existing pooled cross-strategy rules) — the
+ * same shared thinking/output-budget risk that caused canonical_strategy's
+ * real truncation failure applies here too if every rule keeps restating
+ * full source citations. The final persisted CoreFrameworkSchema shape
+ * above is unchanged; only how Gemini's own output cites sources changed.
+ */
+export const RawCoreFrameworkSectionSchema = z.object({
+  key: z.string().min(1),
+  title: z.string().min(1),
+  rules: z.array(RawSynthesizedRuleSchema),
+});
+export const RawCoreFrameworkSchema = z.object({
+  sections: z.array(RawCoreFrameworkSectionSchema),
+});
+export type RawCoreFramework = z.infer<typeof RawCoreFrameworkSchema>;
+
+const rawCoreFrameworkSectionJsonSchema = {
+  type: "object",
+  properties: { key: { type: "string" }, title: { type: "string" }, rules: rawSynthesizedRuleArray },
+  required: ["key", "title", "rules"],
+};
+
+export const RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
+  type: "object",
+  properties: {
+    sections: { type: "array", items: rawCoreFrameworkSectionJsonSchema },
+  },
+  required: ["sections"],
+};
+
 // ---- Stage 5: comprehensive playbook --------------------------------------
+
+/**
+ * Real-audit fix (Phase 3.5B v5) — which applicability rules a playbook
+ * section is held to by the audit (see playbookApplicabilityAudit.ts).
+ * Assigned deterministically in CODE from the section's own KEY (see
+ * playbook.ts's SECTION_POLICY), never chosen by Gemini:
+ *   - "VERIFIED_GLOBAL_ONLY" — every cited source must be VERIFIED_GLOBAL;
+ *     universal prose is allowed and expected. Used only by
+ *     "master_trading_checklist", which is no longer Gemini-authored at
+ *     all (built deterministically — see runSynthesis.ts) precisely so
+ *     this can be true by construction, not just by policy.
+ *   - "SCOPED" — scoped/unverified material is expected; the section must
+ *     make its own applicability explicit. Used by
+ *     "scoped_execution_checklists".
+ *   - "DESCRIPTIVE_MIXED" — may summarize global/scoped/unverified
+ *     material together, but must never transform scoped/unverified
+ *     content into an absolute, course-wide operational requirement. The
+ *     default for ordinary prose sections (risk_management,
+ *     trade_management, strategy_variants, etc.).
+ *   - "CONFLICT_DOCUMENTATION" — may intentionally quote/compare
+ *     conflicting scoped rules side by side; never flagged merely for
+ *     mentioning them. Used only by "conflicts_and_ambiguities".
+ */
+export const ApplicabilityPolicySchema = z.enum(["VERIFIED_GLOBAL_ONLY", "SCOPED", "DESCRIPTIVE_MIXED", "CONFLICT_DOCUMENTATION"]);
+export type ApplicabilityPolicyValue = z.infer<typeof ApplicabilityPolicySchema>;
+
+export const RawPlaybookSectionSchema = z.object({
+  key: z.string().min(1),
+  title: z.string().min(1),
+  content: z.string(),
+  /** Real-audit fix (Phase 3.5B v5) — which pooled CoreFramework/canonical-strategy rule(s) (see synthesisSourcePool.ts) this section's prose is actually grounded in. Gemini cites these; it never gets to claim a scope/applicability directly — see PlaybookSectionSchema below, which derives that from these citations in code. */
+  sourceKeys: z.array(z.string()),
+});
+export type RawPlaybookSection = z.infer<typeof RawPlaybookSectionSchema>;
+
+export const RawPlaybookSchema = z.object({
+  title: z.string().min(1),
+  sections: z.array(RawPlaybookSectionSchema),
+  conflictsAndAmbiguities: z.array(ConflictSchema),
+});
+export type RawPlaybook = z.infer<typeof RawPlaybookSchema>;
 
 export const PlaybookSectionSchema = z.object({
   key: z.string().min(1),
   title: z.string().min(1),
   content: z.string(),
+  /** The validated (unknown keys dropped) citations this section's scope was derived from — kept for transparency, never re-trusted as authoritative on its own. Optional so deterministic (code-generated) sections and legacy fixtures can omit it. */
+  sourceKeys: z.array(z.string()).optional(),
+  /** Deterministically derived as the union of every cited source's own scope — never self-reported by Gemini. */
+  scope: KnowledgeItemScopeSchema.optional(),
+  scopeBasis: ScopeBasisSchema.optional(),
+  applicabilityPolicy: ApplicabilityPolicySchema.optional(),
 });
+export type PlaybookSection = z.infer<typeof PlaybookSectionSchema>;
 
 export const PlaybookSchema = z.object({
   title: z.string().min(1),
@@ -443,7 +627,7 @@ export const PlaybookSchema = z.object({
 });
 export type Playbook = z.infer<typeof PlaybookSchema>;
 
-export const PLAYBOOK_RESPONSE_JSON_SCHEMA = {
+export const RAW_PLAYBOOK_RESPONSE_JSON_SCHEMA = {
   type: "object",
   properties: {
     title: { type: "string" },
@@ -451,8 +635,13 @@ export const PLAYBOOK_RESPONSE_JSON_SCHEMA = {
       type: "array",
       items: {
         type: "object",
-        properties: { key: { type: "string" }, title: { type: "string" }, content: { type: "string" } },
-        required: ["key", "title", "content"],
+        properties: {
+          key: { type: "string" },
+          title: { type: "string" },
+          content: { type: "string" },
+          sourceKeys: { type: "array", items: { type: "string" } },
+        },
+        required: ["key", "title", "content", "sourceKeys"],
       },
     },
     conflictsAndAmbiguities: { type: "array", items: conflictJsonSchema },
@@ -480,16 +669,154 @@ export const FrameworkCoverageSchema = z.object({
   lessonsMissingSupportingKnowledgeExtraction: z.number().int().min(0),
   missingSupportingKnowledgeLessonIds: z.array(z.number()),
   missingSupportingKnowledgeLessonTitles: z.array(z.string()),
+  /** Phase 3.5B — human-readable labels of the tracked knowledge dimensions (risk management, position sizing, psychology, etc.) with zero supporting evidence anywhere in the course. This, not lesson/strategy counts, is what now drives `status` — see runSynthesis.ts's buildFrameworkCoverage. */
+  missingFrameworkDimensions: z.array(z.string()).optional().default([]),
   coverageNote: z.string(),
 });
 export type FrameworkCoverage = z.infer<typeof FrameworkCoverageSchema>;
 
-/** The final, persisted playbook document: Gemini's validated Playbook plus code-generated coverage metadata and sections (Coverage Notes, Source Index — see runSynthesis.ts). */
+/**
+ * Real-audit fix (Phase 3.5B) — a real 28-lesson dry run's coverageNote said
+ * "Strategy synthesis complete" while 11 strategy-scoped knowledge items
+ * remained unmatched to any canonical strategy, which reads as (falsely)
+ * implying strategy-scope mapping had fully resolved. This is a SEPARATE,
+ * independent concept from FrameworkCoverage — frameworkCoverage.status
+ * tracks whether the 13 tracked KNOWLEDGE DIMENSIONS have supporting
+ * evidence; this tracks whether every distinct strategy name referenced by
+ * scope.strategies was successfully resolved to a canonical-strategy
+ * cluster (see strategyScopeMapping.ts). A course can legitimately be
+ * FrameworkCoverage.COMPLETE while StrategyScopeMappingSummary is PARTIAL,
+ * or vice versa — neither should ever be inferred from the other's wording.
+ */
+export const StrategyScopeMappingSummarySchema = z.object({
+  distinctRawNameCount: z.number().int().min(0),
+  matchedRawNameCount: z.number().int().min(0),
+  unmatchedRawNameCount: z.number().int().min(0),
+  matchedRawNames: z.array(z.string()),
+  unmatchedRawNames: z.array(z.string()),
+  totalStrategyScopedItemCount: z.number().int().min(0),
+  matchedItemCount: z.number().int().min(0),
+  unmatchedItemCount: z.number().int().min(0),
+  /** COMPLETE only when every distinct raw strategy-scope name resolved — completely independent of FrameworkCoverage.status. */
+  completeness: z.enum(["COMPLETE", "PARTIAL"]),
+});
+export type StrategyScopeMappingSummary = z.infer<typeof StrategyScopeMappingSummarySchema>;
+
+/**
+ * Real-audit fix (Phase 3.5B v3, Blocker B) — a SECOND real dry run showed
+ * "Master Trading Checklist" claiming to apply "before, during, and after
+ * every trading session" while actually containing intraday/equities/
+ * options-only steps. v3/v4 fixed this with a single "universal-labeled
+ * section leaked scoped vocabulary" check applied only to
+ * "master_trading_checklist".
+ *
+ * Real-audit fix (Phase 3.5B v5) — a THIRD real dry run showed that single
+ * gate was simultaneously too broad (it also fired on
+ * "scoped_execution_checklists", "conflicts_and_ambiguities", and
+ * "strategy_variants" — sections that are SUPPOSED to discuss scoped or
+ * conflicting material) and, in the one place it actually mattered, still
+ * missed a real leak (a "risk_management"-shaped section paraphrasing a
+ * scoped 2R rule as applying "on every planned execution", never scanned
+ * because it wasn't the checklist). The fix is no longer one lexical gate —
+ * every playbook section now carries structured provenance
+ * (PlaybookSectionSchema's sourceKeys/scope/scopeBasis/applicabilityPolicy)
+ * and is validated according to ITS OWN policy (see
+ * playbookApplicabilityAudit.ts). Lexical/prose matching (vocabulary terms,
+ * word-overlap with a known non-global rule) is now only a SECONDARY
+ * safeguard layered on top of that structural check, not the primary
+ * evidence model — since even a citation can miss content Gemini
+ * paraphrased without citing.
+ *
+ * Three independent, differently-severe categories replace the old single
+ * "universalSectionScopeLeaks" gate:
+ *   - universalApplicabilityLeaks — a non-exempt section (policy
+ *     DESCRIPTIVE_MIXED or SCOPED) broadened a KNOWN scoped restriction
+ *     into an absolute/universal claim. The clearest, most severe leak —
+ *     we KNOW the true restriction and the prose contradicts it.
+ *   - unverifiedUniversalClaims — a non-exempt section asserted something
+ *     as universal that rests on UNVERIFIED evidence — we cannot confirm
+ *     it's actually restricted, but we also never proved it's universal.
+ *     A real gap, but a weaker claim than contradicting known evidence.
+ *   - scopedApplicabilityLeaks — a SCOPED-policy section (e.g.
+ *     "scoped_execution_checklists") whose own derived scope is non-empty
+ *     but never actually STATED anywhere in its own prose — applicability
+ *     must be explicit, not merely correct in the background data.
+ * "master_trading_checklist" (policy VERIFIED_GLOBAL_ONLY) and
+ * "conflicts_and_ambiguities" (policy CONFLICT_DOCUMENTATION) are exempt
+ * from all three by construction/policy — see playbook.ts's SECTION_POLICY.
+ */
+export const ApplicabilityLeakSchema = z.object({
+  sectionKey: z.string(),
+  matchedTerms: z.array(z.string()),
+  /** Descriptions of non-global rules this section's prose significantly overlaps under absolute-claim language, even with zero literal vocabulary-term matches. */
+  matchedNonGlobalRules: z.array(z.string()).optional().default([]),
+});
+export type ApplicabilityLeak = z.infer<typeof ApplicabilityLeakSchema>;
+
+/** The final, persisted playbook document: Gemini's validated Playbook plus code-generated coverage metadata and sections (Canonical Strategy Library, Coverage Notes, Source Index, Master Trading Checklist — see runSynthesis.ts). */
 export interface CoursePlaybookDocument extends Playbook {
   frameworkCoverage: FrameworkCoverage;
+  strategyScopeMapping: StrategyScopeMappingSummary;
+  universalApplicabilityLeaks: ApplicabilityLeak[];
+  unverifiedUniversalClaims: ApplicabilityLeak[];
+  scopedApplicabilityLeaks: ApplicabilityLeak[];
 }
 
 // ---- Stage 6: master decision framework -----------------------------------
+
+/**
+ * Real-audit fix (Phase 3.5B v3, Blockers A/C/D) — a SECOND real 28-lesson
+ * dry run found that self-reported `scope` (the v2 fix above, now
+ * superseded) was itself unreliable: Gemini placed a stock/equity-specific
+ * "Is Stock In Play?" gate before strategy selection with EMPTY scope
+ * arrays (a false negative for the leak detector), and separately produced
+ * a "minimum 2R target" decision node with empty/global scope even though
+ * the single CoreFramework rule it was clearly drawn from carried
+ * `marketsOrInstruments: ["options"], traderProfiles: ["beginner"]` — an
+ * internal fidelity disagreement between the structured rule and the
+ * decision node built from it.
+ *
+ * Root cause: asking Gemini to self-report a node's scope is exactly the
+ * same "make Gemini reproduce/re-derive data it shouldn't own" mistake
+ * this codebase already fixed once for SynthesizedRule (see that schema's
+ * own doc comment) — just reintroduced here for decision nodes. The fix is
+ * the same fix: NEVER ask for scope directly. Gemini instead cites
+ * "sourceKeys" — the exact source-pool key(s) (see decisionFramework.ts's
+ * buildDecisionSourcePool, which keys every CoreFramework and canonical-
+ * strategy rule) a node is built from. `scope` is then computed
+ * deterministically as the union of the cited rules' OWN already-known
+ * scope — it is now IMPOSSIBLE for a decision node to disagree with its
+ * structured source, and a node citing nothing has provably NOT been shown
+ * to be global (see decisionScopeAudit.ts, which now flags this "ungrounded"
+ * case in addition to a genuinely-scoped-but-placed-as-global one).
+ */
+export const RawDecisionNodeSchema = z.object({
+  id: z.string().min(1),
+  type: z.enum(["start", "decision", "action", "end"]),
+  label: z.string().min(1),
+  description: nullableString(),
+  next: z.array(z.string()),
+  branches: z.array(z.object({ label: z.string(), next: z.string() })),
+  /**
+   * The source-pool key(s) this node is built from — see
+   * decisionFramework.ts's buildDecisionSourcePool. Empty is legitimate
+   * ONLY for a "start"/"end" node or a "decision" node that purely presents
+   * a branching question (never asserts a rule itself) — every other node
+   * MUST cite at least one key, or decisionScopeAudit.ts's
+   * findGlobalGateScopeLeaks will flag it as an unproven ("ungrounded")
+   * global claim when it sits on the unconditional pre-strategy-selection
+   * path. An unrecognized/invented key is dropped, never fabricated into a
+   * scope contribution — mirrors canonicalStrategy.ts's resolveSourceKeys.
+   */
+  sourceKeys: z.array(z.string()),
+});
+export type RawDecisionNode = z.infer<typeof RawDecisionNodeSchema>;
+
+export const RawDecisionFrameworkSchema = z.object({
+  nodes: z.array(RawDecisionNodeSchema),
+  readableSteps: z.array(z.string()),
+});
+export type RawDecisionFramework = z.infer<typeof RawDecisionFrameworkSchema>;
 
 export const DecisionNodeSchema = z.object({
   id: z.string().min(1),
@@ -498,15 +825,81 @@ export const DecisionNodeSchema = z.object({
   description: nullableString(),
   next: z.array(z.string()),
   branches: z.array(z.object({ label: z.string(), next: z.string() })),
+  /** The validated (unknown keys dropped) citations this node's scope was derived from — kept for transparency/auditability, never re-trusted as authoritative on its own (see `scope`, which is the actual derived value). */
+  sourceKeys: z.array(z.string()),
+  /** Deterministically derived as the union of every cited source's own scope — see decisionFramework.ts. Every array empty means genuinely global; this can never disagree with the structured rule(s) it was built from, because it IS those rules' own scope, not a re-statement of it. */
+  scope: KnowledgeItemScopeSchema,
+  /**
+   * Real-audit fix (Phase 3.5B v4) — a THIRD real dry run showed `scope`
+   * being empty is not, on its own, proof of global applicability: a
+   * CoreFramework/canonical-strategy rule can itself be UNVERIFIED (see
+   * scopeBasis.ts) — cited from only scope-blind legacy evidence — in which
+   * case a node citing it inherits that same uncertainty even though the
+   * union of known scope is empty. Derived as the union-like aggregation of
+   * every cited source's own scopeBasis (SCOPED dominates; else UNVERIFIED
+   * if any citation is UNVERIFIED; else VERIFIED_GLOBAL) — never asked of
+   * Gemini.
+   */
+  scopeBasis: ScopeBasisSchema,
 });
+export type DecisionNode = z.infer<typeof DecisionNodeSchema>;
+
+export const DecisionNodeScopeLeakSchema = z.object({
+  nodeId: z.string(),
+  label: z.string(),
+  /** "ungrounded" = cited no source at all, so it was never proven global; "unverified_source" = citations exist but at least one carries no verified scope information (and none are known-scoped), so global applicability is not justified; "scoped_source" = its derived scope (from real citations) is non-empty, so it must not sit on the unconditional pre-strategy path. */
+  reason: z.enum(["ungrounded", "unverified_source", "scoped_source"]),
+  scope: KnowledgeItemScopeSchema,
+});
+export type DecisionNodeScopeLeak = z.infer<typeof DecisionNodeScopeLeakSchema>;
+
+/**
+ * Real-audit fix (v9, Part 3) — `nodes` carry a deterministically-derived
+ * `scope`/`scopeBasis` (see `DecisionNodeScopeLeakSchema` above), but
+ * `readableSteps` are plain fallback-prose strings with NO audited scope
+ * metadata at all — a TENTH real dry run found real scope broadening living
+ * there even while `scopeLeaks` (the node-level check) read empty: a step
+ * required every strategy to use retest entry + candle-body-close
+ * confirmation + relative-strength confirmation, and a separate step
+ * required every strategy to use HOD/LOD-target scaling + trailing runners
+ * — mechanics that are real, but only for SOME canonical strategies, not
+ * "the process" as a whole. See decisionScopeAudit.ts's
+ * findReadableStepScopeLeaks for the deterministic check.
+ */
+export const DecisionReadableStepLeakSchema = z.object({
+  stepIndex: z.number().int().nonnegative(),
+  step: z.string(),
+  /** "scoped_mechanic" = the step's wording closely echoes a KNOWN SCOPED rule (a real, named restriction is being erased); "unverified_mechanic" = it echoes an UNVERIFIED rule (no proven course-wide applicability either). */
+  reason: z.enum(["scoped_mechanic", "unverified_mechanic"]),
+  matchedNonGlobalRules: z.array(z.string()),
+});
+export type DecisionReadableStepLeak = z.infer<typeof DecisionReadableStepLeakSchema>;
 
 export const DecisionFrameworkSchema = z.object({
   nodes: z.array(DecisionNodeSchema),
   readableSteps: z.array(z.string()),
+  /**
+   * Deterministic, computed by decisionScopeAudit.ts's
+   * findGlobalGateScopeLeaks AFTER citations are resolved — never asked of
+   * or trusted from Gemini itself. Should be empty by construction once
+   * the citation-based prompt holds, but is reported rather than silently
+   * trusted, exactly like `unmatched_strategy_scoped_knowledge` elsewhere
+   * in this codebase never silently drops what it can't confidently place.
+   */
+  scopeLeaks: z.array(DecisionNodeScopeLeakSchema).optional().default([]),
+  /**
+   * Real-audit fix (v9, Part 3) — the `readableSteps` counterpart to
+   * `scopeLeaks` above, computed by decisionScopeAudit.ts's
+   * findReadableStepScopeLeaks. Participates in the SAME overall PASS/FAIL
+   * calculation as `scopeLeaks` (see scripts/synthesisDryRun.ts) — a
+   * readable step is never exempt from scope fidelity merely because it's
+   * fallback prose rather than a graph node.
+   */
+  readableStepLeaks: z.array(DecisionReadableStepLeakSchema).optional().default([]),
 });
 export type DecisionFramework = z.infer<typeof DecisionFrameworkSchema>;
 
-export const DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
+export const RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
   type: "object",
   properties: {
     nodes: {
@@ -527,8 +920,9 @@ export const DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
               required: ["label", "next"],
             },
           },
+          sourceKeys: { type: "array", items: { type: "string" } },
         },
-        required: ["id", "type", "label", "next", "branches"],
+        required: ["id", "type", "label", "next", "branches", "sourceKeys"],
       },
     },
     readableSteps: { type: "array", items: { type: "string" } },
