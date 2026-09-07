@@ -15,7 +15,7 @@ import {
   RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   PLAYBOOK_RESPONSE_JSON_SCHEMA,
-  DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+  RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
 } from "../src/synthesis/schema.js";
 import { SCOPE_MAPPING_RESPONSE_JSON_SCHEMA } from "../src/synthesis/strategyScopeMapping.js";
 
@@ -150,7 +150,7 @@ async function main(): Promise<void> {
       [RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA, "canonical_strategy"],
       [RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA, "core_framework"],
       [PLAYBOOK_RESPONSE_JSON_SCHEMA, "playbook"],
-      [DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA, "decision_framework"],
+      [RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA, "decision_framework"],
       [SCOPE_MAPPING_RESPONSE_JSON_SCHEMA, "strategy_scope_mapping"],
     ]);
 

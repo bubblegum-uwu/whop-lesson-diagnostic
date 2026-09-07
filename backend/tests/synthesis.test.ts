@@ -22,7 +22,7 @@ import {
   RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   PLAYBOOK_RESPONSE_JSON_SCHEMA,
-  DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+  RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   RULE_CATEGORY_KEYS,
   type RawCanonicalStrategy,
 } from "../src/synthesis/schema.js";
@@ -368,7 +368,7 @@ function validPlaybookJson() {
 
 function validDecisionFrameworkJson() {
   return JSON.stringify({
-    nodes: [{ id: "start", type: "start", label: "Start", description: null, next: ["end"], branches: [] }],
+    nodes: [{ id: "start", type: "start", label: "Start", description: null, next: ["end"], branches: [], sourceKeys: [] }],
     readableSteps: ["Start", "Manage trade", "Exit"],
   });
 }
@@ -1016,7 +1016,7 @@ describe("synthesis response schemas — no array-valued 'type' nodes", () => {
     RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
     CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
     PLAYBOOK_RESPONSE_JSON_SCHEMA,
-    DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+    RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   };
 
   for (const [name, schema] of Object.entries(schemas)) {

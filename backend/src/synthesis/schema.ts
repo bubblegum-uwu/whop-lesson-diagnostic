@@ -632,13 +632,89 @@ export const StrategyScopeMappingSummarySchema = z.object({
 });
 export type StrategyScopeMappingSummary = z.infer<typeof StrategyScopeMappingSummarySchema>;
 
+/**
+ * Real-audit fix (Phase 3.5B v3, Blocker B) — a SECOND real dry run showed
+ * "Master Trading Checklist" claiming to apply "before, during, and after
+ * every trading session" while actually containing intraday/equities/
+ * options-only steps (session windows, PMH/PML, 1-5 minute execution,
+ * options contract rules). The primary fix is architectural (playbook.ts
+ * now shows Gemini ONLY genuinely global rules for this section — see
+ * frameworkScopeSplit.ts); this is the deterministic secondary safety net,
+ * since prose (unlike a decision graph) has no citation mechanism to
+ * validate by lineage alone. Best-effort: flags a universal-labeled
+ * section whose text contains a term drawn from a REAL scoped rule's own
+ * scope arrays (instrument/session/timeframe/trader-profile values) —
+ * never generic NLP classification, per this codebase's stated preference
+ * for a safer data-lineage-adjacent check over free-text understanding.
+ */
+export const UniversalSectionScopeLeakSchema = z.object({
+  sectionKey: z.string(),
+  matchedTerms: z.array(z.string()),
+});
+export type UniversalSectionScopeLeak = z.infer<typeof UniversalSectionScopeLeakSchema>;
+
 /** The final, persisted playbook document: Gemini's validated Playbook plus code-generated coverage metadata and sections (Canonical Strategy Library, Coverage Notes, Source Index — see runSynthesis.ts). */
 export interface CoursePlaybookDocument extends Playbook {
   frameworkCoverage: FrameworkCoverage;
   strategyScopeMapping: StrategyScopeMappingSummary;
+  universalSectionScopeLeaks: UniversalSectionScopeLeak[];
 }
 
 // ---- Stage 6: master decision framework -----------------------------------
+
+/**
+ * Real-audit fix (Phase 3.5B v3, Blockers A/C/D) — a SECOND real 28-lesson
+ * dry run found that self-reported `scope` (the v2 fix above, now
+ * superseded) was itself unreliable: Gemini placed a stock/equity-specific
+ * "Is Stock In Play?" gate before strategy selection with EMPTY scope
+ * arrays (a false negative for the leak detector), and separately produced
+ * a "minimum 2R target" decision node with empty/global scope even though
+ * the single CoreFramework rule it was clearly drawn from carried
+ * `marketsOrInstruments: ["options"], traderProfiles: ["beginner"]` — an
+ * internal fidelity disagreement between the structured rule and the
+ * decision node built from it.
+ *
+ * Root cause: asking Gemini to self-report a node's scope is exactly the
+ * same "make Gemini reproduce/re-derive data it shouldn't own" mistake
+ * this codebase already fixed once for SynthesizedRule (see that schema's
+ * own doc comment) — just reintroduced here for decision nodes. The fix is
+ * the same fix: NEVER ask for scope directly. Gemini instead cites
+ * "sourceKeys" — the exact source-pool key(s) (see decisionFramework.ts's
+ * buildDecisionSourcePool, which keys every CoreFramework and canonical-
+ * strategy rule) a node is built from. `scope` is then computed
+ * deterministically as the union of the cited rules' OWN already-known
+ * scope — it is now IMPOSSIBLE for a decision node to disagree with its
+ * structured source, and a node citing nothing has provably NOT been shown
+ * to be global (see decisionScopeAudit.ts, which now flags this "ungrounded"
+ * case in addition to a genuinely-scoped-but-placed-as-global one).
+ */
+export const RawDecisionNodeSchema = z.object({
+  id: z.string().min(1),
+  type: z.enum(["start", "decision", "action", "end"]),
+  label: z.string().min(1),
+  description: nullableString(),
+  next: z.array(z.string()),
+  branches: z.array(z.object({ label: z.string(), next: z.string() })),
+  /**
+   * The source-pool key(s) this node is built from — see
+   * decisionFramework.ts's buildDecisionSourcePool. Empty is legitimate
+   * ONLY for a "start"/"end" node or a "decision" node that purely presents
+   * a branching question (never asserts a rule itself) — every other node
+   * MUST cite at least one key, or decisionScopeAudit.ts's
+   * findGlobalGateScopeLeaks will flag it as an unproven ("ungrounded")
+   * global claim when it sits on the unconditional pre-strategy-selection
+   * path. An unrecognized/invented key is dropped, never fabricated into a
+   * scope contribution — mirrors canonicalStrategy.ts's resolveSourceKeys.
+   */
+  sourceKeys: z.array(z.string()),
+});
+export type RawDecisionNode = z.infer<typeof RawDecisionNodeSchema>;
+
+export const RawDecisionFrameworkSchema = z.object({
+  nodes: z.array(RawDecisionNodeSchema),
+  readableSteps: z.array(z.string()),
+});
+export type RawDecisionFramework = z.infer<typeof RawDecisionFrameworkSchema>;
 
 export const DecisionNodeSchema = z.object({
   id: z.string().min(1),
@@ -647,73 +723,38 @@ export const DecisionNodeSchema = z.object({
   description: nullableString(),
   next: z.array(z.string()),
   branches: z.array(z.object({ label: z.string(), next: z.string() })),
-  /**
-   * Real-audit fix (Phase 3.5B) — same convention as KnowledgeItem.scope
-   * (gemini/schema.ts): a REQUIRED, non-nullable object where every array
-   * empty means genuinely global (applies on every path); any non-empty
-   * array means this node's gate/action is conditioned on that
-   * instrument/timeframe/session/trader-profile/strategy restriction and
-   * must NEVER be placed on the unconditional path before that context is
-   * established (see decisionFramework.ts's buildPrompt and
-   * decisionScopeAudit.ts's findGlobalGateScopeLeaks, which validates this
-   * deterministically via the same isKnowledgeItemScoped derivation — never
-   * a separate Gemini-generated GLOBAL/SCOPED label). A real audit found a
-   * genuinely scoped rule (a 9:30-11am intraday/options-only execution
-   * window) turned into an unconditional global gate, incorrectly
-   * constraining unrelated daily/weekly and swing strategies.
-   */
-  scope: KnowledgeItemScopeSchema.optional().default(() => ({ strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] })),
+  /** The validated (unknown keys dropped) citations this node's scope was derived from — kept for transparency/auditability, never re-trusted as authoritative on its own (see `scope`, which is the actual derived value). */
+  sourceKeys: z.array(z.string()),
+  /** Deterministically derived as the union of every cited source's own scope — see decisionFramework.ts. Every array empty means genuinely global; this can never disagree with the structured rule(s) it was built from, because it IS those rules' own scope, not a re-statement of it. */
+  scope: KnowledgeItemScopeSchema,
 });
+export type DecisionNode = z.infer<typeof DecisionNodeSchema>;
 
 export const DecisionNodeScopeLeakSchema = z.object({
   nodeId: z.string(),
   label: z.string(),
+  /** "ungrounded" = cited no source at all, so it was never proven global; "scoped_source" = its derived scope (from real citations) is non-empty, so it must not sit on the unconditional pre-strategy path. */
+  reason: z.enum(["ungrounded", "scoped_source"]),
   scope: KnowledgeItemScopeSchema,
 });
+export type DecisionNodeScopeLeak = z.infer<typeof DecisionNodeScopeLeakSchema>;
 
 export const DecisionFrameworkSchema = z.object({
   nodes: z.array(DecisionNodeSchema),
   readableSteps: z.array(z.string()),
   /**
-   * Real-audit fix (Phase 3.5B) — deterministic, computed by
-   * decisionScopeAudit.ts's findGlobalGateScopeLeaks AFTER Gemini's
-   * response is validated, never asked of or trusted from Gemini itself
-   * (defaults to [] on the raw Gemini response, then is overwritten with
-   * the real computed value — see decisionFramework.ts). Any node here
-   * means a genuinely scoped rule was placed on the unconditional global
-   * path before strategy selection — a structural bug in the returned
-   * graph that should be empty by construction once the prompt fix holds,
-   * but is reported rather than silently trusted.
+   * Deterministic, computed by decisionScopeAudit.ts's
+   * findGlobalGateScopeLeaks AFTER citations are resolved — never asked of
+   * or trusted from Gemini itself. Should be empty by construction once
+   * the citation-based prompt holds, but is reported rather than silently
+   * trusted, exactly like `unmatched_strategy_scoped_knowledge` elsewhere
+   * in this codebase never silently drops what it can't confidently place.
    */
   scopeLeaks: z.array(DecisionNodeScopeLeakSchema).optional().default([]),
 });
 export type DecisionFramework = z.infer<typeof DecisionFrameworkSchema>;
 
-/**
- * JSON schema mirror of KnowledgeItemScope, for the one place besides
- * KnowledgeItem extraction itself where Gemini is actually asked to
- * produce a scope object — DecisionNode.scope, since a decision-graph node
- * has no deterministic source to derive its scope from (unlike
- * SynthesizedRule.scope, which is always attached deterministically from
- * cited sources — see canonicalStrategy.ts/coreFramework.ts). Nullability
- * is represented by OMISSION from the node's `required` list below (this
- * file's established convention — see nullableString()'s doc comment) —
- * never an array-valued "type", which this codebase's own schema tests
- * assert never appears anywhere in a response schema.
- */
-const decisionNodeScopeJsonSchema = {
-  type: "object",
-  properties: {
-    strategies: { type: "array", items: { type: "string" } },
-    marketsOrInstruments: { type: "array", items: { type: "string" } },
-    timeframes: { type: "array", items: { type: "string" } },
-    sessions: { type: "array", items: { type: "string" } },
-    traderProfiles: { type: "array", items: { type: "string" } },
-  },
-  required: ["strategies", "marketsOrInstruments", "timeframes", "sessions", "traderProfiles"],
-};
-
-export const DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
+export const RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
   type: "object",
   properties: {
     nodes: {
@@ -734,9 +775,9 @@ export const DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
               required: ["label", "next"],
             },
           },
-          scope: decisionNodeScopeJsonSchema,
+          sourceKeys: { type: "array", items: { type: "string" } },
         },
-        required: ["id", "type", "label", "next", "branches", "scope"],
+        required: ["id", "type", "label", "next", "branches", "sourceKeys"],
       },
     },
     readableSteps: { type: "array", items: { type: "string" } },

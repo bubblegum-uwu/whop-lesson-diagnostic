@@ -365,8 +365,8 @@ describe("Real-audit Blockers 4/5 — decision framework must not globalize scop
 
     await synthesizeDecisionFramework({ gemini, model: "m" }, [fullCanonicalStrategy], coreFramework as never);
 
-    expect(capturedPrompt).toContain("GLOBAL course-wide framework rules");
-    expect(capturedPrompt).toContain("SCOPED course-wide framework rules");
+    expect(capturedPrompt).toContain("GENUINELY GLOBAL rules");
+    expect(capturedPrompt).toContain("SCOPED rules");
     expect(capturedPrompt).toContain("Always define risk before entry.");
     expect(capturedPrompt).toContain("Trade only 9:30-11:00 AM ET.");
     expect(capturedPrompt).toContain("9:30-11:00 AM");
@@ -374,29 +374,32 @@ describe("Real-audit Blockers 4/5 — decision framework must not globalize scop
     expect(capturedPrompt).toContain('"marketsOrInstruments"');
 
     // Split the prompt at the SCOPED-pool marker: the global-only rule must appear before it, the scoped rule's restriction detail must appear after it.
-    const scopedPoolIndex = capturedPrompt.indexOf("SCOPED course-wide framework rules");
+    const scopedPoolIndex = capturedPrompt.indexOf("SCOPED rules");
     const globalRuleIndex = capturedPrompt.indexOf("Always define risk before entry.");
     expect(globalRuleIndex).toBeLessThan(scopedPoolIndex);
   });
 
-  it("findGlobalGateScopeLeaks flags a scoped rule placed on the unconditional path before strategy selection (the exact real-audit failure)", async () => {
+  it("findGlobalGateScopeLeaks flags a node whose CITED sources derive a scoped `scope`, placed on the unconditional path before strategy selection (the exact real-audit failure, v3: scope is now always derived from sourceKeys, never self-reported)", async () => {
     const { findGlobalGateScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
     const badDecisionFramework = {
       nodes: [
-        { id: "start", type: "start" as const, label: "Start", description: null, next: ["session-gate"], branches: [], scope: emptyScope() },
+        { id: "start", type: "start" as const, label: "Start", description: null, next: ["session-gate"], branches: [], sourceKeys: [], scope: emptyScope() },
         {
           // The exact real-audit failure: a 9:30-11am/options/1m-5m-scoped rule placed as an UNCONDITIONAL gate.
+          // sourceKeys/scope here represent what decisionFramework.ts's enrichNode would have DERIVED from the cited
+          // scoped source — never self-reported, so this can only happen when the node is honestly built from scoped material.
           id: "session-gate",
           type: "action" as const,
           label: "Trending & Normal Session (9:30 - 11:00 AM EST...)",
           description: null,
           next: ["pick-strategy"],
           branches: [],
+          sourceKeys: ["k1"],
           scope: emptyScope({ marketsOrInstruments: ["options"], timeframes: ["1m", "5m"], sessions: ["market-open"] }),
         },
-        { id: "pick-strategy", type: "decision" as const, label: "Which canonical strategy applies?", description: null, next: [], branches: [{ label: "Break and Retest", next: "br-path" }, { label: "Fibonacci", next: "fib-path" }], scope: emptyScope() },
-        { id: "br-path", type: "action" as const, label: "Break and Retest entry", description: null, next: [], branches: [], scope: emptyScope() },
-        { id: "fib-path", type: "action" as const, label: "Fibonacci entry (daily/weekly)", description: null, next: [], branches: [], scope: emptyScope() },
+        { id: "pick-strategy", type: "decision" as const, label: "Which canonical strategy applies?", description: null, next: [], branches: [{ label: "Break and Retest", next: "br-path" }, { label: "Fibonacci", next: "fib-path" }], sourceKeys: [], scope: emptyScope() },
+        { id: "br-path", type: "action" as const, label: "Break and Retest entry", description: null, next: [], branches: [], sourceKeys: ["k2"], scope: emptyScope() },
+        { id: "fib-path", type: "action" as const, label: "Fibonacci entry (daily/weekly)", description: null, next: [], branches: [], sourceKeys: ["k3"], scope: emptyScope() },
       ],
       readableSteps: [],
       scopeLeaks: [],
@@ -405,6 +408,7 @@ describe("Real-audit Blockers 4/5 — decision framework must not globalize scop
     const leaks = findGlobalGateScopeLeaks(badDecisionFramework as never);
     expect(leaks).toHaveLength(1);
     expect(leaks[0].nodeId).toBe("session-gate");
+    expect(leaks[0].reason).toBe("scoped_source");
     expect(leaks[0].scope.sessions).toEqual(["market-open"]);
   });
 
@@ -412,7 +416,7 @@ describe("Real-audit Blockers 4/5 — decision framework must not globalize scop
     const { findGlobalGateScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
     const goodDecisionFramework = {
       nodes: [
-        { id: "start", type: "start" as const, label: "Start", description: null, next: ["pick-strategy"], branches: [], scope: emptyScope() },
+        { id: "start", type: "start" as const, label: "Start", description: null, next: ["pick-strategy"], branches: [], sourceKeys: [], scope: emptyScope() },
         {
           id: "pick-strategy",
           type: "decision" as const,
@@ -424,6 +428,7 @@ describe("Real-audit Blockers 4/5 — decision framework must not globalize scop
             { label: "Fibonacci (daily/weekly)", next: "fib-path" },
             { label: "Inside Bar (swing)", next: "inside-bar-path" },
           ],
+          sourceKeys: [],
           scope: emptyScope(),
         },
         {
@@ -434,9 +439,10 @@ describe("Real-audit Blockers 4/5 — decision framework must not globalize scop
           description: null,
           next: [],
           branches: [],
+          sourceKeys: ["k1"],
           scope: emptyScope({ marketsOrInstruments: ["options"], sessions: ["market-open"] }),
         },
-        { id: "fib-path", type: "action" as const, label: "Fibonacci entry — no session restriction", description: null, next: [], branches: [], scope: emptyScope() },
+        { id: "fib-path", type: "action" as const, label: "Fibonacci entry — no session restriction", description: null, next: [], branches: [], sourceKeys: ["k2"], scope: emptyScope() },
         {
           id: "inside-bar-path",
           type: "action" as const,
@@ -444,6 +450,7 @@ describe("Real-audit Blockers 4/5 — decision framework must not globalize scop
           description: null,
           next: [],
           branches: [],
+          sourceKeys: ["k3"],
           scope: emptyScope(),
         },
       ],
@@ -611,5 +618,491 @@ describe("Real-audit Blocker 7 — unmatched strategy-scope aliasing review", ()
     });
     const { result } = await resolveStrategyScopeNames({ gemini, model: "m" }, ["Premarket Reversal"], clusters);
     expect(result.mapped.get("Premarket Reversal")).toBe("pmh");
+  });
+});
+
+/**
+ * SECOND real-data audit regression tests (Phase 3.5B v3) — see PR #13's
+ * second real 28-lesson dry-run audit. Blockers A/C are architectural: a
+ * decision node's `scope` is no longer ever self-reported by Gemini — it is
+ * derived deterministically from `sourceKeys`, the pooled rule(s) the node
+ * actually cites (see decisionFramework.ts). Blocker B restricts what
+ * Gemini is shown when writing "master_trading_checklist" to genuinely
+ * global material only (see playbook.ts), with a deterministic secondary
+ * vocabulary check (universalSectionAudit.ts) as a safety net. Blocker D is
+ * the resulting strengthened decisionScopeAudit.ts, exercised throughout.
+ */
+function fullCanonicalStrategyV3(overrides: Record<string, unknown>) {
+  return {
+    name: "Strategy",
+    purpose: "p",
+    markets: [],
+    timeframes: [],
+    marketContext: [], prerequisites: [], setup: [], entryRules: [], confirmationRules: [], stopLossRules: [],
+    profitTargetRules: [], tradeManagementRules: [], invalidationRules: [], noTradeConditions: [], visualDiscretionaryRules: [],
+    riskManagementRules: [], positionSizingRules: [], scalingInRules: [], scalingOutRules: [], runnerManagementRules: [],
+    warnings: [], instructorPreferences: [], variants: [], examples: [], ambiguities: [], conflicts: [],
+    sourceLessonIds: [], supportingKnowledgeLessonIds: [],
+    ...overrides,
+  };
+}
+
+describe("Real-audit Blocker A — decision-node scope is derived from cited sources, never self-reported (fixes the 'Is Stock In Play?' false negative)", () => {
+  it("citing a stock-scoped source rule derives a non-empty scope for the node — a stock/equity-specific gate can never surface as global just because Gemini emits empty scope arrays", async () => {
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          nodes: [
+            { id: "start", type: "start", label: "Start", description: null, next: ["stock-in-play-gate"], branches: [], sourceKeys: [] },
+            {
+              id: "stock-in-play-gate",
+              type: "action",
+              label: "Is Stock In Play & Criteria Satisfied?",
+              description: "Verify that the asset is 'In Play' with clear levels, volume expansion, or fundamental catalysts.",
+              next: ["pick-strategy"],
+              branches: [],
+              sourceKeys: ["k1"],
+            },
+            { id: "pick-strategy", type: "decision", label: "Which canonical strategy applies?", description: null, next: [], branches: [{ label: "Momentum Stock Breakout", next: "end" }], sourceKeys: [] },
+            { id: "end", type: "end", label: "End", description: null, next: [], branches: [], sourceKeys: [] },
+          ],
+          readableSteps: ["Check In Play", "Pick strategy"],
+        }),
+        usage,
+      })),
+    });
+
+    const { synthesizeDecisionFramework } = await import("../src/synthesis/decisionFramework.js");
+    const momentumStock = fullCanonicalStrategyV3({
+      name: "Momentum Stock Breakout",
+      setup: [
+        {
+          description: "Verify that the asset is 'In Play' with clear levels, volume expansion, or fundamental catalysts.",
+          classification: "explicit",
+          supportLevel: "SINGLE_SOURCE",
+          supportCount: 1,
+          sources: [],
+          conflictSources: [],
+          exceptions: [],
+          numericalValues: [],
+          scope: { strategies: [], marketsOrInstruments: ["stocks"], timeframes: [], sessions: [], traderProfiles: [] },
+        },
+      ],
+    });
+
+    const { decisionFramework } = await synthesizeDecisionFramework({ gemini, model: "m" }, [momentumStock as never], { sections: [] } as never);
+
+    const gateNode = decisionFramework.nodes.find((n) => n.id === "stock-in-play-gate")!;
+    // Gemini cited k1 but never claimed a scope itself — this is 100% code-derived from that citation's own already-known scope.
+    expect(gateNode.scope.marketsOrInstruments).toEqual(["stocks"]);
+    expect(decisionFramework.scopeLeaks).toHaveLength(1);
+    expect(decisionFramework.scopeLeaks[0]).toMatchObject({ nodeId: "stock-in-play-gate", reason: "scoped_source" });
+  });
+
+  it("a citation-less ('ungrounded') pre-strategy gate is flagged even though its derived scope is empty — closes the exact v2 false negative where a self-reported empty scope was silently trusted as global", async () => {
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          nodes: [
+            { id: "start", type: "start", label: "Start", description: null, next: ["stock-in-play-gate"], branches: [], sourceKeys: [] },
+            {
+              // No sourceKeys at all — exactly the real-audit failure: an unconditional gate with nothing backing it.
+              id: "stock-in-play-gate",
+              type: "action",
+              label: "Is Stock In Play & Criteria Satisfied?",
+              description: "Verify that the asset is 'In Play' with clear levels, volume expansion, or fundamental catalysts.",
+              next: ["pick-strategy"],
+              branches: [],
+              sourceKeys: [],
+            },
+            { id: "pick-strategy", type: "decision", label: "Which canonical strategy applies?", description: null, next: [], branches: [{ label: "Futures Trend Continuation", next: "end" }], sourceKeys: [] },
+            { id: "end", type: "end", label: "End", description: null, next: [], branches: [], sourceKeys: [] },
+          ],
+          readableSteps: ["Check In Play", "Pick strategy"],
+        }),
+        usage,
+      })),
+    });
+
+    const { synthesizeDecisionFramework } = await import("../src/synthesis/decisionFramework.js");
+    const futures = fullCanonicalStrategyV3({ name: "Futures Trend Continuation" });
+    const { decisionFramework } = await synthesizeDecisionFramework({ gemini, model: "m" }, [futures as never], { sections: [] } as never);
+
+    const gateNode = decisionFramework.nodes.find((n) => n.id === "stock-in-play-gate")!;
+    expect(gateNode.scope).toEqual(emptyScope()); // v2 would have silently trusted this self-reported-empty scope as global
+    expect(decisionFramework.scopeLeaks).toHaveLength(1);
+    expect(decisionFramework.scopeLeaks[0]).toMatchObject({ nodeId: "stock-in-play-gate", reason: "ungrounded" });
+  });
+
+  it("a genuinely global rule may remain global — a node citing a truly empty-scope source is never flagged", async () => {
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          nodes: [
+            { id: "start", type: "start", label: "Start", description: null, next: ["risk-gate"], branches: [], sourceKeys: [] },
+            { id: "risk-gate", type: "action", label: "Always define risk before entry", description: null, next: ["pick-strategy"], branches: [], sourceKeys: ["k1"] },
+            { id: "pick-strategy", type: "decision", label: "Which canonical strategy applies?", description: null, next: [], branches: [{ label: "Strategy", next: "end" }], sourceKeys: [] },
+            { id: "end", type: "end", label: "End", description: null, next: [], branches: [], sourceKeys: [] },
+          ],
+          readableSteps: ["Define risk", "Pick strategy"],
+        }),
+        usage,
+      })),
+    });
+
+    const { synthesizeDecisionFramework } = await import("../src/synthesis/decisionFramework.js");
+    const coreFramework = {
+      sections: [
+        {
+          key: "risk",
+          title: "Risk",
+          rules: [{ description: "Always define risk before entry.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 3, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: null }],
+        },
+      ],
+    };
+    const strategy = fullCanonicalStrategyV3({ name: "Strategy" });
+    const { decisionFramework } = await synthesizeDecisionFramework({ gemini, model: "m" }, [strategy as never], coreFramework as never);
+
+    const riskNode = decisionFramework.nodes.find((n) => n.id === "risk-gate")!;
+    expect(riskNode.scope).toEqual(emptyScope());
+    expect(decisionFramework.scopeLeaks).toEqual([]);
+  });
+
+  it("a futures strategy and a forex strategy each reach strategy selection without satisfying a stock-specific 'In Play'/mega-cap gate, which is correctly placed only behind the stock strategy's own branch", async () => {
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          nodes: [
+            { id: "start", type: "start", label: "Start", description: null, next: ["pick-strategy"], branches: [], sourceKeys: [] },
+            {
+              id: "pick-strategy",
+              type: "decision",
+              label: "Which canonical strategy applies?",
+              description: null,
+              next: [],
+              branches: [
+                { label: "Momentum Stock Breakout", next: "stock-in-play-gate" },
+                { label: "Futures Trend Continuation", next: "futures-path" },
+                { label: "Forex Session Breakout", next: "forex-path" },
+              ],
+              sourceKeys: [],
+            },
+            { id: "stock-in-play-gate", type: "action", label: "Is Stock In Play & Criteria Satisfied?", description: null, next: ["stock-path"], branches: [], sourceKeys: ["k1"] },
+            { id: "stock-path", type: "action", label: "Momentum Stock Breakout entry", description: null, next: [], branches: [], sourceKeys: [] },
+            { id: "futures-path", type: "action", label: "Futures Trend Continuation entry", description: null, next: [], branches: [], sourceKeys: [] },
+            { id: "forex-path", type: "action", label: "Forex Session Breakout entry", description: null, next: [], branches: [], sourceKeys: [] },
+          ],
+          readableSteps: ["Pick strategy", "Stock: check In Play", "Futures/Forex: enter directly"],
+        }),
+        usage,
+      })),
+    });
+
+    const { synthesizeDecisionFramework } = await import("../src/synthesis/decisionFramework.js");
+    const momentumStock = fullCanonicalStrategyV3({
+      name: "Momentum Stock Breakout",
+      setup: [
+        {
+          description: "Verify In Play.",
+          classification: "explicit",
+          supportLevel: "SINGLE_SOURCE",
+          supportCount: 1,
+          sources: [],
+          conflictSources: [],
+          exceptions: [],
+          numericalValues: [],
+          scope: { strategies: [], marketsOrInstruments: ["stocks"], timeframes: [], sessions: [], traderProfiles: [] },
+        },
+      ],
+    });
+    const futures = fullCanonicalStrategyV3({ name: "Futures Trend Continuation" });
+    const forex = fullCanonicalStrategyV3({ name: "Forex Session Breakout" });
+
+    const { decisionFramework } = await synthesizeDecisionFramework(
+      { gemini, model: "m" },
+      [momentumStock as never, futures as never, forex as never],
+      { sections: [] } as never,
+    );
+
+    // The stock-only gate sits BEHIND the "Momentum Stock Breakout" branch — never on the
+    // unconditional spine reachable before strategy selection — so nothing is flagged.
+    expect(decisionFramework.scopeLeaks).toEqual([]);
+
+    const byId = new Map(decisionFramework.nodes.map((n) => [n.id, n]));
+    // Futures/forex paths are reachable directly from their own branch — never routed through stock-in-play-gate.
+    expect(byId.get("futures-path")).toBeDefined();
+    expect(byId.get("forex-path")).toBeDefined();
+    expect(byId.get("stock-in-play-gate")!.scope.marketsOrInstruments).toEqual(["stocks"]);
+  });
+});
+
+describe("Real-audit Blocker C — a decision node's applicability can never disagree with (or be broader than) the structured rule(s) it was synthesized from", () => {
+  it("citing CoreFramework's options/beginner-scoped 2R rule derives that SAME scope on the decision node — it can never surface as an empty-scope universal 'minimum 2R target' node", async () => {
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          nodes: [
+            { id: "start", type: "start", label: "Start", description: null, next: ["two-r-gate"], branches: [], sourceKeys: [] },
+            { id: "two-r-gate", type: "action", label: "Target a minimum 2R", description: null, next: ["end"], branches: [], sourceKeys: ["k1"] },
+            { id: "end", type: "end", label: "End", description: null, next: [], branches: [], sourceKeys: [] },
+          ],
+          readableSteps: ["Target 2R"],
+        }),
+        usage,
+      })),
+    });
+
+    const { synthesizeDecisionFramework } = await import("../src/synthesis/decisionFramework.js");
+    const twoRScope = { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner"] };
+    const coreFramework = {
+      sections: [
+        {
+          key: "risk",
+          title: "Risk",
+          rules: [
+            {
+              description: "Structure trades to target a minimum reward-to-risk ratio of at least 2:1.",
+              classification: "explicit",
+              supportLevel: "SINGLE_SOURCE",
+              supportCount: 1,
+              sources: [],
+              conflictSources: [],
+              exceptions: [],
+              numericalValues: [],
+              scope: twoRScope,
+            },
+          ],
+        },
+      ],
+    };
+    const strategy = fullCanonicalStrategyV3({ name: "Strategy" });
+    const { decisionFramework } = await synthesizeDecisionFramework({ gemini, model: "m" }, [strategy as never], coreFramework as never);
+
+    const twoRNode = decisionFramework.nodes.find((n) => n.id === "two-r-gate")!;
+    // The node's scope is EXACTLY the cited rule's own scope — never broader, never emptied out.
+    expect(twoRNode.scope).toEqual(twoRScope);
+    // Being genuinely scoped (options/beginner), it must still be caught if it sits on the unconditional pre-strategy spine.
+    expect(decisionFramework.scopeLeaks).toHaveLength(1);
+    expect(decisionFramework.scopeLeaks[0]).toMatchObject({ nodeId: "two-r-gate", reason: "scoped_source" });
+  });
+
+  it("a node citing BOTH a genuinely global rule and a scoped rule derives the UNION of their scopes — it is never treated as an unconditional global gate merely because one of its sources was global", async () => {
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          nodes: [
+            { id: "start", type: "start", label: "Start", description: null, next: ["combined-gate"], branches: [], sourceKeys: [] },
+            { id: "combined-gate", type: "action", label: "Define risk; beginners size down", description: null, next: ["end"], branches: [], sourceKeys: ["k1", "k2"] },
+            { id: "end", type: "end", label: "End", description: null, next: [], branches: [], sourceKeys: [] },
+          ],
+          readableSteps: ["Define risk"],
+        }),
+        usage,
+      })),
+    });
+    const { synthesizeDecisionFramework } = await import("../src/synthesis/decisionFramework.js");
+    const coreFramework = {
+      sections: [
+        {
+          key: "risk",
+          title: "Risk",
+          rules: [
+            { description: "Always define risk before entry.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 3, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: null },
+            {
+              description: "Beginners should size positions smaller.",
+              classification: "explicit",
+              supportLevel: "SINGLE_SOURCE",
+              supportCount: 1,
+              sources: [],
+              conflictSources: [],
+              exceptions: [],
+              numericalValues: [],
+              scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: ["beginner"] },
+            },
+          ],
+        },
+      ],
+    };
+    const strategy = fullCanonicalStrategyV3({ name: "Strategy" });
+    const { decisionFramework } = await synthesizeDecisionFramework({ gemini, model: "m" }, [strategy as never], coreFramework as never);
+
+    const combinedNode = decisionFramework.nodes.find((n) => n.id === "combined-gate")!;
+    // Citing a global (k1) and a scoped (k2) source at once yields the UNION — the scoped restriction is never diluted away by the global citation.
+    expect(combinedNode.scope.traderProfiles).toEqual(["beginner"]);
+    expect(decisionFramework.scopeLeaks).toHaveLength(1);
+    expect(decisionFramework.scopeLeaks[0]).toMatchObject({ nodeId: "combined-gate", reason: "scoped_source" });
+  });
+});
+
+describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be built from scoped/intraday-only material; scoped content routes to 'scoped_execution_checklists' instead", () => {
+  it("shows Gemini ONLY genuinely-global core framework material for master_trading_checklist; the 9:30-11 AM/options-scoped rule appears only in the scoped_execution_checklists material", async () => {
+    const { synthesizePlaybook } = await import("../src/synthesis/playbook.js");
+    let capturedPrompt = "";
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        capturedPrompt = prompt;
+        return { text: JSON.stringify({ title: "P", sections: [], conflictsAndAmbiguities: [] }), usage };
+      }),
+    });
+
+    const coreFramework = {
+      sections: [
+        {
+          key: "risk",
+          title: "Risk",
+          rules: [
+            { description: "Always define risk before entry.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 3, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: null },
+            {
+              description: "Trade only 9:30-11:00 AM ET, liquid mega-cap stocks with options volume.",
+              classification: "explicit",
+              supportLevel: "SINGLE_SOURCE",
+              supportCount: 1,
+              sources: [],
+              conflictSources: [],
+              exceptions: [],
+              numericalValues: [],
+              scope: { strategies: [], marketsOrInstruments: ["options", "stocks"], timeframes: ["1m", "5m"], sessions: ["market-open"], traderProfiles: [] },
+            },
+          ],
+        },
+      ],
+    };
+    const strategy = fullCanonicalStrategyV3({ name: "Strategy" });
+
+    await synthesizePlaybook({ gemini, model: "m" }, "Trading Accelerator", [strategy as never], coreFramework as never);
+
+    expect(capturedPrompt).toContain("scoped_execution_checklists");
+    expect(capturedPrompt).toContain("EXCLUSIVELY from the GENUINELY GLOBAL core framework rules");
+    expect(capturedPrompt).toContain("Always define risk before entry.");
+
+    // The full coreFramework JSON dump (used by OTHER sections like risk_management) legitimately
+    // contains the scoped rule too — so isolate the GENUINELY GLOBAL material block shown
+    // specifically as master_trading_checklist's own input and check ONLY that block.
+    const globalMaterialStart = capturedPrompt.indexOf("GENUINELY GLOBAL core framework material (only source for master_trading_checklist):");
+    const scopedMaterialStart = capturedPrompt.indexOf("SCOPED core framework material");
+    expect(globalMaterialStart).toBeGreaterThan(-1);
+    expect(scopedMaterialStart).toBeGreaterThan(globalMaterialStart);
+    const globalMaterialBlock = capturedPrompt.slice(globalMaterialStart, scopedMaterialStart);
+
+    expect(globalMaterialBlock).toContain("Always define risk before entry.");
+    // The 9:30-11 AM/options/mega-cap rule must NOT appear in the block shown as master_trading_checklist's own source material.
+    expect(globalMaterialBlock).not.toContain("Trade only 9:30-11:00 AM ET");
+    expect(globalMaterialBlock).not.toContain("mega-cap");
+
+    // It must instead be present in the SCOPED material block that follows (source for scoped_execution_checklists).
+    const scopedMaterialBlock = capturedPrompt.slice(scopedMaterialStart);
+    expect(scopedMaterialBlock).toContain("Trade only 9:30-11:00 AM ET");
+  });
+
+  it("findUniversalSectionScopeLeaks flags master_trading_checklist prose that leaks real scoped vocabulary (deterministic secondary safety net)", async () => {
+    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
+    const vocabulary = new Set(["options", "market-open"]);
+    const leaks = findUniversalSectionScopeLeaks(
+      [{ key: "master_trading_checklist", content: "During market-open, only trade liquid options names." }],
+      vocabulary,
+    );
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0].sectionKey).toBe("master_trading_checklist");
+    expect(leaks[0].matchedTerms.sort()).toEqual(["market-open", "options"]);
+  });
+
+  it("findUniversalSectionScopeLeaks does NOT flag master_trading_checklist when its prose stays genuinely global", async () => {
+    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
+    const vocabulary = new Set(["options", "market-open"]);
+    const leaks = findUniversalSectionScopeLeaks(
+      [{ key: "master_trading_checklist", content: "Always define risk before entry and confirm the higher-timeframe context." }],
+      vocabulary,
+    );
+    expect(leaks).toEqual([]);
+  });
+
+  it("findUniversalSectionScopeLeaks does NOT flag a non-universal section (e.g. scoped_execution_checklists) for legitimately containing scoped vocabulary", async () => {
+    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
+    const vocabulary = new Set(["options", "market-open"]);
+    const leaks = findUniversalSectionScopeLeaks(
+      [{ key: "scoped_execution_checklists", content: "Options traders: only trade during market-open." }],
+      vocabulary,
+    );
+    expect(leaks).toEqual([]);
+  });
+
+  it("runSynthesis wires universalSectionScopeLeaks onto the final playbook document from the real course-wide scope vocabulary, catching a leak the prompt restriction alone missed", async () => {
+    const clusterJson = JSON.stringify({
+      clusters: [{ clusterKey: "s1", proposedCanonicalName: "Strategy", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" }],
+    });
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("clustering trading-strategy instances")) return { text: clusterJson, usage };
+        if (prompt.includes("synthesizing ONE canonical trading strategy")) return { text: rawCanonicalStrategyJson("Strategy"), usage };
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "risk",
+                  title: "Risk",
+                  // RAW core-framework rule shape: cites "k1" (the pooled, already-scoped
+                  // KnowledgeItem below) rather than self-reporting `scope` — coreFramework.ts
+                  // derives the rule's scope deterministically from that citation.
+                  rules: [
+                    {
+                      description: "Trade only during market-open with options.",
+                      classification: "explicit",
+                      supportLevel: "SINGLE_SOURCE",
+                      supportCount: 1,
+                      sourceKeys: ["k1"],
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        if (prompt.includes("Comprehensive Trading Playbook")) {
+          // Simulates Gemini paraphrasing scoped material into master_trading_checklist DESPITE the prompt restriction —
+          // exactly the gap the deterministic secondary check exists to catch.
+          return {
+            text: JSON.stringify({
+              title: "Playbook",
+              sections: [{ key: "master_trading_checklist", title: "Checklist", content: "Only trade during market-open with options." }],
+              conflictsAndAmbiguities: [],
+            }),
+            usage,
+          };
+        }
+        return { text: JSON.stringify({ nodes: [], readableSteps: [] }), usage };
+      }),
+    });
+
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: {
+          summary: "s",
+          // Genuinely scoped (instrument + session, no strategy) — flows into coreFramework's
+          // courseKnowledge pool (knowledgeNormalize.ts's otherScopedItems), never a canonical strategy.
+          knowledgeItems: [makeKnowledgeItem({ statement: "Trade only during market-open with options.", scope: emptyScope({ marketsOrInstruments: ["options"], sessions: ["market-open"] }) })],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+    ];
+
+    const input: RunSynthesisInput = {
+      courseTitle: "Trading Accelerator",
+      instances: [makeInstance()],
+      lessons: [{ id: 10, title: "Lesson 10", chapterTitle: null, sourceUrl: "https://x" }],
+      noStandaloneSetupLessonIds: [],
+      knowledgeSources,
+    };
+    const result = await runSynthesis({ gemini, model: "m" }, input);
+
+    expect(result.playbook.universalSectionScopeLeaks).toHaveLength(1);
+    expect(result.playbook.universalSectionScopeLeaks[0].sectionKey).toBe("master_trading_checklist");
+    expect(result.playbook.universalSectionScopeLeaks[0].matchedTerms.sort()).toEqual(["market-open", "options"]);
   });
 });

@@ -247,12 +247,19 @@ export interface StrategyScopeMappingSummary {
   completeness: FrameworkCoverageStatus;
 }
 
+/** Real-audit fix (Phase 3.5B v3, Blocker B) — a universal-labeled playbook section (today, only "master_trading_checklist") whose prose contains a real scoped vocabulary term (see universalSectionAudit.ts). Best-effort secondary check on top of the primary fix (playbook.ts restricting what Gemini is shown for that section). */
+export interface UniversalSectionScopeLeak {
+  sectionKey: string;
+  matchedTerms: string[];
+}
+
 export interface CoursePlaybook {
   title: string;
   sections: PlaybookSection[];
   conflictsAndAmbiguities: Conflict[];
   frameworkCoverage: FrameworkCoverage;
   strategyScopeMapping: StrategyScopeMappingSummary;
+  universalSectionScopeLeaks: UniversalSectionScopeLeak[];
 }
 
 export interface DecisionNode {
@@ -262,15 +269,17 @@ export interface DecisionNode {
   description: string | null;
   next: string[];
   branches: { label: string; next: string }[];
-  /** Real-audit fix (Phase 3.5B) — all arrays empty means this node applies globally; a non-empty array means it's conditioned on that restriction and must never sit on the unconditional path before strategy selection (see decisionScopeAudit.ts). */
+  /** Real-audit fix (Phase 3.5B v3) — the pooled CoreFramework/canonical-strategy rule key(s) this node was actually built from; `scope` below is derived deterministically as the union of these keys' own already-known scope, never self-reported by Gemini (see decisionFramework.ts). */
+  sourceKeys: string[];
+  /** All arrays empty means this node applies globally; a non-empty array means it's conditioned on that restriction and must never sit on the unconditional path before strategy selection (see decisionScopeAudit.ts). */
   scope: KnowledgeItemScope;
 }
 
 export interface DecisionFramework {
   nodes: DecisionNode[];
   readableSteps: string[];
-  /** Real-audit fix (Phase 3.5B) — deterministic post-check output: any node here means a scoped rule was structurally placed on the unconditional global path, a bug in the returned graph. Should be empty by construction. */
-  scopeLeaks: { nodeId: string; label: string; scope: KnowledgeItemScope }[];
+  /** Real-audit fix (Phase 3.5B v3) — deterministic post-check output: any entry here is a bug in the returned graph — either a scoped node structurally placed on the unconditional global path ("scoped_source"), or a substantive node citing no source at all ("ungrounded", never treated as global by default). Should be empty by construction. */
+  scopeLeaks: { nodeId: string; label: string; reason: "ungrounded" | "scoped_source"; scope: KnowledgeItemScope }[];
 }
 
 export interface CourseSynthesisData {

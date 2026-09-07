@@ -11,6 +11,9 @@ import { CANONICAL_STRATEGY_THINKING_LEVEL } from "./limits.js";
 import { normalizeLessonKnowledge, collectRawStrategyScopeNames, type LessonKnowledgeSource, type KnowledgeItemRecord, type NormalizedKnowledge } from "./knowledgeNormalize.js";
 import { buildClusterCandidates, resolveStrategyScopeNames, type ScopeMappingResult } from "./strategyScopeMapping.js";
 import { SynthesisInvariantError } from "./errors.js";
+import { collectScopeVocabulary } from "./frameworkScopeSplit.js";
+import { findUniversalSectionScopeLeaks } from "./universalSectionAudit.js";
+import type { KnowledgeItemScope } from "../gemini/schema.js";
 import type {
   CanonicalStrategy,
   ClusterProposal,
@@ -251,6 +254,15 @@ export async function runSynthesis(
   const librarySection = buildCanonicalStrategyLibrarySection(canonicalStrategies);
   assertCanonicalStrategyLibraryComplete(librarySection, canonicalStrategies);
 
+  // Real-audit fix (Phase 3.5B v3, Blocker B/D-4) — deterministic secondary
+  // check that a section CLAIMED universal (today, only
+  // "master_trading_checklist" — see playbook.ts) didn't leak real scoped
+  // vocabulary anyway. The vocabulary itself is drawn from every actually-
+  // scoped rule in this course (coreFramework AND each canonical strategy's
+  // own rule categories), never a fixed/guessed word list.
+  const scopeVocabulary = collectScopeVocabulary(coreFramework, collectCanonicalStrategyScopes(canonicalStrategies));
+  const universalSectionScopeLeaks = findUniversalSectionScopeLeaks(geminiPlaybook.sections, scopeVocabulary);
+
   const playbook: CoursePlaybookDocument = {
     ...geminiPlaybook,
     sections: [
@@ -261,6 +273,7 @@ export async function runSynthesis(
     ],
     frameworkCoverage,
     strategyScopeMapping,
+    universalSectionScopeLeaks,
   };
 
   await emit("DECISION_FRAMEWORK", null, null, null);
@@ -426,6 +439,47 @@ function buildStrategyScopeMappingSummary(
  * coverage by construction. Gemini is never asked to produce this section
  * (see playbook.ts's REQUIRED_SECTION_KEYS, which no longer includes it).
  */
+/** Every canonical-strategy rule category that can carry its own (possibly narrower) `scope`, used by collectCanonicalStrategyScopes below. Mirrors decisionFramework.ts's STRATEGY_RULE_CATEGORIES. */
+const CANONICAL_STRATEGY_SCOPED_RULE_CATEGORIES = [
+  "marketContext",
+  "prerequisites",
+  "setup",
+  "entryRules",
+  "confirmationRules",
+  "stopLossRules",
+  "profitTargetRules",
+  "tradeManagementRules",
+  "invalidationRules",
+  "noTradeConditions",
+  "visualDiscretionaryRules",
+  "riskManagementRules",
+  "positionSizingRules",
+  "scalingInRules",
+  "scalingOutRules",
+  "runnerManagementRules",
+  "warnings",
+] as const satisfies readonly (keyof CanonicalStrategy)[];
+
+/**
+ * Every real, non-null `scope` carried by any canonical strategy's own
+ * rules — fed into collectScopeVocabulary alongside coreFramework's scoped
+ * rules so universalSectionAudit.ts's vocabulary check also catches a
+ * strategy-specific term (e.g. an options-only or intraday-only phrase from
+ * a canonical strategy's own entryRules) leaking into a section claimed
+ * universal, not just course-framework-level scoped terms.
+ */
+function collectCanonicalStrategyScopes(canonicalStrategies: CanonicalStrategy[]): KnowledgeItemScope[] {
+  const scopes: KnowledgeItemScope[] = [];
+  for (const strategy of canonicalStrategies) {
+    for (const category of CANONICAL_STRATEGY_SCOPED_RULE_CATEGORIES) {
+      for (const rule of strategy[category]) {
+        if (rule.scope) scopes.push(rule.scope);
+      }
+    }
+  }
+  return scopes;
+}
+
 function buildCanonicalStrategyLibrarySection(canonicalStrategies: CanonicalStrategy[]): PlaybookSection {
   const entries = canonicalStrategies
     .map((strategy, index) => {

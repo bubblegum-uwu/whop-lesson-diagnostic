@@ -1,40 +1,42 @@
-import type { DecisionFramework } from "./schema.js";
+import type { DecisionFramework, DecisionNodeScopeLeak } from "./schema.js";
 import { isKnowledgeItemScoped } from "../gemini/schema.js";
 
 /**
- * Real-audit fix (Phase 3.5B, Blockers 4/5) — a deterministic safety net on
- * TOP OF (never instead of) the prompt/input fix in decisionFramework.ts.
- * A real 28-lesson dry run showed a genuinely scoped rule (a 9:30-11am
- * intraday/options-only execution window, pooled into the core framework
- * from a subset of lessons) turned into an UNCONDITIONAL global gate before
- * canonical-strategy selection — incorrectly constraining unrelated
- * daily/weekly Fibonacci and swing Inside-Bar strategies to a session they
- * have nothing to do with.
+ * Real-audit fix (Phase 3.5B, Blockers A/C/D) — a deterministic safety net
+ * on TOP OF (never instead of) the prompt/input fix in decisionFramework.ts.
  *
- * This function detects that exact failure mode structurally: it walks the
- * "unconditional global spine" — every node reachable from a "start" node
- * purely via `next` (never through a `branches` fork, since a branch IS the
- * conditional decision point) — and flags any node on that spine whose
- * `scope` is actually restrictive (isKnowledgeItemScoped — the same
- * empty-arrays-means-global derivation used for KnowledgeItem, never a
- * separate GLOBAL/SCOPED label). Such a node is, by construction, binding on every path through `start`,
- * which is exactly what "global gate" means — a scoped rule has no business
- * being unconditionally binding.
+ * v2 (superseded — see v3 below): flagged a node reachable on the
+ * unconditional "global spine" (via `next` alone, never through a
+ * `branches` fork) whose SELF-REPORTED `scope` was non-empty. A SECOND
+ * real 28-lesson dry run showed this has a false-negative hole: Gemini
+ * placed a stock/equity-specific "Is Stock In Play?" gate before strategy
+ * selection while reporting EMPTY scope arrays — v2's check saw nothing
+ * wrong because it only ever trusted what Gemini itself claimed.
  *
- * Deliberately a pure, read-only diagnostic — it does not rewrite or drop
- * the offending node (graph topology repair is not something that can be
- * done safely/generically without risking a different kind of corruption),
- * but its findings are safe to log, test against, and — a natural next
- * step outside this PR's scope — surface to a human reviewer before a
- * decision framework goes live.
+ * v3 (current) — decisionFramework.ts no longer asks Gemini to self-report
+ * `scope` at all. Every node instead cites `sourceKeys` (which pooled
+ * CoreFramework/canonical-strategy rule(s) it's built from), and `scope`
+ * is derived deterministically as the union of those rules' own
+ * already-known scope (see buildDecisionSourcePool/deriveScopeFromKeys).
+ * This function now flags TWO distinct failure modes on the spine:
+ *
+ *   "ungrounded" — a substantive node (not start/end, not a pure
+ *   branching question) cites ZERO sources. Citing nothing is not
+ *   evidence of being global — it's an absence of evidence, which v2
+ *   wrongly treated as global by default. This is the exact fix for the
+ *   "Is Stock In Play?" false negative.
+ *
+ *   "scoped_source" — the node's derived scope (from its real citations)
+ *   is non-empty. Since scope is now always derived, not self-reported,
+ *   this can only happen when the node is HONESTLY built from scoped
+ *   material — which still must not sit on the unconditional path before
+ *   strategy selection.
+ *
+ * A `branches`-bearing node itself is never flagged (it's a fork/question
+ * establishing context, not an unconditional assertion) — only nodes
+ * reachable strictly via `next` are checked.
  */
-export interface GlobalGateScopeLeak {
-  nodeId: string;
-  label: string;
-  scope: DecisionFramework["nodes"][number]["scope"];
-}
-
-export function findGlobalGateScopeLeaks(decisionFramework: DecisionFramework): GlobalGateScopeLeak[] {
+export function findGlobalGateScopeLeaks(decisionFramework: DecisionFramework): DecisionNodeScopeLeak[] {
   const byId = new Map(decisionFramework.nodes.map((n) => [n.id, n]));
   const startNodes = decisionFramework.nodes.filter((n) => n.type === "start");
 
@@ -52,18 +54,25 @@ export function findGlobalGateScopeLeaks(decisionFramework: DecisionFramework): 
     // Only follow `next` — a `branches` fork is the conditional point where
     // context (strategy/instrument/timeframe/session/profile) is decided,
     // so nodes reachable ONLY through a branch are not on the unconditional
-    // spine and are correctly allowed to carry a scope.
+    // spine and are correctly allowed to be scoped/ungrounded-as-a-question.
     if (node.branches.length === 0) {
       for (const nextId of node.next) queue.push(nextId);
     }
   }
 
-  const leaks: GlobalGateScopeLeak[] = [];
+  const leaks: DecisionNodeScopeLeak[] = [];
   for (const id of spine) {
     const node = byId.get(id);
     if (!node) continue;
+    if (node.type === "start" || node.type === "end") continue;
+    if (node.branches.length > 0) continue; // a pure branching question, not an unconditional assertion — nothing to ground.
+
+    if (node.sourceKeys.length === 0) {
+      leaks.push({ nodeId: node.id, label: node.label, reason: "ungrounded", scope: node.scope });
+      continue;
+    }
     if (isKnowledgeItemScoped(node.scope)) {
-      leaks.push({ nodeId: node.id, label: node.label, scope: node.scope });
+      leaks.push({ nodeId: node.id, label: node.label, reason: "scoped_source", scope: node.scope });
     }
   }
   return leaks;

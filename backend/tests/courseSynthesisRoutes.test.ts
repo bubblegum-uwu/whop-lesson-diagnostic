@@ -570,8 +570,9 @@ describe("GET /api/course/synthesis", () => {
           unmatchedItemCount: 0,
           completeness: "COMPLETE",
         },
+        universalSectionScopeLeaks: [],
       },
-      decisionFramework: { nodes: [], readableSteps: [] },
+      decisionFramework: { nodes: [], readableSteps: [], scopeLeaks: [] },
     });
     await markSynthesisCompleted(pool, claimed!.runId, "owner-a", { inputTokens: 1, outputTokens: 1, thinkingTokens: 0, estimatedCost: 0.001, processingDurationSeconds: 5 });
     void runId;

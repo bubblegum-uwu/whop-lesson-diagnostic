@@ -148,6 +148,7 @@ function baseSynthesisData(overrides: Partial<CourseSynthesisData> = {}): Course
         unmatchedItemCount: 0,
         completeness: "COMPLETE",
       },
+      universalSectionScopeLeaks: [],
     },
     decisionFramework: { nodes: [], readableSteps: ["Determine HTF context", "Manage the trade"], scopeLeaks: [] },
     ...overrides,

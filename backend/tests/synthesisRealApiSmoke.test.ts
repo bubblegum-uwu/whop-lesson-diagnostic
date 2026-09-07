@@ -7,7 +7,7 @@ import {
   RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   PLAYBOOK_RESPONSE_JSON_SCHEMA,
-  DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+  RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
 } from "../src/synthesis/schema.js";
 
 /**
@@ -74,7 +74,7 @@ const STAGES: Array<{ stage: string; schema: object; prompt: string }> = [
   },
   {
     stage: "decision_framework",
-    schema: DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
+    schema: RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
     prompt: "Respond with a minimal example decision framework, a single start node and one readable step, matching the required schema.",
   },
 ];
