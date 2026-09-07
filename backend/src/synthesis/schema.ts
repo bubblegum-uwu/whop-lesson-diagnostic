@@ -617,22 +617,6 @@ export const PlaybookSectionSchema = z.object({
   scope: KnowledgeItemScopeSchema.optional(),
   scopeBasis: ScopeBasisSchema.optional(),
   applicabilityPolicy: ApplicabilityPolicySchema.optional(),
-  /**
-   * Real-audit fix (v7) — true when AT LEAST ONE of this section's own cited
-   * pool entries is independently VERIFIED_GLOBAL, computed directly from
-   * the same citations combineScopeBasis derives scope/scopeBasis from
-   * (never a redesign of that shared function's own "SCOPED dominates"
-   * priority — this is separate, additional information about the SAME
-   * citation list). A section citing both a genuinely global rule and some
-   * properly-qualified scoped material gets an aggregate scopeBasis of
-   * "SCOPED" (SCOPED dominates in combineScopeBasis, correctly — the
-   * union scope IS real) but that alone must not brand the whole section's
-   * every absolute claim a leak; this field lets the audit tell "this
-   * section has NO global partition at all" apart from "this section mixes
-   * global and properly-qualified scoped material" — see
-   * playbookApplicabilityAudit.ts.
-   */
-  hasIndependentGlobalEvidence: z.boolean().optional(),
 });
 export type PlaybookSection = z.infer<typeof PlaybookSectionSchema>;
 

@@ -107,8 +107,41 @@ import type { ApplicabilityLeak, ApplicabilityPolicyValue, PlaybookSection } fro
  * VERIFIED_GLOBAL sibling partition (partitioning shares one description
  * verbatim across every partition) — fixed at the source in that function,
  * not here.
+ *
+ * Real-audit fix (v8) — v7's fix above (hasIndependentGlobalEvidence, a
+ * SECTION-level "does this section cite ANY VERIFIED_GLOBAL material at
+ * all" flag) over-corrected: an EIGHTH real dry run found it excused an
+ * UNRELATED non-global sentence merely because the SAME section also
+ * happened to cite something genuinely global elsewhere — a real leak
+ * (market_context_regime's "trade strictly in the direction of the
+ * dominant higher-timeframe trend...never trade counter-trend", resting on
+ * SCOPED beginner + UNVERIFIED evidence with NO VERIFIED_GLOBAL partition
+ * at all) went undetected because the section's aggregate
+ * hasIndependentGlobalEvidence was true from a DIFFERENT, unrelated rule.
+ * `hasIndependentGlobalEvidence` is removed entirely (see
+ * PlaybookSectionSchema — it existed only to support this now-abandoned
+ * section-level shortcut). Applicability is evaluated at the SENTENCE
+ * level instead: a specific unqualified-absolute-claim sentence is only
+ * excused when THAT SENTENCE's own words closely overlap ("matches") a
+ * KNOWN VERIFIED_GLOBAL rule description (the new `globalRules` parameter,
+ * mirroring `nonGlobalRules`'s existing shape/purpose) — not merely
+ * because the section cites something global somewhere else.
+ * matchedScopedRules/matchedUnverifiedRules (paraphrase-overlap against a
+ * SPECIFIC known non-global rule) and unexplainedOwnScope (own-scope
+ * un-stated) are otherwise unchanged from v6 — restoring the exact
+ * pre-v7-hasIndependentGlobalEvidence behavior for those two signals, since
+ * the sentence-level global-match check is what correctly replaces the
+ * section-level shortcut's intended job.
  */
-const ABSOLUTE_CLAIM_PATTERN = /\b(all|every|always|universal(?:ly)?|without exception|in all cases|regardless of|no matter (?:the|what))\b/i;
+// v8 — added "must"/"required to": the real market_context_regime and confirmation-framework
+// leaks both use "must" ("trade strictly...never trade counter-trend", "Traders must wait for
+// candle closure...") to state an absolute requirement, without any of "all/every/always/etc."
+// A "must"-worded sentence is exactly as much an absolute/general requirement as one using
+// "always" — the SAME sentence-level qualification/matching logic below applies either way, so
+// widening this detection gate doesn't change what counts as "properly qualified" or "genuinely
+// global," only what counts as a claim worth checking in the first place.
+const ABSOLUTE_CLAIM_PATTERN =
+  /\b(all|every|always|universal(?:ly)?|without exception|in all cases|regardless of|no matter (?:the|what)|must|required to)\b/i;
 
 const STOPWORDS = new Set([
   "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "for", "with", "at", "by", "from", "as", "is", "are",
@@ -163,8 +196,11 @@ export interface ApplicabilityAuditInput {
   scope?: KnowledgeItemScope;
   scopeBasis?: PlaybookSection["scopeBasis"];
   applicabilityPolicy?: ApplicabilityPolicyValue;
-  /** Real-audit fix (v7) — see PlaybookSectionSchema's doc comment. True when at least one of this section's own citations is independently VERIFIED_GLOBAL, even though the aggregate scopeBasis above may read "SCOPED" (combineScopeBasis's SCOPED-dominates priority). */
-  hasIndependentGlobalEvidence?: boolean;
+}
+
+/** A rule known to be VERIFIED_GLOBAL — the mirror of TaggedNonGlobalRule, used only for the sentence-level "does this specific claim have genuine global backing" check (v8). */
+export interface TaggedGlobalRule {
+  description: string;
 }
 
 export interface ApplicabilityAuditResult {
@@ -177,6 +213,8 @@ export function findPlaybookApplicabilityLeaks(
   sections: ApplicabilityAuditInput[],
   scopeVocabulary: Set<string>,
   nonGlobalRules: TaggedNonGlobalRule[] = [],
+  /** v8 — descriptions of rules known to be VERIFIED_GLOBAL, for the sentence-level "is THIS specific claim genuinely global-backed" check below. Mirrors nonGlobalRules's shape/purpose. */
+  globalRules: TaggedGlobalRule[] = [],
 ): ApplicabilityAuditResult {
   const universalApplicabilityLeaks: ApplicabilityLeak[] = [];
   const unverifiedUniversalClaims: ApplicabilityLeak[] = [];
@@ -184,6 +222,7 @@ export function findPlaybookApplicabilityLeaks(
 
   const scopedRules = nonGlobalRules.filter((r) => r.basis === "SCOPED").map((r) => ({ description: r.description, words: significantWords(r.description) }));
   const unverifiedRules = nonGlobalRules.filter((r) => r.basis === "UNVERIFIED").map((r) => ({ description: r.description, words: significantWords(r.description) }));
+  const globalRuleWordSets = globalRules.map((r) => ({ description: r.description, words: significantWords(r.description) }));
 
   for (const section of sections) {
     const policy = section.applicabilityPolicy ?? "DESCRIPTIVE_MIXED";
@@ -227,25 +266,30 @@ export function findPlaybookApplicabilityLeaks(
     // 2R on every trade.", or "The Gap Fill target applies within Gap Fill setups specifically.")
     // never trips this, since each absolute-claim sentence names its own qualifier.
     //
-    // But that sentence-level heuristic ALONE still over-fires on a section that mixes
-    // properly-qualified scoped material with a SEPARATE, genuinely global claim (the
-    // "polarity-inversion"/"2R"/"narrow-specialization" real false positives): the global
-    // claim's own sentence legitimately has no local qualifier — it doesn't need one — yet
-    // OTHER, properly-qualified sentences in the same section make knownRestrictedConceptPresent
-    // true, so the unqualified-but-genuinely-global sentence would wrongly trip this signal.
-    // hasIndependentGlobalEvidence (see PlaybookSectionSchema) distinguishes that case: this
-    // sentence-level signal is skipped entirely for a section that ALSO has independently
-    // VERIFIED_GLOBAL evidence, relying instead on the more precise matchedScopedRules/
-    // matchedUnverifiedRules paraphrase-overlap checks below (which stay fully sensitive
-    // regardless — a genuine broadening of specific known-restricted text is still caught). A
-    // section with NO global partition at all (hasIndependentGlobalEvidence false/unset) keeps
-    // the sentence-level check exactly as described above.
+    // Real-audit fix (v8) — that sentence-level heuristic ALONE still over-fires on a section
+    // that mixes properly-qualified scoped material with a SEPARATE, genuinely global claim (the
+    // "polarity-inversion"/"2R"/"narrow-specialization" real false positives): the global claim's
+    // own sentence legitimately has no local qualifier — it doesn't need one — yet OTHER,
+    // properly-qualified sentences in the same section make knownRestrictedConceptPresent true.
+    // v7 tried to fix this with a SECTION-level "does this section cite ANY global material"
+    // shortcut, which then caused a real false NEGATIVE (market_context_regime) by excusing an
+    // UNRELATED non-global sentence just because the section also happened to cite something
+    // global elsewhere. The correct fix is evaluated per SENTENCE instead: an unqualified
+    // absolute-claim sentence is excused only when THAT SPECIFIC sentence's own words closely
+    // overlap a KNOWN VERIFIED_GLOBAL rule description (globalRuleWordSets, mirroring
+    // matchedScopedRules/matchedUnverifiedRules's existing overlap technique) — never merely
+    // because the section cites something global somewhere else.
     const localQualifierTerms = new Set<string>([...scopeVocabulary, ...(section.scope && isKnowledgeItemScoped(section.scope) ? scopeTerms(section.scope) : [])]);
     const knownRestrictedConceptPresent = [...localQualifierTerms].some((term) => containsTerm(section.content, term));
     const hasUnqualifiedAbsoluteClaim =
-      !section.hasIndependentGlobalEvidence &&
       knownRestrictedConceptPresent &&
-      splitSentences(section.content).some((sentence) => ABSOLUTE_CLAIM_PATTERN.test(sentence) && ![...localQualifierTerms].some((term) => containsTerm(sentence, term)));
+      splitSentences(section.content).some((sentence) => {
+        if (!ABSOLUTE_CLAIM_PATTERN.test(sentence)) return false;
+        if ([...localQualifierTerms].some((term) => containsTerm(sentence, term))) return false; // this sentence states its own applicability/scope
+        const sentenceWords = significantWords(sentence);
+        const matchesGlobalRule = globalRuleWordSets.some((rule) => rule.words.size > 0 && overlapRatio(sentenceWords, rule.words) >= OVERLAP_THRESHOLD);
+        return !matchesGlobalRule; // only a leak when THIS sentence has no genuine global backing either
+      });
 
     const sectionWords = significantWords(section.content);
     const matchedScopedRules = new Set<string>();
@@ -268,17 +312,14 @@ export function findPlaybookApplicabilityLeaks(
     // broadening is still caught below via matchedTerms/matchedScopedRules,
     // which compare against OTHER, undisclosed non-global rules.
     //
-    // Real-audit fix (v7) — ALSO suppressed when the section has independent
-    // VERIFIED_GLOBAL evidence (see hasUnqualifiedAbsoluteClaim's comment
-    // above for the same reasoning): ownBasis reads "SCOPED" merely because
-    // combineScopeBasis's SCOPED-dominates priority means citing even ONE
-    // scoped rule alongside a genuinely global one still aggregates to
-    // "SCOPED" — that alone must not brand the whole section's absolute
-    // claims a leak when a real, independently-sufficient global partition
-    // also backs it. A section with NO global partition at all keeps this
-    // trigger exactly as before.
+    // v7 also gated this on "the section has independent VERIFIED_GLOBAL evidence" — reverted in
+    // v8 (see this file's top doc comment): that section-level shortcut is what caused the real
+    // market_context_regime false negative, excusing this section's genuinely non-global claims
+    // merely because the section ALSO happened to cite something global elsewhere. Sentence-level
+    // matching (hasUnqualifiedAbsoluteClaim above) is what correctly distinguishes "this specific
+    // claim is global" now, so this signal is restored to its exact pre-v7 form.
     const ownScopeStatedInProse = section.scope && isKnowledgeItemScoped(section.scope) && scopeTerms(section.scope).some((t) => containsTerm(section.content, t));
-    const unexplainedOwnScope = ownBasis === "SCOPED" && !ownScopeStatedInProse && !section.hasIndependentGlobalEvidence;
+    const unexplainedOwnScope = ownBasis === "SCOPED" && !ownScopeStatedInProse;
 
     if (hasUnqualifiedAbsoluteClaim || matchedScopedRules.size > 0 || unexplainedOwnScope) {
       universalApplicabilityLeaks.push({ sectionKey: section.key, matchedTerms: [...matchedTerms].sort(), matchedNonGlobalRules: [...matchedScopedRules].sort() });

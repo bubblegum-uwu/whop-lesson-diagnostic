@@ -117,6 +117,37 @@ export function containsExplicitApplicabilityLanguage(text: string): boolean {
 }
 
 /**
+ * Real-audit fix (Phase 3.5B v8) — a SEVENTH real dry run found VERIFIED_GLOBAL
+ * still requires only the ABSENCE of a detected restriction, never POSITIVE
+ * proof of universality. Three concrete real rules leaked through this way,
+ * each backed by only ONE lesson and containing no restriction keyword at
+ * all: a candle-close confirmation rule (directly contradicted by the
+ * canonical Inside Bar strategy's own explicit resting buy-stop/sell-stop
+ * exception), an HOD/LOD scale-out rule (session/intraday trade-management
+ * guidance, not proof every strategy/timeframe uses it), and a 25%-50%
+ * starter-position sizing rule (one lesson's specific technique). "No
+ * restriction was detected" and "positively verified universal" are STILL
+ * not the same claim even after the v6/v7 fixes — this closes that gap.
+ *
+ * Deliberately narrow, matching the real audit's own explicit language
+ * (never generic words like "always"/"all the time"/"personally" alone,
+ * which are common in scoped/single-lesson prose too and prove nothing on
+ * their own) — see finalizeScopeBasis below for how this combines with
+ * the distinct-lesson-count requirement.
+ */
+const EXPLICIT_POSITIVE_UNIVERSAL_PATTERNS: RegExp[] = [
+  /\bevery\s+(?:single\s+)?trade\b/i,
+  /\ball\s+trades\b/i,
+  /\bwhenever\s+you'?re\s+trading\b/i,
+  /\bwhenever\s+you\s+are\s+trading\b/i,
+];
+
+/** True when `text` contains EXPLICIT positive universal-applicability language (see EXPLICIT_POSITIVE_UNIVERSAL_PATTERNS above) — deliberately narrower than a generic absolute-claim check (never "always"/"all the time"/"personally" alone). */
+export function containsExplicitPositiveUniversalLanguage(text: string): boolean {
+  return EXPLICIT_POSITIVE_UNIVERSAL_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
  * The final correctness gate for VERIFIED_GLOBAL — applied to a rule's own
  * consolidated description AFTER aggregateScopeBasis has already computed
  * a basis from citations. Only ever downgrades, only ever to UNVERIFIED
@@ -142,11 +173,44 @@ export function containsExplicitApplicabilityLanguage(text: string): boolean {
  * emitted text names a restriction, no partition sharing it may claim
  * VERIFIED_GLOBAL. This function itself didn't change; the caller now
  * always passes the real `description` instead of conditionally passing "".
+ *
+ * v8 addition — requirement 3: an otherwise-eligible rule ALSO needs
+ * POSITIVE proof of universality, not merely the absence of a detected
+ * restriction:
+ *   1. Support from at least TWO DISTINCT lesson IDs whose evidence is
+ *      itself unscoped/unrestricted (`unscopedEvidenceLessonIds` — passed
+ *      through from aggregateScopeBasis, which is the only place that
+ *      knows which citations contributed "good" evidence and from which
+ *      lesson; counted by distinct value here, never by citation count
+ *      from the same lesson); OR
+ *   2. Explicit positive universal applicability language
+ *      (containsExplicitPositiveUniversalLanguage) naming the rule itself
+ *      — checked against BOTH the final description and (via
+ *      `citationHadPositiveLanguage`, also from aggregateScopeBasis)
+ *      each contributing citation's own statement, since Gemini's
+ *      consolidated wording and a single lesson's own quoted rule can
+ *      each independently carry it.
+ * If uncertain, UNVERIFIED — conservative omission from the Master
+ * Trading Checklist is correct; the rule, its evidence, and its
+ * provenance are never dropped, only reclassified. Both new parameters
+ * default to "no proof available" so every existing call site (and every
+ * pre-v8 hand-built test fixture) keeps its prior behavior unless it
+ * explicitly opts in by passing them.
  */
-export function finalizeScopeBasis(basis: ScopeBasis, description: string, supportLevel?: string): ScopeBasis {
+export function finalizeScopeBasis(
+  basis: ScopeBasis,
+  description: string,
+  supportLevel?: string,
+  unscopedEvidenceLessonIds: number[] = [],
+  citationHadPositiveLanguage = false,
+): ScopeBasis {
   if (basis !== "VERIFIED_GLOBAL") return basis;
   if (supportLevel === "CONFLICTING") return "UNVERIFIED";
   if (containsExplicitApplicabilityLanguage(description)) return "UNVERIFIED";
+  const distinctLessons = new Set(unscopedEvidenceLessonIds).size;
+  const hasPositiveProof =
+    distinctLessons >= 2 || citationHadPositiveLanguage || containsExplicitPositiveUniversalLanguage(description);
+  if (!hasPositiveProof) return "UNVERIFIED";
   return basis;
 }
 
@@ -166,6 +230,10 @@ export interface ScopeAggregationResult {
   scopeBasis: ScopeBasis;
   numericalValues: KnowledgeItem["numericalValues"];
   exceptions: string[];
+  /** v8 — distinct lesson IDs whose evidence contributed to `sawKnowledgeEvidence` below (unscoped, unrestricted KnowledgeItem citations only) — the raw material finalizeScopeBasis's positive-proof requirement counts distinct values from. Meaningless when scopeBasis isn't VERIFIED_GLOBAL. */
+  unscopedEvidenceLessonIds: number[];
+  /** v8 — true when at least one of those same "good" citations' own statement contains explicit positive universal-applicability language (containsExplicitPositiveUniversalLanguage). */
+  citationHadPositiveLanguage: boolean;
 }
 
 /**
@@ -179,13 +247,19 @@ export interface ScopeAggregationResult {
  *     KnowledgeItem behind it (a scope-blind legacy per-lesson rule).
  *     Counts as evidence that EXISTS but whose scope is unknown.
  *   - `{ item: KnowledgeItem }` — a real, scope-aware citation.
+ * `lessonId` is required regardless of which of the three above applies —
+ * every real citation (known-key) is always traceable to the lesson it came
+ * from (v8 — needed to count DISTINCT lessons for the positive-proof
+ * requirement; never a citation count from the same lesson).
  */
 export function aggregateScopeBasis(
   citedKeys: string[],
-  resolve: (key: string) => { item?: KnowledgeItem } | undefined,
+  resolve: (key: string) => { item?: KnowledgeItem; lessonId: number } | undefined,
 ): ScopeAggregationResult {
   const numericalValues: KnowledgeItem["numericalValues"] = [];
   const exceptionsSet = new Set<string>();
+  const unscopedEvidenceLessonIds = new Set<number>();
+  let citationHadPositiveLanguage = false;
   let scopeUnion: KnowledgeItemScope | null = null;
   let sawKnowledgeEvidence = false;
   let sawUnverifiedEvidence = false;
@@ -209,6 +283,8 @@ export function aggregateScopeBasis(
       continue;
     }
     sawKnowledgeEvidence = true;
+    unscopedEvidenceLessonIds.add(found.lessonId);
+    if (containsExplicitPositiveUniversalLanguage(found.item.statement)) citationHadPositiveLanguage = true;
     numericalValues.push(...found.item.numericalValues);
     for (const exception of found.item.exceptions) exceptionsSet.add(exception);
   }
@@ -231,7 +307,14 @@ export function aggregateScopeBasis(
     scopeBasis = "UNVERIFIED";
   }
 
-  return { scope: scopeUnion, scopeBasis, numericalValues, exceptions: [...exceptionsSet] };
+  return {
+    scope: scopeUnion,
+    scopeBasis,
+    numericalValues,
+    exceptions: [...exceptionsSet],
+    unscopedEvidenceLessonIds: [...unscopedEvidenceLessonIds],
+    citationHadPositiveLanguage,
+  };
 }
 
 /**

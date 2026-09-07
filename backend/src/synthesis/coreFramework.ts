@@ -158,11 +158,14 @@ function buildRuleFromKeys(
   keyMap: Map<string, KeyedEntry>,
   factMap: Map<string, CitableFact>,
 ): SynthesizedRule {
-  const { scope, scopeBasis, numericalValues, exceptions } = aggregateScopeBasis([...sourceKeys, ...conflictSourceKeys], (key) => {
-    const entry = keyMap.get(key);
-    if (!entry) return undefined;
-    return { item: entry.knowledgeItem };
-  });
+  const { scope, scopeBasis, numericalValues, exceptions, unscopedEvidenceLessonIds, citationHadPositiveLanguage } = aggregateScopeBasis(
+    [...sourceKeys, ...conflictSourceKeys],
+    (key) => {
+      const entry = keyMap.get(key);
+      if (!entry) return undefined;
+      return { item: entry.knowledgeItem, lessonId: entry.fact.lessonId };
+    },
+  );
   const sources = resolveKeys(sourceKeys, factMap);
   const conflictSources = resolveKeys(conflictSourceKeys, factMap);
   const isFullRule = sourceKeys.length === raw.sourceKeys.length && conflictSourceKeys.length === raw.conflictSourceKeys.length;
@@ -209,7 +212,12 @@ function buildRuleFromKeys(
     // (with its real evidence and provenance) is never dropped, only
     // reclassified. The CONFLICTING check is unaffected either way
     // (CONFLICTING rules are never partitioned to begin with).
-    scopeBasis: finalizeScopeBasis(scopeBasis, raw.description, raw.supportLevel),
+    //
+    // v8 addition — also requires POSITIVE proof of universality (>=2
+    // distinct unscoped-evidence lesson IDs, or explicit positive universal
+    // language), not merely the absence of a detected restriction — see
+    // scopeBasis.ts's finalizeScopeBasis.
+    scopeBasis: finalizeScopeBasis(scopeBasis, raw.description, raw.supportLevel, unscopedEvidenceLessonIds, citationHadPositiveLanguage),
   };
 }
 

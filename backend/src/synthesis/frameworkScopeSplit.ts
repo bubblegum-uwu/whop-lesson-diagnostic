@@ -129,3 +129,32 @@ export function collectNonGlobalRuleDescriptions(coreFramework: CoreFramework, c
   }
   return candidates.filter((candidate) => !globallyBackedDescriptions.has(candidate.description));
 }
+
+/**
+ * Real-audit fix (v8) — the mirror of collectNonGlobalRuleDescriptions:
+ * every rule description that IS VERIFIED_GLOBAL, pooled the same way.
+ * Used by playbookApplicabilityAudit.ts's sentence-level check to tell
+ * "this specific claim genuinely has global backing" apart from "the
+ * section merely also cites something global elsewhere" — the section-
+ * level shortcut (hasIndependentGlobalEvidence) this replaces caused a
+ * real false negative (market_context_regime) by excusing an unrelated
+ * non-global sentence on that basis. No exclusion logic is needed here the
+ * way collectNonGlobalRuleDescriptions excludes globally-backed siblings —
+ * a description that's VERIFIED_GLOBAL anywhere in the pool is exactly the
+ * "genuine global backing" this function exists to report.
+ */
+export function collectGlobalRuleDescriptions(coreFramework: CoreFramework, canonicalStrategies: CanonicalStrategy[] = []): { description: string }[] {
+  const descriptions = new Set<string>();
+  const visit = (rule: { description: string; scope: KnowledgeItemScope | null; scopeBasis?: ScopeBasis }) => {
+    if (effectiveScopeBasis(rule) === "VERIFIED_GLOBAL") descriptions.add(rule.description);
+  };
+  for (const section of coreFramework.sections) {
+    for (const rule of section.rules) visit(rule);
+  }
+  for (const strategy of canonicalStrategies) {
+    for (const category of STRATEGY_RULE_CATEGORIES) {
+      for (const rule of strategy[category]) visit(rule);
+    }
+  }
+  return [...descriptions].map((description) => ({ description }));
+}

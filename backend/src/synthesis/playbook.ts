@@ -120,10 +120,6 @@ function enrichSection(raw: RawPlaybookSection, byKey: Map<string, SourcePoolEnt
   const resolved = resolveSourcePoolKeys(raw.sourceKeys, byKey);
   const { scope, scopeBasis } = combineScopeBasis(resolved);
   const applicabilityPolicy: ApplicabilityPolicyValue = (SECTION_POLICY as Record<string, ApplicabilityPolicyValue>)[raw.key] ?? "DESCRIPTIVE_MIXED";
-  // Real-audit fix (v7) — see PlaybookSectionSchema's own doc comment: additional
-  // information about this SAME citation list, alongside (never instead of) the
-  // aggregate scope/scopeBasis above.
-  const hasIndependentGlobalEvidence = resolved.some((entry) => entry.scopeBasis === "VERIFIED_GLOBAL");
   return {
     key: raw.key,
     title: raw.title,
@@ -132,7 +128,6 @@ function enrichSection(raw: RawPlaybookSection, byKey: Map<string, SourcePoolEnt
     scope,
     scopeBasis,
     applicabilityPolicy,
-    hasIndependentGlobalEvidence,
   };
 }
 
@@ -162,7 +157,9 @@ CRITICAL — CITE YOUR SOURCES for every section (real-audit fix, Phase 3.5B v5)
 
 CRITICAL — do not state a rule as universal ("all strategies", "every setup", "the fundamental rule across the Accelerator") unless it is a course_framework-level GLOBAL rule (unscoped) or you can verify EVERY SINGLE canonical strategy above actually shares it. If even one canonical strategy's own rules (entryRules, setup, variants, etc.) contradict or carve out an exception to what looks like a universal pattern (e.g. one strategy explicitly permits a resting stop-order entry while most others require waiting for a retest), you MUST say so explicitly (name the exception) rather than describing the majority pattern as if it applies to all strategies without qualification. Prefer precise framing: "most strategies in this course..." / "strategy X differs by..." / "as a course-wide default, unless a specific strategy's own rules say otherwise...".
 
-CRITICAL — THIS APPLIES TO EVERY SECTION EXCEPT "conflicts_and_ambiguities" (real-audit fix, Phase 3.5B v4/v5): look at each pooled entry's own "scopeBasis" field above before you describe it. An entry is safe to describe with absolute language (words like "all", "every", "always", "universal(ly)", "without exception", "regardless of", "no matter the/what") ONLY when its scopeBasis is "VERIFIED_GLOBAL". An entry with scopeBasis "SCOPED" carries a real, named restriction that you MUST state explicitly when you describe it. An entry with scopeBasis "UNVERIFIED" has NO confirmed restriction but ALSO no confirmed global applicability — word it as a general default ("as a baseline...", "typically...") rather than an absolute claim. A real past failure: a pooled entry carrying marketsOrInstruments: ["options"], traderProfiles: ["beginner"] (a minimum 2:1 reward-to-risk rule) was paraphrased in a "risk_management"-type section as applying "on every planned execution" — the word "options" never even appeared in that sentence, so the restriction was silently erased. Never do this: if you use "every"/"all"/"always"/etc. anywhere near a paraphrase of a SCOPED or UNVERIFIED entry's substance, you have broadened it incorrectly — name the actual condition instead, or drop the absolute wording.
+CRITICAL — THIS APPLIES TO EVERY SECTION EXCEPT "conflicts_and_ambiguities" (real-audit fix, Phase 3.5B v4/v5): look at each pooled entry's own "scopeBasis" field above before you describe it. An entry is safe to describe with absolute language (words like "all", "every", "always", "must", "required to", "universal(ly)", "without exception", "regardless of", "no matter the/what") ONLY when its scopeBasis is "VERIFIED_GLOBAL". An entry with scopeBasis "SCOPED" carries a real, named restriction that you MUST state explicitly when you describe it. An entry with scopeBasis "UNVERIFIED" has NO confirmed restriction but ALSO no confirmed global applicability — word it as a general default ("as a baseline...", "typically...") rather than an absolute claim. A real past failure: a pooled entry carrying marketsOrInstruments: ["options"], traderProfiles: ["beginner"] (a minimum 2:1 reward-to-risk rule) was paraphrased in a "risk_management"-type section as applying "on every planned execution" — the word "options" never even appeared in that sentence, so the restriction was silently erased. Never do this: if you use "every"/"all"/"always"/"must"/etc. anywhere near a paraphrase of a SCOPED or UNVERIFIED entry's substance, you have broadened it incorrectly — name the actual condition instead, or drop the absolute wording.
+
+CRITICAL — a second real past failure, specific to "confirmation_framework"/"entry_framework": "Traders must wait for candle closure to confirm structural respect or rejection" was stated as an absolute, course-wide requirement, even though the canonical Inside Bar strategy's own entryRules explicitly permit a resting buy-stop/sell-stop order placed at the mother-bar extreme for immediate breakout execution — a direct, named exception this absolute wording erased entirely. Whenever a general confirmation/entry principle you are describing has ANY canonical strategy whose own entryRules/confirmationRules state a genuinely different mechanic (a direct-entry order type instead of waiting for a close, an immediate trigger instead of a confirmation delay, etc.), name that strategy's exception explicitly in the SAME sentence or the one immediately after it — do not let the general rule stand unqualified elsewhere in the section. This is the same requirement as the resting-stop-order example two paragraphs above, applied specifically to confirmation/entry timing language.
 
 Also populate "conflictsAndAmbiguities" as a separate structured list (description + sources) mirroring what you wrote in the conflicts_and_ambiguities section, for programmatic display.
 

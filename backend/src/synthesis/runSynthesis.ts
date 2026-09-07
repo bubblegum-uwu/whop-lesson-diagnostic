@@ -11,9 +11,9 @@ import { CANONICAL_STRATEGY_THINKING_LEVEL } from "./limits.js";
 import { normalizeLessonKnowledge, collectRawStrategyScopeNames, type LessonKnowledgeSource, type KnowledgeItemRecord, type NormalizedKnowledge } from "./knowledgeNormalize.js";
 import { buildClusterCandidates, resolveStrategyScopeNames, type ScopeMappingResult } from "./strategyScopeMapping.js";
 import { SynthesisInvariantError } from "./errors.js";
-import { collectScopeVocabulary, collectNonGlobalRuleDescriptions } from "./frameworkScopeSplit.js";
+import { collectScopeVocabulary, collectNonGlobalRuleDescriptions, collectGlobalRuleDescriptions } from "./frameworkScopeSplit.js";
 import { findPlaybookApplicabilityLeaks } from "./playbookApplicabilityAudit.js";
-import { effectiveScopeBasis, finalizeScopeBasis } from "./scopeBasis.js";
+import { effectiveScopeBasis, finalizeScopeBasis, containsExplicitPositiveUniversalLanguage } from "./scopeBasis.js";
 import type { KnowledgeItemScope } from "../gemini/schema.js";
 import type {
   CanonicalStrategy,
@@ -285,10 +285,14 @@ export async function runSynthesis(
   // safeguard.
   const scopeVocabulary = collectScopeVocabulary(coreFramework, collectCanonicalStrategyScopes(canonicalStrategies));
   const nonGlobalRuleDescriptions = collectNonGlobalRuleDescriptions(coreFramework, canonicalStrategies);
+  // v8 — the sentence-level "is THIS specific claim genuinely global-backed" check needs the
+  // actual global-rule pool, not just a section-level "cites something global" shortcut.
+  const globalRuleDescriptions = collectGlobalRuleDescriptions(coreFramework, canonicalStrategies);
   const { universalApplicabilityLeaks, unverifiedUniversalClaims, scopedApplicabilityLeaks } = findPlaybookApplicabilityLeaks(
     geminiSections,
     scopeVocabulary,
     nonGlobalRuleDescriptions,
+    globalRuleDescriptions,
   );
 
   const playbook: CoursePlaybookDocument = {
@@ -563,6 +567,20 @@ export function selectVerifiedGlobalCoreFrameworkRules(coreFramework: CoreFramew
  * call finalizeScopeBasis — CoreFramework's own or a new one — is caught
  * here too, not just at its origin. Belt-and-suspenders, not a redesign:
  * the gate itself is unchanged, only re-applied at this second checkpoint.
+ *
+ * v8 strengthening — finalizeScopeBasis's positive-proof requirement (>=2
+ * distinct unscoped-evidence lesson IDs, or explicit positive universal
+ * language) is re-run here too. The original per-citation
+ * `unscopedEvidenceLessonIds`/`citationHadPositiveLanguage` aggregation
+ * detail isn't preserved on a finalized SynthesizedRule, so this
+ * independently RE-DERIVES the closest available equivalent from the
+ * rule's own already-resolved `sources` (each carries its own `lessonId`
+ * and quoted `evidence` text) — a real VERIFIED_GLOBAL rule's `sources`
+ * IS exactly its "good" evidence set by construction, so distinct lesson
+ * IDs among them is the same count finalizeScopeBasis originally computed.
+ * Re-checking the rule's own `description` text for positive language
+ * (finalizeScopeBasis's other, unconditional avenue) needs no re-derived
+ * input at all.
  */
 export function assertMasterChecklistSourcesGlobal(rules: SynthesizedRule[]): void {
   for (const rule of rules) {
@@ -571,9 +589,11 @@ export function assertMasterChecklistSourcesGlobal(rules: SynthesizedRule[]): vo
         `Master Trading Checklist would include a non-VERIFIED_GLOBAL rule ("${rule.description}", scopeBasis=${rule.scopeBasis ?? "unset"}) — this must never happen, since the checklist is built exclusively from a VERIFIED_GLOBAL-only selection.`,
       );
     }
-    if (finalizeScopeBasis("VERIFIED_GLOBAL", rule.description, rule.supportLevel) !== "VERIFIED_GLOBAL") {
+    const lessonIds = rule.sources.map((s) => s.lessonId);
+    const citationHadPositiveLanguage = rule.sources.some((s) => containsExplicitPositiveUniversalLanguage(s.evidence));
+    if (finalizeScopeBasis("VERIFIED_GLOBAL", rule.description, rule.supportLevel, lessonIds, citationHadPositiveLanguage) !== "VERIFIED_GLOBAL") {
       throw new SynthesisInvariantError(
-        `Master Trading Checklist would include a rule marked VERIFIED_GLOBAL whose own emitted description fails the final restriction gate ("${rule.description}", supportLevel=${rule.supportLevel}) — this must never happen; every VERIFIED_GLOBAL rule's description is required to pass finalizeScopeBasis.`,
+        `Master Trading Checklist would include a rule marked VERIFIED_GLOBAL whose own emitted description/evidence fails the final restriction or positive-proof gate ("${rule.description}", supportLevel=${rule.supportLevel}, distinctLessons=${new Set(lessonIds).size}) — this must never happen; every VERIFIED_GLOBAL rule is required to pass finalizeScopeBasis, including its v8 positive-proof requirement.`,
       );
     }
   }

@@ -168,9 +168,10 @@ function aggregateKnowledgeMeta(
   knowledgeKeyMap: Map<string, KnowledgeKeyedSource>,
 ): ReturnType<typeof aggregateScopeBasis> {
   return aggregateScopeBasis(keys, (key) => {
-    if (sourceKeyMap.has(key)) return { item: undefined };
-    const source = knowledgeKeyMap.get(key);
-    if (source) return { item: source.item };
+    const source = sourceKeyMap.get(key);
+    if (source) return { item: undefined, lessonId: source.lessonId };
+    const knowledge = knowledgeKeyMap.get(key);
+    if (knowledge) return { item: knowledge.item, lessonId: knowledge.lessonId };
     return undefined;
   });
 }
@@ -299,8 +300,11 @@ function enrichRule(
     // Real-audit fix (v6) — see scopeBasis.ts's finalizeScopeBasis: never
     // promotes, only ever downgrades to UNVERIFIED when the rule's own text
     // names a restriction the citations' structured scope missed, or when
-    // the rule documents a genuine methodological conflict.
-    scopeBasis: finalizeScopeBasis(meta.scopeBasis, raw.description, raw.supportLevel),
+    // the rule documents a genuine methodological conflict. v8 addition —
+    // also requires POSITIVE proof of universality (>=2 distinct
+    // unscoped-evidence lesson IDs, or explicit positive universal
+    // language), not merely the absence of a detected restriction.
+    scopeBasis: finalizeScopeBasis(meta.scopeBasis, raw.description, raw.supportLevel, meta.unscopedEvidenceLessonIds, meta.citationHadPositiveLanguage),
   };
 }
 
