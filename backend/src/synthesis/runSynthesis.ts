@@ -11,7 +11,7 @@ import { CANONICAL_STRATEGY_THINKING_LEVEL } from "./limits.js";
 import { normalizeLessonKnowledge, collectRawStrategyScopeNames, type LessonKnowledgeSource, type KnowledgeItemRecord, type NormalizedKnowledge } from "./knowledgeNormalize.js";
 import { buildClusterCandidates, resolveStrategyScopeNames, type ScopeMappingResult } from "./strategyScopeMapping.js";
 import { SynthesisInvariantError } from "./errors.js";
-import { collectScopeVocabulary } from "./frameworkScopeSplit.js";
+import { collectScopeVocabulary, collectNonGlobalRuleDescriptions } from "./frameworkScopeSplit.js";
 import { findUniversalSectionScopeLeaks } from "./universalSectionAudit.js";
 import type { KnowledgeItemScope } from "../gemini/schema.js";
 import type {
@@ -254,14 +254,19 @@ export async function runSynthesis(
   const librarySection = buildCanonicalStrategyLibrarySection(canonicalStrategies);
   assertCanonicalStrategyLibraryComplete(librarySection, canonicalStrategies);
 
-  // Real-audit fix (Phase 3.5B v3, Blocker B/D-4) — deterministic secondary
-  // check that a section CLAIMED universal (today, only
-  // "master_trading_checklist" — see playbook.ts) didn't leak real scoped
-  // vocabulary anyway. The vocabulary itself is drawn from every actually-
-  // scoped rule in this course (coreFramework AND each canonical strategy's
-  // own rule categories), never a fixed/guessed word list.
+  // Real-audit fix (Phase 3.5B v3/v4, Blocker B/D-4) — deterministic
+  // secondary check that a section using absolute-claim ("all"/"every"/
+  // "always"/"universal"/...) language doesn't broaden real scoped/
+  // unverified material. Runs across EVERY playbook section (not just
+  // "master_trading_checklist" — a real dry run found the leak elsewhere).
+  // Two independent signals, both against real, already-known data: (1)
+  // literal scope-vocabulary terms (coreFramework AND each canonical
+  // strategy's own rule categories), and (2) significant word-overlap with
+  // a non-global (SCOPED or UNVERIFIED) rule's own description — see
+  // universalSectionAudit.ts and frameworkScopeSplit.ts.
   const scopeVocabulary = collectScopeVocabulary(coreFramework, collectCanonicalStrategyScopes(canonicalStrategies));
-  const universalSectionScopeLeaks = findUniversalSectionScopeLeaks(geminiPlaybook.sections, scopeVocabulary);
+  const nonGlobalRuleDescriptions = collectNonGlobalRuleDescriptions(coreFramework, canonicalStrategies);
+  const universalSectionScopeLeaks = findUniversalSectionScopeLeaks(geminiPlaybook.sections, scopeVocabulary, nonGlobalRuleDescriptions);
 
   const playbook: CoursePlaybookDocument = {
     ...geminiPlaybook,

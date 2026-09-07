@@ -1,9 +1,9 @@
-import type { Rule, KnowledgeItem, KnowledgeItemScope } from "../gemini/schema.js";
-import { isKnowledgeItemScoped } from "../gemini/schema.js";
+import type { Rule, KnowledgeItem } from "../gemini/schema.js";
 import type { GeminiThinkingLevel, GeminiUsage } from "../gemini/client.js";
 import { callGeminiForStage, parseStageJson, validateStageData, type SynthesisStageDeps } from "./geminiStage.js";
 import type { StrategyInstanceRecord } from "./normalize.js";
 import type { KnowledgeItemRecord } from "./knowledgeNormalize.js";
+import { aggregateScopeBasis } from "./scopeBasis.js";
 import {
   RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   RawCanonicalStrategySchema,
@@ -148,42 +148,31 @@ function keyKnowledgeItems(records: KnowledgeItemRecord[]): { promptItems: unkno
   return { promptItems, keyMap };
 }
 
-function unionScope(a: KnowledgeItemScope, b: KnowledgeItemScope): KnowledgeItemScope {
-  const uniq = (arr: string[]) => [...new Set(arr)];
-  return {
-    strategies: uniq([...a.strategies, ...b.strategies]),
-    marketsOrInstruments: uniq([...a.marketsOrInstruments, ...b.marketsOrInstruments]),
-    timeframes: uniq([...a.timeframes, ...b.timeframes]),
-    sessions: uniq([...a.sessions, ...b.sessions]),
-    traderProfiles: uniq([...a.traderProfiles, ...b.traderProfiles]),
-  };
-}
-
 /**
- * Deterministically derives a rule's numericalValues/exceptions/scope from
- * whichever cited KnowledgeItem source(s) it references — never asked of
- * Gemini directly (see schema.ts's SynthesizedRuleSchema doc comment).
- * Citing a strategy-instance ("s"-prefixed) key contributes nothing here,
- * since Strategy's Rule shape carries none of these fields — exactly the
- * pre-3.5B behavior for the original 11 categories.
+ * Real-audit fix (Phase 3.5B v4) — deterministically derives a rule's
+ * numericalValues/exceptions/scope/scopeBasis from whichever cited
+ * source(s) it references — never asked of Gemini directly (see schema.ts's
+ * SynthesizedRuleSchema doc comment). Citing a strategy-instance
+ * ("s"-prefixed) key is passed through as `{ item: undefined }` — a REAL
+ * citation whose scope is simply unknown, since Strategy's Rule shape was
+ * never scope-tagged — rather than being treated as if it contributed no
+ * evidence at all. This is what stops a rule built (even partly) from only
+ * "s"-prefixed evidence from being falsely certified globally applicable:
+ * see scopeBasis.ts's aggregateScopeBasis for the full algorithm, which
+ * this now delegates to instead of the old ad hoc union that only ever
+ * looked at "k"-prefixed (knowledge-item) citations.
  */
 function aggregateKnowledgeMeta(
   keys: string[],
+  sourceKeyMap: Map<string, KeyedSource>,
   knowledgeKeyMap: Map<string, KnowledgeKeyedSource>,
-): { numericalValues: KnowledgeItem["numericalValues"]; exceptions: string[]; scope: KnowledgeItemScope | null } {
-  const numericalValues: KnowledgeItem["numericalValues"] = [];
-  const exceptionsSet = new Set<string>();
-  let scopeUnion: KnowledgeItemScope | null = null;
-  for (const key of keys) {
+): ReturnType<typeof aggregateScopeBasis> {
+  return aggregateScopeBasis(keys, (key) => {
+    if (sourceKeyMap.has(key)) return { item: undefined };
     const source = knowledgeKeyMap.get(key);
-    if (!source) continue;
-    numericalValues.push(...source.item.numericalValues);
-    for (const exception of source.item.exceptions) exceptionsSet.add(exception);
-    if (isKnowledgeItemScoped(source.item.scope)) {
-      scopeUnion = scopeUnion ? unionScope(scopeUnion, source.item.scope) : source.item.scope;
-    }
-  }
-  return { numericalValues, exceptions: [...exceptionsSet], scope: scopeUnion };
+    if (source) return { item: source.item };
+    return undefined;
+  });
 }
 
 /**
@@ -296,7 +285,7 @@ function enrichRule(
   knowledgeKeyMap: Map<string, KnowledgeKeyedSource>,
   lessonTitleById: Map<number, string>,
 ): SynthesizedRule {
-  const meta = aggregateKnowledgeMeta([...raw.sourceKeys, ...raw.conflictSourceKeys], knowledgeKeyMap);
+  const meta = aggregateKnowledgeMeta([...raw.sourceKeys, ...raw.conflictSourceKeys], sourceKeyMap, knowledgeKeyMap);
   return {
     description: raw.description,
     classification: raw.classification,
@@ -307,6 +296,7 @@ function enrichRule(
     exceptions: meta.exceptions,
     numericalValues: meta.numericalValues,
     scope: meta.scope,
+    scopeBasis: meta.scopeBasis,
   };
 }
 

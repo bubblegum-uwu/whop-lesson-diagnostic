@@ -43,6 +43,19 @@ import { splitFrameworkByScope } from "./frameworkScopeSplit.js";
  * Gemini is explicitly told to label by its actual scope. A deterministic
  * secondary check (universalSectionAudit.ts, wired in by runSynthesis.ts)
  * flags "master_trading_checklist" if scoped vocabulary leaks in anyway.
+ *
+ * Real-audit fix (Phase 3.5B v4): a THIRD real dry run found (a) the
+ * global/scoped split above trusted `scope == null` as "safe to call
+ * global", which is not the same as VERIFIED global (see scopeBasis.ts —
+ * now fixed via effectiveScopeBasis), and (b) a DIFFERENT section
+ * (risk_management-shaped, not the checklist) paraphrased a scoped
+ * CoreFramework rule as applying to "every planned execution". The
+ * "do not state a rule as universal" instruction below now applies
+ * explicitly to every section (not just the checklist) and names the exact
+ * absolute-claim words to avoid; universalSectionAudit.ts's secondary check
+ * now scans every section, not just the checklist, and also catches
+ * word-overlap with a scoped/unverified rule's own description — not only
+ * literal scope-vocabulary terms.
  */
 const REQUIRED_SECTION_KEYS = [
   "course_philosophy",
@@ -97,12 +110,14 @@ Produce readable markdown-style prose (not raw JSON dumps) for exactly these sec
 
 CRITICAL — do not state a rule as universal ("all strategies", "every setup", "the fundamental rule across the Accelerator") unless it is a course_framework-level GLOBAL rule (unscoped) or you can verify EVERY SINGLE canonical strategy above actually shares it. If even one canonical strategy's own rules (entryRules, setup, variants, etc.) contradict or carve out an exception to what looks like a universal pattern (e.g. one strategy explicitly permits a resting stop-order entry while most others require waiting for a retest), you MUST say so explicitly (name the exception) rather than describing the majority pattern as if it applies to all strategies without qualification. Prefer precise framing: "most strategies in this course..." / "strategy X differs by..." / "as a course-wide default, unless a specific strategy's own rules say otherwise...".
 
+CRITICAL — THIS APPLIES TO EVERY SECTION, NOT ONLY THE CHECKLIST (real-audit fix, Phase 3.5B v4): look at each core-framework rule's own "scope"/"scopeBasis" field in the JSON above before you describe it. A rule is safe to describe with absolute language (words like "all", "every", "always", "universal(ly)", "without exception", "regardless of", "no matter the/what") ONLY when its scopeBasis is "VERIFIED_GLOBAL". A rule with scopeBasis "SCOPED" carries a real, named restriction (instrument/timeframe/session/trader-profile) that you MUST state explicitly when you describe it. A rule with scopeBasis "UNVERIFIED" has NO confirmed restriction but ALSO no confirmed global applicability — word it as a general default ("as a baseline...", "typically...") rather than an absolute claim. A real past failure: a CoreFramework rule carrying marketsOrInstruments: ["options"], traderProfiles: ["beginner"] (a minimum 2:1 reward-to-risk rule) was paraphrased in a "risk_management"-type section as applying "on every planned execution" — the word "options" never even appeared in that sentence, so the restriction was silently erased. Never do this: if you use "every"/"all"/"always"/etc. anywhere near a paraphrase of a SCOPED or UNVERIFIED rule's substance, you have broadened it incorrectly — name the actual condition instead, or drop the absolute wording.
+
 CRITICAL — "master_trading_checklist" vs "scoped_execution_checklists" (real-audit fix, Phase 3.5B v3, Blocker B): a real dry run found a prior "Master Trading Checklist" claiming to apply "before, during, and after every trading session" while actually being built from intraday-equities/options-only steps (session-open windows, PMH/PML, 1-5 minute execution, options contract rules) — meaningless for a futures, forex, or daily/weekly strategy also taught in this course. Fix these two sections as follows:
-- "master_trading_checklist": build this EXCLUSIVELY from the GENUINELY GLOBAL core framework rules below (scope is empty for every one of these — they hold for every strategy, instrument, timeframe, session, and trader profile in this course). Do NOT include any instrument-specific (e.g. stock/options-only), session-specific (e.g. a specific opening-range time window), timeframe-specific (e.g. 1-minute/5-minute execution), or trader-profile-specific step here, even if it seems generally good practice — if it isn't backed by one of the rules below, it does not belong in this section.
+- "master_trading_checklist": build this EXCLUSIVELY from the GENUINELY GLOBAL core framework rules below — each one VERIFIED (scopeBasis "VERIFIED_GLOBAL") to hold for every strategy, instrument, timeframe, session, and trader profile in this course. Do NOT include any instrument-specific (e.g. stock/options-only), session-specific (e.g. a specific opening-range time window), timeframe-specific (e.g. 1-minute/5-minute execution), or trader-profile-specific step here, even if it seems generally good practice — if it isn't backed by one of the rules below, it does not belong in this section.
 GENUINELY GLOBAL core framework material (only source for master_trading_checklist):
 ${JSON.stringify(globalFrameworkSections, null, 2)}
-- "scoped_execution_checklists": build this from the SCOPED core framework rules below, each of which carries a real restriction (instrument/timeframe/session/trader-profile). Organize it as one or more clearly labeled sub-checklists (e.g. "Intraday Equities/Options Checklist", "Daily/Weekly Swing Checklist") — group by the rules' actual shared scope, and explicitly state each sub-checklist's applicability (which instruments/timeframes/sessions/profiles it is for) so a trader following a strategy this does NOT apply to (e.g. futures, forex, or a daily/weekly setup) knows to skip it.
-SCOPED core framework material (source for scoped_execution_checklists — never for master_trading_checklist):
+- "scoped_execution_checklists": build this from the SCOPED-OR-UNVERIFIED core framework rules below. Some carry a real, named restriction (instrument/timeframe/session/trader-profile) — state it explicitly. Others are UNVERIFIED (no confirmed restriction, but ALSO not confirmed to hold for everyone, typically because they come from older material that was never scope-tagged) — for these, word each step as a general default rather than an absolute rule (e.g. "typically..." / "as a baseline..."), and do not claim it is required for every strategy/instrument/session. Organize the section as one or more clearly labeled sub-checklists (e.g. "Intraday Equities/Options Checklist", "Daily/Weekly Swing Checklist") — group by the rules' actual shared scope where known, and explicitly state each sub-checklist's applicability so a trader following a strategy this does NOT apply to (e.g. futures, forex, or a daily/weekly setup) knows to skip it.
+SCOPED-OR-UNVERIFIED core framework material (source for scoped_execution_checklists — never for master_trading_checklist):
 ${JSON.stringify(scopedFrameworkSections, null, 2)}
 Also draw scoped_execution_checklists content from each canonical strategy's own execution-relevant rules (entryRules, confirmationRules, tradeManagementRules, scalingInRules, scalingOutRules, runnerManagementRules) where they add session/timeframe/instrument-specific mechanics beyond the shared global checklist — label which strategy/strategies each such step applies to.
 

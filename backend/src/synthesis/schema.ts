@@ -46,6 +46,10 @@ export const SupportLevel = z.enum([
 ]);
 export type SupportLevelValue = z.infer<typeof SupportLevel>;
 
+/** See scopeBasis.ts's doc comment for the full real-audit history this exists to fix. */
+export const ScopeBasisSchema = z.enum(["VERIFIED_GLOBAL", "SCOPED", "UNVERIFIED"]);
+export type ScopeBasisValue = z.infer<typeof ScopeBasisSchema>;
+
 export const SynthesizedRuleSchema = z.object({
   description: z.string().min(1),
   classification: z.enum(["explicit", "inferred", "visual", "synthesized"]),
@@ -67,6 +71,20 @@ export const SynthesizedRuleSchema = z.object({
   numericalValues: z.array(NumericalValueSchema).optional().default([]),
   /** The union of every cited KnowledgeItem's scope — null when this rule carries no scope-bearing citation. Preserves instrument/timeframe/session/traderProfile restrictions that must survive synthesis rather than being flattened into a universal rule. */
   scope: KnowledgeItemScopeSchema.nullable().optional().default(null),
+  /**
+   * Real-audit fix (Phase 3.5B v4) — WHY `scope` is null matters as much as
+   * the fact itself: "VERIFIED_GLOBAL" (every citation was scope-aware and
+   * none were scoped) is trustworthy; "UNVERIFIED" (the rule cites no
+   * scope-aware evidence at all — e.g. only pre-3.5B per-lesson Strategy
+   * rules, which were never scope-tagged) must NEVER be treated the same
+   * as verified-global downstream, even though `scope` is null in both
+   * cases. Always computed by aggregateScopeBasis (scopeBasis.ts), never
+   * asked of Gemini. Optional (no default) specifically so pre-this-field
+   * test fixtures fall back to effectiveScopeBasis's old null-means-global
+   * behavior rather than silently changing meaning — see that function's
+   * doc comment.
+   */
+  scopeBasis: ScopeBasisSchema.optional(),
 });
 export type SynthesizedRule = z.infer<typeof SynthesizedRuleSchema>;
 
@@ -364,7 +382,7 @@ const rawSynthesizedRuleJsonSchema = {
 };
 const rawSynthesizedRuleArray = { type: "array", items: rawSynthesizedRuleJsonSchema };
 
-export const RawSynthesizedRuleSchema = SynthesizedRuleSchema.omit({ sources: true, conflictSources: true }).extend({
+export const RawSynthesizedRuleSchema = SynthesizedRuleSchema.omit({ sources: true, conflictSources: true, scopeBasis: true }).extend({
   /** Reference keys (e.g. "s7") into the original per-rule data Gemini was shown for this cluster's members — resolved to full SourceRef objects by canonicalStrategy.ts's enrichCanonicalStrategy. An unknown key is dropped defensively, never fabricated into a source. */
   sourceKeys: z.array(z.string()),
   conflictSourceKeys: z.array(z.string()),
@@ -650,6 +668,16 @@ export type StrategyScopeMappingSummary = z.infer<typeof StrategyScopeMappingSum
 export const UniversalSectionScopeLeakSchema = z.object({
   sectionKey: z.string(),
   matchedTerms: z.array(z.string()),
+  /**
+   * Real-audit fix (Phase 3.5B v4) — a THIRD real dry run showed a leak
+   * that plain vocabulary matching cannot catch: prose paraphrasing a known
+   * scoped/unverified rule ("on every planned execution") without repeating
+   * any of its literal scope-array words. Populated when this section's
+   * text shares significant word-overlap with a non-global (SCOPED or
+   * UNVERIFIED) rule's own description — see universalSectionAudit.ts.
+   * Optional/absent when only the vocabulary-term check matched.
+   */
+  matchedNonGlobalRules: z.array(z.string()).optional().default([]),
 });
 export type UniversalSectionScopeLeak = z.infer<typeof UniversalSectionScopeLeakSchema>;
 
@@ -727,14 +755,26 @@ export const DecisionNodeSchema = z.object({
   sourceKeys: z.array(z.string()),
   /** Deterministically derived as the union of every cited source's own scope — see decisionFramework.ts. Every array empty means genuinely global; this can never disagree with the structured rule(s) it was built from, because it IS those rules' own scope, not a re-statement of it. */
   scope: KnowledgeItemScopeSchema,
+  /**
+   * Real-audit fix (Phase 3.5B v4) — a THIRD real dry run showed `scope`
+   * being empty is not, on its own, proof of global applicability: a
+   * CoreFramework/canonical-strategy rule can itself be UNVERIFIED (see
+   * scopeBasis.ts) — cited from only scope-blind legacy evidence — in which
+   * case a node citing it inherits that same uncertainty even though the
+   * union of known scope is empty. Derived as the union-like aggregation of
+   * every cited source's own scopeBasis (SCOPED dominates; else UNVERIFIED
+   * if any citation is UNVERIFIED; else VERIFIED_GLOBAL) — never asked of
+   * Gemini.
+   */
+  scopeBasis: ScopeBasisSchema,
 });
 export type DecisionNode = z.infer<typeof DecisionNodeSchema>;
 
 export const DecisionNodeScopeLeakSchema = z.object({
   nodeId: z.string(),
   label: z.string(),
-  /** "ungrounded" = cited no source at all, so it was never proven global; "scoped_source" = its derived scope (from real citations) is non-empty, so it must not sit on the unconditional pre-strategy path. */
-  reason: z.enum(["ungrounded", "scoped_source"]),
+  /** "ungrounded" = cited no source at all, so it was never proven global; "unverified_source" = citations exist but at least one carries no verified scope information (and none are known-scoped), so global applicability is not justified; "scoped_source" = its derived scope (from real citations) is non-empty, so it must not sit on the unconditional pre-strategy path. */
+  reason: z.enum(["ungrounded", "unverified_source", "scoped_source"]),
   scope: KnowledgeItemScopeSchema,
 });
 export type DecisionNodeScopeLeak = z.infer<typeof DecisionNodeScopeLeakSchema>;

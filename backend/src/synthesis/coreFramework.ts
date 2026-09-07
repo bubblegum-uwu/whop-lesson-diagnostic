@@ -1,10 +1,10 @@
 import type { GeminiUsage } from "../gemini/client.js";
-import type { KnowledgeItem, KnowledgeItemScope } from "../gemini/schema.js";
-import { isKnowledgeItemScoped } from "../gemini/schema.js";
+import type { KnowledgeItem } from "../gemini/schema.js";
 import { callGeminiForStage, parseStageJson, validateStageData, type SynthesisStageDeps } from "./geminiStage.js";
 import type { StrategyInstanceRecord } from "./normalize.js";
 import type { KnowledgeItemRecord } from "./knowledgeNormalize.js";
 import { resolveKeys, type CitableFact } from "./sourceRegistry.js";
+import { aggregateScopeBasis } from "./scopeBasis.js";
 import {
   RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   RawCoreFrameworkSchema,
@@ -140,31 +140,25 @@ function buildKeyedPool(
   return { entries, keyMap };
 }
 
-function unionScope(a: KnowledgeItemScope, b: KnowledgeItemScope): KnowledgeItemScope {
-  const uniq = (arr: string[]) => [...new Set(arr)];
-  return {
-    strategies: uniq([...a.strategies, ...b.strategies]),
-    marketsOrInstruments: uniq([...a.marketsOrInstruments, ...b.marketsOrInstruments]),
-    timeframes: uniq([...a.timeframes, ...b.timeframes]),
-    sessions: uniq([...a.sessions, ...b.sessions]),
-    traderProfiles: uniq([...a.traderProfiles, ...b.traderProfiles]),
-  };
-}
-
+/**
+ * Real-audit fix (Phase 3.5B v4) — see scopeBasis.ts's doc comment for the
+ * full history. Critically, a citation resolving to a KeyedEntry with NO
+ * `knowledgeItem` (a pooled per-lesson Strategy-schema rule from
+ * CROSS_STRATEGY_CATEGORIES — never scope-tagged, unlike a Phase 3.5A
+ * KnowledgeItem) is passed through as `{ item: undefined }` — a REAL,
+ * known citation whose true-world scope we simply cannot verify — rather
+ * than being silently skipped as if it contributed no evidence at all. A
+ * rule built entirely (or partly) from such citations can never be
+ * certified "VERIFIED_GLOBAL" by aggregateScopeBasis, even when every
+ * knowledge-item citation it also carries happens to be global.
+ */
 function enrichRule(raw: RawSynthesizedRule, keyMap: Map<string, KeyedEntry>, factMap: Map<string, CitableFact>): SynthesizedRule {
   const citedKeys = [...raw.sourceKeys, ...raw.conflictSourceKeys];
-  const numericalValues: KnowledgeItem["numericalValues"] = [];
-  const exceptionsSet = new Set<string>();
-  let scopeUnion: KnowledgeItemScope | null = null;
-  for (const key of citedKeys) {
-    const knowledgeItem = keyMap.get(key)?.knowledgeItem;
-    if (!knowledgeItem) continue;
-    numericalValues.push(...knowledgeItem.numericalValues);
-    for (const exception of knowledgeItem.exceptions) exceptionsSet.add(exception);
-    if (isKnowledgeItemScoped(knowledgeItem.scope)) {
-      scopeUnion = scopeUnion ? unionScope(scopeUnion, knowledgeItem.scope) : knowledgeItem.scope;
-    }
-  }
+  const { scope, scopeBasis, numericalValues, exceptions } = aggregateScopeBasis(citedKeys, (key) => {
+    const entry = keyMap.get(key);
+    if (!entry) return undefined;
+    return { item: entry.knowledgeItem };
+  });
 
   return {
     description: raw.description,
@@ -173,9 +167,10 @@ function enrichRule(raw: RawSynthesizedRule, keyMap: Map<string, KeyedEntry>, fa
     supportCount: raw.supportCount,
     sources: resolveKeys(raw.sourceKeys, factMap),
     conflictSources: resolveKeys(raw.conflictSourceKeys, factMap),
-    exceptions: [...exceptionsSet],
+    exceptions,
     numericalValues,
-    scope: scopeUnion,
+    scope,
+    scopeBasis,
   };
 }
 
@@ -200,6 +195,8 @@ Group these into framework sections such as: Market Preparation, Higher-Timefram
 Every rule in your output must carry "sourceKeys": an array of the EXACT key values from the pooled material above that support it. Do NOT restate lessonId, timestamps, or evidence text yourself — that provenance is already known and will be attached automatically from the key alone. Use ONLY keys that actually appear above; never invent one. Set "supportLevel" based on how many independent lessons actually support the rule (SINGLE_SOURCE, MULTI_SOURCE, REPEATED_EXPLICIT, VARIANT, CONFLICTING, or INFERRED) and "supportCount" to the number of supporting lessons — never a fabricated confidence score. Record genuine contradictions with supportLevel CONFLICTING and populate "conflictSourceKeys" with both sides, rather than picking a side.
 
 Preserve normative strength exactly as it was originally stated — a HARD_RULE is not the same as a GUIDELINE or a PREFERENCE, and a rule scoped to one instrument/timeframe/session/trader-profile must not be generalized into a universal one; when the pooled material shows a real restriction, keep the resulting framework rule specific rather than broadening it.
+
+IMPORTANT — some pooled entries carry an explicit "scope" object (the knowledge-derived ones); others (the ones tagged with a category like "market_context_rules"/"confirmation_rules"/etc.) carry NO scope field at all, because that older per-lesson data was never scope-tagged. Do NOT treat the absence of a "scope" field as proof an entry is universal — it may still describe something instrument/session/timeframe-specific (e.g. "QQQ/SPY relative strength", "intraday fundamentals", a specific session window). If an entry's own wording is clearly specific to one instrument/session/timeframe/trader-type even though it carries no "scope" field, preserve that specificity in your rule's own "description" text rather than writing it as if it were a universal principle — our system independently verifies applicability from your citations and will never treat a consolidated rule as safely global unless EVERY citation behind it is itself scope-tagged and empty, but a precise description still helps readers and avoids compounding the ambiguity.
 
 Respond ONLY with JSON matching the required schema.`;
 }

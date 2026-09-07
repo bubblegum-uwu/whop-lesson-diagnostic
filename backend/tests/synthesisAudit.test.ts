@@ -979,7 +979,7 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
     // contains the scoped rule too — so isolate the GENUINELY GLOBAL material block shown
     // specifically as master_trading_checklist's own input and check ONLY that block.
     const globalMaterialStart = capturedPrompt.indexOf("GENUINELY GLOBAL core framework material (only source for master_trading_checklist):");
-    const scopedMaterialStart = capturedPrompt.indexOf("SCOPED core framework material");
+    const scopedMaterialStart = capturedPrompt.indexOf("SCOPED-OR-UNVERIFIED core framework material");
     expect(globalMaterialStart).toBeGreaterThan(-1);
     expect(scopedMaterialStart).toBeGreaterThan(globalMaterialStart);
     const globalMaterialBlock = capturedPrompt.slice(globalMaterialStart, scopedMaterialStart);
@@ -994,16 +994,40 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
     expect(scopedMaterialBlock).toContain("Trade only 9:30-11:00 AM ET");
   });
 
-  it("findUniversalSectionScopeLeaks flags master_trading_checklist prose that leaks real scoped vocabulary (deterministic secondary safety net)", async () => {
+  it("findUniversalSectionScopeLeaks flags master_trading_checklist prose that leaks real scoped vocabulary under absolute-claim language (deterministic secondary safety net)", async () => {
     const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
     const vocabulary = new Set(["options", "market-open"]);
     const leaks = findUniversalSectionScopeLeaks(
-      [{ key: "master_trading_checklist", content: "During market-open, only trade liquid options names." }],
+      [{ key: "master_trading_checklist", content: "Across every session, only trade liquid options names during market-open." }],
       vocabulary,
     );
     expect(leaks).toHaveLength(1);
     expect(leaks[0].sectionKey).toBe("master_trading_checklist");
     expect(leaks[0].matchedTerms.sort()).toEqual(["market-open", "options"]);
+  });
+
+  it("findUniversalSectionScopeLeaks does NOT flag a section merely discussing scoped content without any absolute-claim language", async () => {
+    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
+    const vocabulary = new Set(["options", "market-open"]);
+    const leaks = findUniversalSectionScopeLeaks(
+      [{ key: "risk_management", content: "For options traders during the market-open session, size down as a beginner." }],
+      vocabulary,
+    );
+    expect(leaks).toEqual([]);
+  });
+
+  it("findUniversalSectionScopeLeaks flags a NON-checklist section (e.g. risk_management) that paraphrases a known scoped/unverified rule's own substance under absolute-claim language, even with zero literal vocabulary-term overlap — the exact real-audit leak", async () => {
+    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
+    const nonGlobalRuleDescriptions = ["Structure trades to target a minimum reward-to-risk ratio of at least 2:1."];
+    const leaks = findUniversalSectionScopeLeaks(
+      [{ key: "risk_management", content: "The system enforces a minimum reward-to-risk ratio of at least 2:1 on every planned execution." }],
+      new Set(), // deliberately empty — the leaked prose never repeats a literal scope-array word like "options"/"beginner"
+      nonGlobalRuleDescriptions,
+    );
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0].sectionKey).toBe("risk_management");
+    expect(leaks[0].matchedTerms).toEqual([]);
+    expect(leaks[0].matchedNonGlobalRules).toEqual(nonGlobalRuleDescriptions);
   });
 
   it("findUniversalSectionScopeLeaks does NOT flag master_trading_checklist when its prose stays genuinely global", async () => {
@@ -1066,7 +1090,7 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
           return {
             text: JSON.stringify({
               title: "Playbook",
-              sections: [{ key: "master_trading_checklist", title: "Checklist", content: "Only trade during market-open with options." }],
+              sections: [{ key: "master_trading_checklist", title: "Checklist", content: "Across every session, always trade only during market-open with options." }],
               conflictsAndAmbiguities: [],
             }),
             usage,
@@ -1104,5 +1128,348 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
     expect(result.playbook.universalSectionScopeLeaks).toHaveLength(1);
     expect(result.playbook.universalSectionScopeLeaks[0].sectionKey).toBe("master_trading_checklist");
     expect(result.playbook.universalSectionScopeLeaks[0].matchedTerms.sort()).toEqual(["market-open", "options"]);
+  });
+});
+
+/**
+ * THIRD real-data audit regression tests (Phase 3.5B v4) — see PR #13's
+ * third real 28-lesson dry-run audit ("upstream scope aggregation").
+ * CoreFramework's own scope union could come out empty (and be treated as
+ * safely global downstream) purely because a consolidated rule was built
+ * from pre-3.5B per-lesson `Strategy` rules (market_context_rules,
+ * confirmation_rules, etc.) — data that was NEVER scope-tagged in the
+ * first place, unlike a Phase 3.5A KnowledgeItem. `scopeBasis` (see
+ * scopeBasis.ts) distinguishes "VERIFIED_GLOBAL" (every citation was
+ * scope-aware and none were scoped) from "UNVERIFIED" (no scope-aware
+ * evidence at all) so an absence of evidence is never read as evidence of
+ * globality.
+ */
+describe("Real-audit v4 — scopeBasis.ts's aggregateScopeBasis distinguishes verified-global, scoped, and unverified evidence", () => {
+  it("cites ONLY scope-aware KnowledgeItems, all global -> VERIFIED_GLOBAL", async () => {
+    const { aggregateScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    const globalItem = makeKnowledgeItem({ statement: "Define risk before entry.", scope: emptyScope() });
+    const result = aggregateScopeBasis(["k1"], (key) => (key === "k1" ? { item: globalItem } : undefined));
+    expect(result.scope).toBeNull();
+    expect(result.scopeBasis).toBe("VERIFIED_GLOBAL");
+  });
+
+  it("cites a scoped KnowledgeItem -> SCOPED, scope preserved exactly", async () => {
+    const { aggregateScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    const scopedItem = makeKnowledgeItem({ statement: "2R minimum for options beginners.", scope: emptyScope({ marketsOrInstruments: ["options"], traderProfiles: ["beginner"] }) });
+    const result = aggregateScopeBasis(["k1"], (key) => (key === "k1" ? { item: scopedItem } : undefined));
+    expect(result.scope).toEqual({ strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner"] });
+    expect(result.scopeBasis).toBe("SCOPED");
+  });
+
+  it("cites ONLY a scope-blind (legacy, no-KnowledgeItem) source -> UNVERIFIED, never VERIFIED_GLOBAL", async () => {
+    const { aggregateScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    // `{ item: undefined }` is exactly what coreFramework.ts/canonicalStrategy.ts return for a
+    // real citation into the pre-3.5B per-lesson Strategy-rule pool (market_context_rules, etc.).
+    const result = aggregateScopeBasis(["s1"], (key) => (key === "s1" ? { item: undefined } : undefined));
+    expect(result.scope).toBeNull();
+    expect(result.scopeBasis).toBe("UNVERIFIED");
+  });
+
+  it("mixes a genuinely-global KnowledgeItem citation with a scope-blind legacy citation -> UNVERIFIED, not diluted back to VERIFIED_GLOBAL", async () => {
+    const { aggregateScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    const globalItem = makeKnowledgeItem({ statement: "Define risk before entry.", scope: emptyScope() });
+    const result = aggregateScopeBasis(["k1", "s1"], (key) => {
+      if (key === "k1") return { item: globalItem };
+      if (key === "s1") return { item: undefined };
+      return undefined;
+    });
+    expect(result.scope).toBeNull();
+    expect(result.scopeBasis).toBe("UNVERIFIED");
+  });
+
+  it("zero valid citations (all invented/unknown keys) -> UNVERIFIED, not VERIFIED_GLOBAL by default", async () => {
+    const { aggregateScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    const result = aggregateScopeBasis(["ghost"], () => undefined);
+    expect(result.scopeBasis).toBe("UNVERIFIED");
+  });
+});
+
+describe("Real-audit v4, Proof 1 — CoreFramework consolidated rules cannot be falsely certified global via scope-blind (legacy per-lesson Strategy-rule) citations", () => {
+  it("a consolidated rule built ONLY from legacy market_context_rules citations (the exact 'Intraday Fundamentals / QQQ-SPY' real-audit failure) gets scopeBasis UNVERIFIED, never VERIFIED_GLOBAL, even though its scope union is empty", async () => {
+    const instance = makeInstance({
+      strategy: makeStrategy({
+        market_context_rules: [
+          { description: "Confirm Intraday Fundamentals and QQQ/SPY relative strength/order flow before entering any trade.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" },
+        ],
+      }),
+    });
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          // Cites k1 — the ONLY entry in the pool, since the instance's strategy has one
+          // market_context_rules entry and no knowledgeSources are supplied at all.
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "setup_qualification",
+                  title: "Foundational Setup Qualification",
+                  rules: [
+                    {
+                      description: "Before entering any trade, evaluate the five foundational qualification criteria (including Intraday Fundamentals and QQQ/SPY relative strength/order flow).",
+                      classification: "explicit",
+                      supportLevel: "SINGLE_SOURCE",
+                      supportCount: 1,
+                      sourceKeys: ["k1"],
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [instance]);
+
+    const rule = coreFramework.sections[0].rules[0];
+    expect(rule.scope).toBeNull();
+    // The real-audit failure: this used to read as "safe to treat as global" (scope: null).
+    // It is now UNVERIFIED — we simply never had scope-aware evidence to certify it either way.
+    expect(rule.scopeBasis).toBe("UNVERIFIED");
+  });
+
+  it("a consolidated rule built from a genuinely global KnowledgeItem citation (no legacy citation involved) gets VERIFIED_GLOBAL, so real course-wide rules are not thrown out by this fix", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: { summary: "s", knowledgeItems: [makeKnowledgeItem({ statement: "Always define your risk before entering a trade.", scope: emptyScope() })], examples: [], conflictsAndAmbiguities: [] },
+      },
+    ];
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [{ key: "risk", title: "Risk", rules: [{ description: "Always define your risk before entering a trade.", classification: "explicit", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["k1"], conflictSourceKeys: [] }] }],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], normalized.globalItems);
+
+    const rule = coreFramework.sections[0].rules[0];
+    expect(rule.scope).toBeNull();
+    expect(rule.scopeBasis).toBe("VERIFIED_GLOBAL");
+  });
+
+  it("mixing a legacy market_context_rules citation with a genuinely global KnowledgeItem citation on the SAME consolidated rule still yields UNVERIFIED — global evidence never dilutes away the unverifiable part", async () => {
+    const instance = makeInstance({
+      strategy: makeStrategy({ market_context_rules: [{ description: "Confirm QQQ/SPY alignment.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }] }),
+    });
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      { analysisId: 1, lessonId: 10, lessonTitle: "Lesson 10", knowledge: { summary: "s", knowledgeItems: [makeKnowledgeItem({ statement: "Always define your risk before entering a trade.", scope: emptyScope() })], examples: [], conflictsAndAmbiguities: [] } },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          // k1 = the market_context_rules legacy entry (pooled first), k2 = the global KnowledgeItem.
+          return {
+            text: JSON.stringify({
+              sections: [{ key: "setup", title: "Setup", rules: [{ description: "Confirm QQQ/SPY alignment and always define your risk.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 2, sourceKeys: ["k1", "k2"], conflictSourceKeys: [] }] }],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [instance], normalized.globalItems);
+
+    const rule = coreFramework.sections[0].rules[0];
+    expect(rule.scope).toBeNull();
+    expect(rule.scopeBasis).toBe("UNVERIFIED");
+  });
+});
+
+describe("Real-audit v4, Proof 2 — the 2R rule resolves from real evidence, never forced to scope:null", () => {
+  it("a 2R rule cited from an options/beginner-scoped KnowledgeItem preserves that exact scope and SCOPED basis through CoreFramework", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: [makeKnowledgeItem({ statement: "Structure trades to target a minimum reward-to-risk ratio of at least 2:1.", scope: emptyScope({ marketsOrInstruments: ["options"], traderProfiles: ["beginner"] }) })],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [{ key: "risk", title: "Risk", rules: [{ description: "Structure trades to target a minimum reward-to-risk ratio of at least 2:1.", classification: "explicit", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["k1"], conflictSourceKeys: [] }] }],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    // otherScopedItems (not globalItems) is what a real 2R-scoped item lands in — see knowledgeNormalize.ts.
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], normalized.otherScopedItems);
+
+    const rule = coreFramework.sections[0].rules[0];
+    expect(rule.scope).toEqual({ strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner"] });
+    expect(rule.scopeBasis).toBe("SCOPED");
+  });
+});
+
+describe("Real-audit v4, Proof 1 (decision framework) — an UNVERIFIED pre-strategy gate is caught the same way a scoped one is, and futures/forex strategies bypass it", () => {
+  it("findGlobalGateScopeLeaks flags an UNVERIFIED node on the unconditional spine with reason 'unverified_source'", async () => {
+    const { findGlobalGateScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
+    const badDecisionFramework = {
+      nodes: [
+        { id: "start", type: "start" as const, label: "Start", description: null, next: ["setup-qualification"], branches: [], sourceKeys: [], scope: emptyScope(), scopeBasis: "VERIFIED_GLOBAL" as const },
+        {
+          id: "setup-qualification",
+          type: "action" as const,
+          label: "Foundational Setup Qualification",
+          description: "Evaluate Intraday Fundamentals and QQQ/SPY relative strength.",
+          next: ["pick-strategy"],
+          branches: [],
+          sourceKeys: ["k1"],
+          scope: emptyScope(),
+          scopeBasis: "UNVERIFIED" as const,
+        },
+        { id: "pick-strategy", type: "decision" as const, label: "Which canonical strategy applies?", description: null, next: [], branches: [{ label: "Futures Trend Continuation", next: "futures-path" }], sourceKeys: [], scope: emptyScope(), scopeBasis: "VERIFIED_GLOBAL" as const },
+        { id: "futures-path", type: "action" as const, label: "Futures Trend Continuation entry", description: null, next: [], branches: [], sourceKeys: [], scope: emptyScope(), scopeBasis: "VERIFIED_GLOBAL" as const },
+      ],
+      readableSteps: [],
+      scopeLeaks: [],
+    };
+
+    const leaks = findGlobalGateScopeLeaks(badDecisionFramework as never);
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0]).toMatchObject({ nodeId: "setup-qualification", reason: "unverified_source" });
+  });
+
+  it("synthesizeDecisionFramework end-to-end: a CoreFramework rule built from a legacy Intraday Fundamentals/QQQ-SPY citation cannot gate a futures strategy before selection unless global evidence actually supports it", async () => {
+    const instance = makeInstance({
+      strategy: makeStrategy({
+        market_context_rules: [
+          { description: "Confirm Intraday Fundamentals and QQQ/SPY relative strength/order flow.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" },
+        ],
+      }),
+    });
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const coreFrameworkGemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          sections: [{ key: "setup", title: "Foundational Setup Qualification", rules: [{ description: "Evaluate Intraday Fundamentals and QQQ/SPY relative strength before any trade.", classification: "explicit", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["k1"], conflictSourceKeys: [] }] }],
+        }),
+        usage,
+      })),
+    });
+    const { coreFramework } = await extractCoreFramework({ gemini: coreFrameworkGemini, model: "m" }, [], [instance]);
+    // Confirms the upstream fix actually produced UNVERIFIED input for this test to be meaningful.
+    expect(coreFramework.sections[0].rules[0].scopeBasis).toBe("UNVERIFIED");
+
+    const decisionGemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          nodes: [
+            { id: "start", type: "start", label: "Start", description: null, next: ["pick-strategy"], branches: [], sourceKeys: [] },
+            {
+              id: "pick-strategy",
+              type: "decision",
+              label: "Which canonical strategy applies?",
+              description: null,
+              next: [],
+              branches: [
+                { label: "Momentum Stock Breakout", next: "setup-qualification" },
+                { label: "Futures Trend Continuation", next: "futures-path" },
+              ],
+              sourceKeys: [],
+            },
+            { id: "setup-qualification", type: "action", label: "Foundational Setup Qualification", description: null, next: ["stock-path"], branches: [], sourceKeys: ["k1"] },
+            { id: "stock-path", type: "action", label: "Momentum Stock Breakout entry", description: null, next: [], branches: [], sourceKeys: [] },
+            { id: "futures-path", type: "action", label: "Futures Trend Continuation entry", description: null, next: [], branches: [], sourceKeys: [] },
+          ],
+          readableSteps: ["Pick strategy"],
+        }),
+        usage,
+      })),
+    });
+    const { synthesizeDecisionFramework } = await import("../src/synthesis/decisionFramework.js");
+    const momentumStock = { name: "Momentum Stock Breakout", purpose: "p", markets: [], timeframes: [], marketContext: [], prerequisites: [], setup: [], entryRules: [], confirmationRules: [], stopLossRules: [], profitTargetRules: [], tradeManagementRules: [], invalidationRules: [], noTradeConditions: [], visualDiscretionaryRules: [], riskManagementRules: [], positionSizingRules: [], scalingInRules: [], scalingOutRules: [], runnerManagementRules: [], warnings: [], instructorPreferences: [], variants: [], examples: [], ambiguities: [], conflicts: [], sourceLessonIds: [], supportingKnowledgeLessonIds: [] };
+    const futures = { ...momentumStock, name: "Futures Trend Continuation" };
+
+    const { decisionFramework } = await synthesizeDecisionFramework({ gemini: decisionGemini, model: "m" }, [momentumStock as never, futures as never], coreFramework);
+
+    // "Foundational Setup Qualification" sits behind the Momentum Stock Breakout branch specifically —
+    // but it's STILL flagged, because an UNVERIFIED rule must never be trusted as an unconditional
+    // gate even when correctly placed behind a branch is not itself required here: what matters is
+    // that the futures path never routes through it at all.
+    const byId = new Map(decisionFramework.nodes.map((n) => [n.id, n]));
+    expect(byId.get("futures-path")).toBeDefined();
+    expect(byId.get("setup-qualification")!.scopeBasis).toBe("UNVERIFIED");
+
+    // If a future prompt revision ever placed this same UNVERIFIED node unconditionally before
+    // strategy selection, the audit would catch it — proven directly here.
+    const unconditionalPlacement = {
+      nodes: [
+        { ...decisionFramework.nodes.find((n) => n.id === "start")!, next: ["setup-qualification"] },
+        { ...byId.get("setup-qualification")!, next: ["pick-strategy"] },
+        { ...byId.get("pick-strategy")!, next: [], sourceKeys: [] },
+      ],
+      readableSteps: [],
+      scopeLeaks: [],
+    };
+    const { findGlobalGateScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
+    const leaks = findGlobalGateScopeLeaks(unconditionalPlacement as never);
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0].reason).toBe("unverified_source");
+  });
+});
+
+describe("Real-audit v4, Proof 3 — universalSectionScopeLeaks stays empty for a correctly constructed playbook despite real scoped/unverified underlying data", () => {
+  it("a playbook that precisely qualifies its scoped/unverified material (never absolute language) produces zero leaks", async () => {
+    const scopeVocabulary = new Set(["options", "beginner"]);
+    const nonGlobalRuleDescriptions = ["Structure trades to target a minimum reward-to-risk ratio of at least 2:1.", "Confirm Intraday Fundamentals and QQQ/SPY relative strength/order flow."];
+    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
+
+    const wellBehavedSections = [
+      { key: "risk_management", content: "As a baseline, define your risk before entry. For options traders who are beginners, a minimum 2:1 reward-to-risk ratio is typically enforced." },
+      { key: "master_trading_checklist", content: "Always define your risk before entry and confirm the higher-timeframe context — these hold for every strategy in this course." },
+      { key: "scoped_execution_checklists", content: "Intraday Equities/Options Checklist: confirm Intraday Fundamentals and QQQ/SPY relative strength before entering a Momentum Stock Breakout trade." },
+    ];
+
+    const leaks = findUniversalSectionScopeLeaks(wellBehavedSections, scopeVocabulary, nonGlobalRuleDescriptions);
+    expect(leaks).toEqual([]);
   });
 });

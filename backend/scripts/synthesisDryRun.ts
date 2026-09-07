@@ -194,6 +194,20 @@ async function main(): Promise<void> {
           `estimated_cost=${cost != null ? `$${cost.toFixed(4)}` : "n/a"}. Nothing was persisted to the database.`,
       );
 
+      // Real-audit fix (Phase 3.5B v3/v4) — surface the two deterministic
+      // scope-fidelity checks directly in the console output, not just
+      // buried in the JSON file: both MUST be empty on real production
+      // data before this PR merges (see decisionScopeAudit.ts and
+      // universalSectionAudit.ts). Never weaken either check to make this
+      // line read PASS — a non-empty result here means real content needs
+      // fixing (prompt/pooling), not the detector.
+      const decisionScopeLeakCount = result.decisionFramework.scopeLeaks.length;
+      const universalSectionLeakCount = result.playbook.universalSectionScopeLeaks.length;
+      console.log(
+        `Scope-fidelity check: decisionFramework.scopeLeaks=${decisionScopeLeakCount} (${decisionScopeLeakCount === 0 ? "PASS" : "FAIL — see decisionFramework.scopeLeaks in the JSON output"}), ` +
+          `playbook.universalSectionScopeLeaks=${universalSectionLeakCount} (${universalSectionLeakCount === 0 ? "PASS" : "FAIL — see playbook.universalSectionScopeLeaks in the JSON output"}).`,
+      );
+
       const unmatchedSection = result.playbook.sections.find((s) => s.key === "unmatched_strategy_scoped_knowledge");
 
       const output = {
