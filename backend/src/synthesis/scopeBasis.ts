@@ -87,13 +87,19 @@ const EXPLICIT_APPLICABILITY_PATTERNS: RegExp[] = [
   /\b0-?dte\b/i,
   /\b9:30\b/,
   /\b(?:monday|tuesday|wednesday|thursday|friday)\b/i,
-  // named trader profile
+  // named trader profile (both the person-noun and the activity/style-gerund
+  // form — real Gemini-authored rule text names the STYLE, e.g. "For
+  // momentum day trading, ...", at least as often as the person, e.g. "day
+  // traders should ...")
   /\bbeginners?\b/i,
   /\bexperienced\b/i,
   /\badvanced\b/i,
   /\bscalpers?\b/i,
+  /\bscalping\b/i,
   /\bday\s+traders?\b/i,
+  /\bday\s+trading\b/i,
   /\bswing\s+traders?\b/i,
+  /\bswing\s+trading\b/i,
   /\bnovice\b/i,
   // named strategy/setup applicability
   /\binside\s+bar\b/i,
@@ -125,6 +131,17 @@ export function containsExplicitApplicabilityLanguage(text: string): boolean {
  *      (supportLevel "CONFLICTING") — disputed evidence is never a
  *      settled universal principle safe to power a mandatory checklist,
  *      regardless of what its citations' structured scope says.
+ *
+ * v7 correction — coreFramework.ts's buildRuleFromKeys used to skip calling
+ * this for a partitioned (evidence-class-split) rule, passing an empty
+ * description instead, reasoning that the shared Gemini-authored text could
+ * name a restriction belonging to a DIFFERENT partition. A real dry run
+ * showed that was unsafe: every partition still emits the SAME description
+ * to downstream consumers (playbook, Master Trading Checklist) — there is
+ * no partition-specific text for a reader to fall back on — so if that
+ * emitted text names a restriction, no partition sharing it may claim
+ * VERIFIED_GLOBAL. This function itself didn't change; the caller now
+ * always passes the real `description` instead of conditionally passing "".
  */
 export function finalizeScopeBasis(basis: ScopeBasis, description: string, supportLevel?: string): ScopeBasis {
   if (basis !== "VERIFIED_GLOBAL") return basis;

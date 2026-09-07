@@ -180,27 +180,36 @@ function buildRuleFromKeys(
     exceptions,
     numericalValues,
     scope,
-    // Real-audit fix (v6) — the final VERIFIED_GLOBAL eligibility gate: never
-    // promotes, only ever downgrades to UNVERIFIED when the rule's own text
-    // names a restriction the citations' structured scope missed, or when
-    // the rule documents a genuine methodological conflict — see
-    // scopeBasis.ts's finalizeScopeBasis.
+    // Real-audit fix (v6, corrected in v7) — the final VERIFIED_GLOBAL
+    // eligibility gate: never promotes, only ever downgrades to UNVERIFIED
+    // when the rule's own text names a restriction the citations' structured
+    // scope missed, or when the rule documents a genuine methodological
+    // conflict — see scopeBasis.ts's finalizeScopeBasis.
     //
-    // The description-text check is gated on isFullRule: `raw.description`
-    // is Gemini's ONE merged description, shared verbatim across every
-    // partition of a split rule (see enrichAndPartitionRule above) — so for
-    // a split partition it can name a restriction that belongs entirely to
-    // a DIFFERENT partition's evidence (e.g. "Confirm QQQ/SPY alignment and
-    // always define your risk" splitting into a QQQ/SPY-scoped partition
-    // and an independently-global "define your risk" partition). Applying
-    // the merged text to every partition would falsely downgrade the
-    // genuinely-global one — exactly the dilution v5's partitioning fix
-    // exists to prevent. Each partition's OWN citations are still checked
-    // (see aggregateScopeBasis's citation loop), so this only skips the
-    // whole-description re-check when it would attribute someone else's
-    // restriction to this partition; the CONFLICTING check is unaffected
+    // v6 skipped this check for a partitioned (split) rule, reasoning that
+    // `raw.description` — Gemini's ONE merged description, shared verbatim
+    // across every partition (see enrichAndPartitionRule above) — could name
+    // a restriction belonging entirely to a DIFFERENT partition's evidence,
+    // and applying it to every partition would falsely downgrade an
+    // independently-sufficient global one. A real dry run proved that
+    // reasoning unsafe: whichever partition survives, DOWNSTREAM CONSUMERS
+    // (the playbook, the Master Trading Checklist) ONLY EVER SEE THIS SAME
+    // EMITTED `description` — never which citations produced which words in
+    // it. If the text they actually read names a restriction ("For momentum
+    // day trading, standard candlestick charts...", "Use direct-access
+    // broker platforms... during fast momentum entries"), that emitted rule
+    // cannot claim VERIFIED_GLOBAL no matter which partition it is — the
+    // v6 exception let exactly those rules through. So the check is now
+    // unconditional: every partition's basis is evaluated against the same
+    // final description the reader receives. This can now ALSO downgrade a
+    // partition whose own citations were genuinely unscoped (the QQQ/SPY
+    // case the v6 exception was built for) — that is the correct, more
+    // conservative outcome per this fix's own requirement: conservative
+    // omission from the universal checklist is acceptable, and the rule
+    // (with its real evidence and provenance) is never dropped, only
+    // reclassified. The CONFLICTING check is unaffected either way
     // (CONFLICTING rules are never partitioned to begin with).
-    scopeBasis: finalizeScopeBasis(scopeBasis, isFullRule ? raw.description : "", raw.supportLevel),
+    scopeBasis: finalizeScopeBasis(scopeBasis, raw.description, raw.supportLevel),
   };
 }
 

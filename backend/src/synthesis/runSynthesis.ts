@@ -13,7 +13,7 @@ import { buildClusterCandidates, resolveStrategyScopeNames, type ScopeMappingRes
 import { SynthesisInvariantError } from "./errors.js";
 import { collectScopeVocabulary, collectNonGlobalRuleDescriptions } from "./frameworkScopeSplit.js";
 import { findPlaybookApplicabilityLeaks } from "./playbookApplicabilityAudit.js";
-import { effectiveScopeBasis } from "./scopeBasis.js";
+import { effectiveScopeBasis, finalizeScopeBasis } from "./scopeBasis.js";
 import type { KnowledgeItemScope } from "../gemini/schema.js";
 import type {
   CanonicalStrategy,
@@ -553,12 +553,27 @@ export function selectVerifiedGlobalCoreFrameworkRules(coreFramework: CoreFramew
  * outright (SynthesisInvariantError) rather than merely recording a
  * warning — a future refactor that weakens the filter must be caught
  * immediately, not silently ship a provenance-unsafe checklist.
+ *
+ * v7 strengthening — coreFramework.ts's buildRuleFromKeys is now the ONLY
+ * place expected to run finalizeScopeBasis's restriction gate (see
+ * scopeBasis.ts), but a rule's `scopeBasis` is trusted data by the time it
+ * reaches here, not re-derived. This invariant independently RE-RUNS that
+ * same gate directly against each selected rule's own emitted description
+ * (and supportLevel), so a future rule-construction path that forgets to
+ * call finalizeScopeBasis — CoreFramework's own or a new one — is caught
+ * here too, not just at its origin. Belt-and-suspenders, not a redesign:
+ * the gate itself is unchanged, only re-applied at this second checkpoint.
  */
 export function assertMasterChecklistSourcesGlobal(rules: SynthesizedRule[]): void {
   for (const rule of rules) {
     if (effectiveScopeBasis(rule) !== "VERIFIED_GLOBAL") {
       throw new SynthesisInvariantError(
         `Master Trading Checklist would include a non-VERIFIED_GLOBAL rule ("${rule.description}", scopeBasis=${rule.scopeBasis ?? "unset"}) — this must never happen, since the checklist is built exclusively from a VERIFIED_GLOBAL-only selection.`,
+      );
+    }
+    if (finalizeScopeBasis("VERIFIED_GLOBAL", rule.description, rule.supportLevel) !== "VERIFIED_GLOBAL") {
+      throw new SynthesisInvariantError(
+        `Master Trading Checklist would include a rule marked VERIFIED_GLOBAL whose own emitted description fails the final restriction gate ("${rule.description}", supportLevel=${rule.supportLevel}) — this must never happen; every VERIFIED_GLOBAL rule's description is required to pass finalizeScopeBasis.`,
       );
     }
   }

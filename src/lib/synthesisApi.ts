@@ -232,6 +232,8 @@ export interface PlaybookSection {
   scope?: KnowledgeItemScope;
   scopeBasis?: ScopeBasis;
   applicabilityPolicy?: ApplicabilityPolicy;
+  /** Real-audit fix (Phase 3.5B v7) — true when at least one of this section's own citations is independently VERIFIED_GLOBAL, even though the aggregate `scopeBasis` above may read "SCOPED" (combineScopeBasis's SCOPED-dominates priority). See backend playbookApplicabilityAudit.ts. */
+  hasIndependentGlobalEvidence?: boolean;
 }
 
 export type FrameworkCoverageStatus = "COMPLETE" | "PARTIAL";

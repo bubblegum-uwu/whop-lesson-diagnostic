@@ -120,6 +120,10 @@ function enrichSection(raw: RawPlaybookSection, byKey: Map<string, SourcePoolEnt
   const resolved = resolveSourcePoolKeys(raw.sourceKeys, byKey);
   const { scope, scopeBasis } = combineScopeBasis(resolved);
   const applicabilityPolicy: ApplicabilityPolicyValue = (SECTION_POLICY as Record<string, ApplicabilityPolicyValue>)[raw.key] ?? "DESCRIPTIVE_MIXED";
+  // Real-audit fix (v7) — see PlaybookSectionSchema's own doc comment: additional
+  // information about this SAME citation list, alongside (never instead of) the
+  // aggregate scope/scopeBasis above.
+  const hasIndependentGlobalEvidence = resolved.some((entry) => entry.scopeBasis === "VERIFIED_GLOBAL");
   return {
     key: raw.key,
     title: raw.title,
@@ -128,6 +132,7 @@ function enrichSection(raw: RawPlaybookSection, byKey: Map<string, SourcePoolEnt
     scope,
     scopeBasis,
     applicabilityPolicy,
+    hasIndependentGlobalEvidence,
   };
 }
 

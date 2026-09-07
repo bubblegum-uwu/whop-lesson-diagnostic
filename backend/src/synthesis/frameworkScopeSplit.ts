@@ -93,20 +93,39 @@ export interface TaggedNonGlobalRule {
  * rule as if it were universal without repeating any of its literal
  * scope-array words, so collectScopeVocabulary's term-matching alone could
  * never have caught it).
+ *
+ * Real-audit fix (v7) — a rule that CoreFramework's evidence-class
+ * partitioning (see coreFramework.ts's enrichAndPartitionRule) split into
+ * multiple output rules shares the exact same `description` text VERBATIM
+ * across every partition, by design (only which citations/scope back each
+ * copy differs). If one partition is VERIFIED_GLOBAL, its SCOPED or
+ * UNVERIFIED sibling partition's description is therefore word-for-word
+ * (or near enough to trip the overlap check) identical to a description
+ * that DOES also carry independently-sufficient global evidence — a real
+ * dry run found this produced a false leak (the "polarity-inversion rule"
+ * in key_levels): playbook prose describing the genuinely-global partition
+ * overlapped its own non-global sibling's description and got flagged as
+ * broadening, even though the described content is not actually
+ * restriction-only. Descriptions that ALSO appear as a VERIFIED_GLOBAL
+ * rule anywhere in the pool are excluded here for exactly that reason —
+ * this only ever REMOVES a candidate from the returned list (a real
+ * restriction with no globally-backed sibling is still caught unchanged).
  */
 export function collectNonGlobalRuleDescriptions(coreFramework: CoreFramework, canonicalStrategies: CanonicalStrategy[] = []): TaggedNonGlobalRule[] {
-  const descriptions: TaggedNonGlobalRule[] = [];
-  const addIfNonGlobal = (rule: { description: string; scope: KnowledgeItemScope | null; scopeBasis?: ScopeBasis }) => {
+  const candidates: TaggedNonGlobalRule[] = [];
+  const globallyBackedDescriptions = new Set<string>();
+  const visit = (rule: { description: string; scope: KnowledgeItemScope | null; scopeBasis?: ScopeBasis }) => {
     const basis = effectiveScopeBasis(rule);
-    if (basis === "SCOPED" || basis === "UNVERIFIED") descriptions.push({ description: rule.description, basis });
+    if (basis === "VERIFIED_GLOBAL") globallyBackedDescriptions.add(rule.description);
+    else if (basis === "SCOPED" || basis === "UNVERIFIED") candidates.push({ description: rule.description, basis });
   };
   for (const section of coreFramework.sections) {
-    for (const rule of section.rules) addIfNonGlobal(rule);
+    for (const rule of section.rules) visit(rule);
   }
   for (const strategy of canonicalStrategies) {
     for (const category of STRATEGY_RULE_CATEGORIES) {
-      for (const rule of strategy[category]) addIfNonGlobal(rule);
+      for (const rule of strategy[category]) visit(rule);
     }
   }
-  return descriptions;
+  return candidates.filter((candidate) => !globallyBackedDescriptions.has(candidate.description));
 }

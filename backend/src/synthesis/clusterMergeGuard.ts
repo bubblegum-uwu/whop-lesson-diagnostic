@@ -49,6 +49,32 @@ import type { StrategySignature } from "./normalize.js";
  *     hierarchy AND a materially different rule shape (more mandatory
  *     context/confirmation steps) -> split apart even if Gemini merged
  *     them.
+ *
+ * Real-audit fix (v7) — a SIXTH real dry run showed the rule-shape signal
+ * above missed the EXACT case it was built for: the real production
+ * foundational-B&R/Top-Down-B&R pair (strategyInstanceIds 11/19) merged
+ * again, producing 15 clusters instead of 16, because their real rule-count
+ * differences are spread THINLY across several categories (a Top-Down
+ * variant's extra mandatory steps land as +1 each in setup/confirmation/
+ * market-context/trade-management, say) rather than CONCENTRATED as a
+ * >=2-count jump in two categories the way the original synthetic test
+ * fixture modeled it. `hasRuleShapeDivergence` required BOTH "a category
+ * differs by >=2" AND "at least 2 such categories" simultaneously — a
+ * single combined bar tuned to the concentrated case, with no way to
+ * recognize a genuinely different rule shape whose evidence is distributed
+ * instead of concentrated.
+ *
+ * Fix: OR in a second, independent way to detect divergence — unchanged
+ * concentrated-jump detection (still catches the original case exactly as
+ * before, so nothing already correct regresses) PLUS a normalized
+ * total-divergence-ratio check requiring BOTH breadth (rule counts moved in
+ * several distinct categories, not just one off-by-one outlier — the
+ * original design's own stated tolerance for isolated noise is preserved)
+ * AND a minimum total-magnitude-relative-to-total-rule-volume ratio (so two
+ * strategies with a large total rule count and one stray +1 somewhere don't
+ * false-positive). Still purely a function of the already-known
+ * StrategySignature's ruleCounts — no new data, no text/prose, no
+ * hard-coded IDs, names, or counts.
  */
 
 const RULE_COUNT_CATEGORIES = [
@@ -64,10 +90,14 @@ const RULE_COUNT_CATEGORIES = [
   "visual_discretionary_rules",
 ] as const;
 
-/** A rule-category count difference below this is ordinary lesson-to-lesson noise, not a different rule shape. */
+/** A rule-category count difference below this is ordinary lesson-to-lesson noise, not a different rule shape (CONCENTRATED divergence branch). */
 const MATERIAL_COUNT_DIFFERENCE = 2;
-/** How many distinct rule categories must clear that bar before the pair's OVERALL shape (not just one category) counts as materially different. */
+/** How many distinct rule categories must clear that bar before the pair's OVERALL shape (not just one category) counts as materially different (CONCENTRATED divergence branch). */
 const MIN_DIVERGENT_CATEGORIES = 2;
+/** How many distinct rule categories must move AT ALL before smaller, thinly-spread differences count as a real shape change (DISTRIBUTED divergence branch) — kept higher than MIN_DIVERGENT_CATEGORIES since each individual category's move no longer has to clear MATERIAL_COUNT_DIFFERENCE on its own, so more of them must move to rule out isolated single-category noise. */
+const MIN_DISTRIBUTED_CATEGORIES = 3;
+/** Total |diff| across all categories, as a fraction of total rule volume (both instances' counts summed), required before distributed movement counts as material — guards against a large-rule-count pair flagged by a handful of unrelated +1s that are proportionally still noise. */
+const DISTRIBUTED_DIVERGENCE_RATIO = 0.15;
 
 function hasTimeframeHierarchyMismatch(a: StrategySignature, b: StrategySignature): boolean {
   const aIsHierarchy = a.timeframes.length >= 2;
@@ -76,12 +106,23 @@ function hasTimeframeHierarchyMismatch(a: StrategySignature, b: StrategySignatur
 }
 
 function hasRuleShapeDivergence(a: StrategySignature, b: StrategySignature): boolean {
-  let divergentCategories = 0;
+  let concentratedCategories = 0;
+  let movedCategories = 0;
+  let totalDiff = 0;
+  let totalVolume = 0;
   for (const category of RULE_COUNT_CATEGORIES) {
-    const diff = Math.abs((a.ruleCounts[category] ?? 0) - (b.ruleCounts[category] ?? 0));
-    if (diff >= MATERIAL_COUNT_DIFFERENCE) divergentCategories++;
+    const countA = a.ruleCounts[category] ?? 0;
+    const countB = b.ruleCounts[category] ?? 0;
+    const diff = Math.abs(countA - countB);
+    totalDiff += diff;
+    totalVolume += countA + countB;
+    if (diff >= MATERIAL_COUNT_DIFFERENCE) concentratedCategories++;
+    if (diff > 0) movedCategories++;
   }
-  return divergentCategories >= MIN_DIVERGENT_CATEGORIES;
+
+  const concentratedDivergence = concentratedCategories >= MIN_DIVERGENT_CATEGORIES;
+  const distributedDivergence = totalVolume > 0 && movedCategories >= MIN_DISTRIBUTED_CATEGORIES && totalDiff / totalVolume >= DISTRIBUTED_DIVERGENCE_RATIO;
+  return concentratedDivergence || distributedDivergence;
 }
 
 function isMateriallyDifferent(a: StrategySignature, b: StrategySignature): boolean {

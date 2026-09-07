@@ -1289,6 +1289,217 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
 });
 
 /**
+ * SIXTH real-data audit regression tests (Phase 3.5B v7) — see PR #13's
+ * sixth real 28-lesson dry-run audit. Four DESCRIPTIVE_MIXED sections
+ * (key_levels, setup_selection, risk_management, target_selection) were
+ * false-positive-flagged for the same underlying reason: each mixes a
+ * genuinely VERIFIED_GLOBAL rule with properly-qualified SCOPED material,
+ * and combineScopeBasis's "SCOPED dominates" priority (correct for the
+ * union `scope` itself) made the section's AGGREGATE `scopeBasis` read
+ * "SCOPED" even though the specific absolute claim in question is
+ * independently globally backed. `hasIndependentGlobalEvidence` (see
+ * PlaybookSectionSchema) lets the audit tell that apart from a section with
+ * NO global partition at all. One real leak (market_context_regime) must
+ * remain caught throughout.
+ */
+describe("Real-audit v7 — DESCRIPTIVE_MIXED sections mixing genuinely global evidence with properly-qualified scoped material are not false-positive-flagged", () => {
+  it("real false positive: key_levels — the polarity-inversion claim has independent VERIFIED_GLOBAL evidence; unrelated, properly-qualified SCOPED chase/stop rules do not universalize the section", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "key_levels",
+          content:
+            "A broken key level that gets retested always acts as polarity-inverted support or resistance. " +
+            "For options day trading, never chase price more than 0.5% beyond the level. " +
+            "Scalpers should tighten stops to the nearest micro key level.",
+          scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["scalper"] },
+          scopeBasis: "SCOPED", // combineScopeBasis: SCOPED dominates once ANY citation is scoped, even with an independently-global one also present
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+          hasIndependentGlobalEvidence: true, // the polarity-inversion citation is independently VERIFIED_GLOBAL
+        },
+      ],
+      new Set(["options", "scalper"]),
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+  });
+
+  it("real false positive: setup_selection — the narrow-specialization claim has independent VERIFIED_GLOBAL evidence; beginner/experienced counts are explicitly qualified in prose", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "setup_selection",
+          content:
+            "Every trader should always specialize narrowly in a small set of setups rather than trading everything. " +
+            "Beginners should track no more than two setups at a time. " +
+            "Experienced traders may track up to five setups once consistently profitable.",
+          scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: ["beginner", "experienced"] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+          hasIndependentGlobalEvidence: true,
+        },
+      ],
+      new Set(["beginner", "experienced"]),
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+  });
+
+  it("real false positive: risk_management — the 2R claim has genuine independent VERIFIED_GLOBAL evidence; beginner/options/scalping rules are explicitly labeled as such in prose", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "risk_management",
+          content:
+            "Whenever you're trading, what you always want is at least a two R multiple. " +
+            "For beginner options traders, risk no more than 1% of account equity per trade. " +
+            "Scalping accounts should use a tighter maximum daily loss limit.",
+          scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner", "scalper"] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+          hasIndependentGlobalEvidence: true,
+        },
+      ],
+      new Set(["options", "beginner", "scalper"]),
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+  });
+
+  it("real false positive: target_selection — the section describes alternative target categories, explicitly labeling intraday/premarket/Gap Fill/Fibonacci/daily-weekly contexts; it never claims every target type applies to every strategy", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "target_selection",
+          content:
+            "Intraday setups always target the prior session's high or low first. " +
+            "Premarket sessions favor the overnight range extremes as the initial target. " +
+            "The Gap Fill target applies within Gap Fill setups specifically. " +
+            "Fibonacci retracement levels are used as targets in Fibonacci-based strategies. " +
+            "On daily and weekly timeframes, targets extend to the prior major swing point.",
+          scope: { strategies: ["Gap Fill", "Fibonacci"], marketsOrInstruments: [], timeframes: ["daily", "weekly"], sessions: ["premarket"], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+          hasIndependentGlobalEvidence: false, // this section has no independent global partition at all — every claim is locally qualified instead
+        },
+      ],
+      new Set(["premarket", "daily", "weekly", "intraday"]),
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+  });
+
+  it("real leak preserved: market_context_regime — 'Directional trades must align with the prevailing higher-timeframe trend.' rests on SCOPED/UNVERIFIED evidence and is still flagged, even though the section's other statements (broad US equity indices..., active intraday momentum trading 9:30-11:00...) are properly qualified", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [{ description: "Directional bias should align with the higher-timeframe trend before entry.", basis: "SCOPED" as const }];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "market_context_regime",
+          content:
+            "Directional trades must align with the prevailing higher-timeframe trend. " +
+            "Broad US equity indices always confirm the regime before any directional bias is taken. " +
+            "Active intraday momentum trading between 9:30 AM and 11:00 AM always requires a confirmed regime read.",
+          scope: { strategies: [], marketsOrInstruments: ["equities"], timeframes: [], sessions: ["9:30-11:00"], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+          hasIndependentGlobalEvidence: false, // no independently-global partition backs this section at all
+        },
+      ],
+      new Set(["equities", "9:30-11:00"]),
+      nonGlobalRules,
+    );
+    expect(result.universalApplicabilityLeaks).toHaveLength(1);
+    expect(result.universalApplicabilityLeaks[0].sectionKey).toBe("market_context_regime");
+    expect(result.universalApplicabilityLeaks[0].matchedNonGlobalRules).toEqual([nonGlobalRules[0].description]);
+  });
+
+  it("do-not-weaken check: a section WITH independent global evidence is still flagged when its scoped material is genuinely paraphrased as universal (matchedScopedRules stays fully sensitive — hasIndependentGlobalEvidence only suppresses the coarse sentence-level/ownBasis signals, never the precise per-rule overlap check)", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [{ description: "Beginner options traders should risk no more than 1% of account equity on every trade.", basis: "SCOPED" as const }];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "risk_management",
+          content: "Always risk no more than 1% of account equity on every trade, and target at least a two R multiple.",
+          scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner"] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+          hasIndependentGlobalEvidence: true, // the 2R half of this claim IS independently global — but that must not launder the erased 1%-risk restriction
+        },
+      ],
+      new Set(),
+      nonGlobalRules,
+    );
+    expect(result.universalApplicabilityLeaks).toHaveLength(1);
+    expect(result.universalApplicabilityLeaks[0].matchedNonGlobalRules).toEqual([nonGlobalRules[0].description]);
+  });
+
+  it("collectNonGlobalRuleDescriptions excludes a SCOPED/UNVERIFIED rule description that ALSO appears as a VERIFIED_GLOBAL rule elsewhere (an evidence-class-partitioned rule's sibling) — the real key_levels root cause at its source", async () => {
+    const { collectNonGlobalRuleDescriptions } = await import("../src/synthesis/frameworkScopeSplit.js");
+    const coreFramework = {
+      sections: [
+        {
+          key: "key_levels",
+          title: "Key Levels",
+          rules: [
+            // Two partitions of the SAME original rule — identical description, by design (see coreFramework.ts's enrichAndPartitionRule) — one VERIFIED_GLOBAL, one SCOPED.
+            { description: "A broken key level that gets retested acts as polarity-inverted support or resistance.", classification: "explicit" as const, supportLevel: "MULTI_SOURCE" as const, supportCount: 2, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: null, scopeBasis: "VERIFIED_GLOBAL" as const },
+            { description: "A broken key level that gets retested acts as polarity-inverted support or resistance.", classification: "explicit" as const, supportLevel: "MULTI_SOURCE" as const, supportCount: 2, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: [] }, scopeBasis: "SCOPED" as const },
+            // A genuinely, exclusively scoped rule with no globally-backed sibling — must still be returned.
+            { description: "For options day trading, never chase price more than 0.5% beyond the level.", classification: "explicit" as const, supportLevel: "SINGLE_SOURCE" as const, supportCount: 1, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: [] }, scopeBasis: "SCOPED" as const },
+          ],
+        },
+      ],
+    };
+    const descriptions = collectNonGlobalRuleDescriptions(coreFramework as unknown as import("../src/synthesis/schema.js").CoreFramework, []);
+    expect(descriptions.map((d) => d.description)).not.toContain("A broken key level that gets retested acts as polarity-inverted support or resistance.");
+    expect(descriptions.map((d) => d.description)).toContain("For options day trading, never chase price more than 0.5% beyond the level.");
+  });
+
+  it("playbook.ts's enrichSection computes hasIndependentGlobalEvidence=true for a section citing both a VERIFIED_GLOBAL and a SCOPED pool entry, and false for a section citing only SCOPED/UNVERIFIED entries", async () => {
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      { analysisId: 1, lessonId: 10, lessonTitle: "Lesson 10", knowledge: { summary: "s", knowledgeItems: [makeKnowledgeItem({ statement: "Always define your risk before entering a trade.", scope: emptyScope() })], examples: [], conflictsAndAmbiguities: [] } },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+    const instance = makeInstance({
+      strategy: makeStrategy({ market_context_rules: [{ description: "Confirm order flow context.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }] }),
+    });
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [{ key: "mixed", title: "Mixed", rules: [{ description: "Confirm order flow context and always define your risk.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 2, sourceKeys: ["k1", "k2"], conflictSourceKeys: [] }] }],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [instance], normalized.globalItems);
+    // enrichAndPartitionRule splits this into 2 rules (VERIFIED_GLOBAL + UNVERIFIED) since the two citations are different evidence classes.
+    const rules = coreFramework.sections[0].rules;
+    expect(rules.some((r) => r.scopeBasis === "VERIFIED_GLOBAL")).toBe(true);
+
+    const { buildSynthesisSourcePool, combineScopeBasis, resolveSourcePoolKeys } = await import("../src/synthesis/synthesisSourcePool.js");
+    const { poolEntries, byKey } = buildSynthesisSourcePool([], coreFramework);
+    const allKeys = poolEntries.map((e) => e.key);
+    const resolved = resolveSourcePoolKeys(allKeys, byKey);
+    const hasIndependentGlobalEvidence = resolved.some((e) => e.scopeBasis === "VERIFIED_GLOBAL");
+    expect(hasIndependentGlobalEvidence).toBe(true);
+    expect(combineScopeBasis(resolved).scopeBasis).toBe("UNVERIFIED"); // aggregate is dragged down by the UNVERIFIED partition — hasIndependentGlobalEvidence is what preserves the distinction
+  });
+});
+
+/**
  * THIRD real-data audit regression tests (Phase 3.5B v4) — see PR #13's
  * third real 28-lesson dry-run audit ("upstream scope aggregation").
  * CoreFramework's own scope union could come out empty (and be treated as
@@ -1432,7 +1643,10 @@ describe("Real-audit v4, Proof 1 — CoreFramework consolidated rules cannot be 
 
   it("real-audit fix v5: mixing a legacy market_context_rules citation with a genuinely global KnowledgeItem citation on ONE Gemini-authored rule is PARTITIONED into two separate output rules — global evidence is never diluted away by the unverifiable part, and the unverifiable part is never laundered into global either", async () => {
     const instance = makeInstance({
-      strategy: makeStrategy({ market_context_rules: [{ description: "Confirm QQQ/SPY alignment.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }] }),
+      // Deliberately no named instrument/timeframe/session here (unlike the v7 test below) —
+      // this test's own purpose is to isolate partitioning-by-EVIDENCE-CLASS from the v7
+      // shared-description restriction gate; the two are independent mechanisms.
+      strategy: makeStrategy({ market_context_rules: [{ description: "Confirm relative strength and order flow alignment.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }] }),
     });
     const knowledgeSources: LessonKnowledgeSource[] = [
       { analysisId: 1, lessonId: 10, lessonTitle: "Lesson 10", knowledge: { summary: "s", knowledgeItems: [makeKnowledgeItem({ statement: "Always define your risk before entering a trade.", scope: emptyScope() })], examples: [], conflictsAndAmbiguities: [] } },
@@ -1446,7 +1660,7 @@ describe("Real-audit v4, Proof 1 — CoreFramework consolidated rules cannot be 
           // k1 = the market_context_rules legacy entry (pooled first), k2 = the global KnowledgeItem.
           return {
             text: JSON.stringify({
-              sections: [{ key: "setup", title: "Setup", rules: [{ description: "Confirm QQQ/SPY alignment and always define your risk.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 2, sourceKeys: ["k1", "k2"], conflictSourceKeys: [] }] }],
+              sections: [{ key: "setup", title: "Setup", rules: [{ description: "Confirm relative strength and order flow alignment and always define your risk.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 2, sourceKeys: ["k1", "k2"], conflictSourceKeys: [] }] }],
             }),
             usage,
           };
@@ -1467,10 +1681,52 @@ describe("Real-audit v4, Proof 1 — CoreFramework consolidated rules cannot be 
     const unverifiedRule = rules.find((r) => r.scopeBasis === "UNVERIFIED");
     expect(globalRule).toBeDefined();
     expect(unverifiedRule).toBeDefined();
-    expect(globalRule!.description).toBe("Confirm QQQ/SPY alignment and always define your risk.");
-    expect(unverifiedRule!.description).toBe("Confirm QQQ/SPY alignment and always define your risk.");
+    expect(globalRule!.description).toBe("Confirm relative strength and order flow alignment and always define your risk.");
+    expect(unverifiedRule!.description).toBe("Confirm relative strength and order flow alignment and always define your risk.");
     expect(globalRule!.scope).toBeNull();
     expect(unverifiedRule!.scope).toBeNull();
+  });
+
+  it("real-audit fix (v7): when a PARTITIONED rule's SHARED final description itself names a restriction (e.g. 'Confirm QQQ/SPY alignment'), NEITHER partition may claim VERIFIED_GLOBAL — downstream consumers only ever see this one emitted description, regardless of which citation contributed which words", async () => {
+    const instance = makeInstance({
+      strategy: makeStrategy({ market_context_rules: [{ description: "Confirm QQQ/SPY alignment.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }] }),
+    });
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      { analysisId: 1, lessonId: 10, lessonTitle: "Lesson 10", knowledge: { summary: "s", knowledgeItems: [makeKnowledgeItem({ statement: "Always define your risk before entering a trade.", scope: emptyScope() })], examples: [], conflictsAndAmbiguities: [] } },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [{ key: "setup", title: "Setup", rules: [{ description: "Confirm QQQ/SPY alignment and always define your risk.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 2, sourceKeys: ["k1", "k2"], conflictSourceKeys: [] }] }],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [instance], normalized.globalItems);
+
+    // Partitioning-by-evidence-class still happens (2 rules, one per class) — that mechanism
+    // is untouched. What changed is that NEITHER may now claim VERIFIED_GLOBAL, because both
+    // share the one emitted description and that description names "QQQ/SPY".
+    const rules = coreFramework.sections[0].rules;
+    expect(rules).toHaveLength(2);
+    for (const rule of rules) {
+      expect(rule.description).toBe("Confirm QQQ/SPY alignment and always define your risk.");
+      expect(rule.scopeBasis).not.toBe("VERIFIED_GLOBAL");
+    }
+    expect(rules.every((r) => r.scopeBasis === "UNVERIFIED")).toBe(true);
+    // Conservative reclassification, never deletion — both partitions, their sources, and
+    // their numerical values/exceptions all still survive in the output.
+    expect(rules.flatMap((r) => r.sources).length).toBeGreaterThan(0);
   });
 });
 
@@ -1709,6 +1965,108 @@ describe("Real-audit v6 — VERIFIED_GLOBAL eligibility: a rule/citation whose s
     expect(coreFramework.sections[0].rules[0].scopeBasis).toBe("UNVERIFIED");
     // Master checklist selection naturally excludes it — no redesign needed there.
     expect(selectVerifiedGlobalCoreFrameworkRules(coreFramework)).toHaveLength(0);
+  });
+});
+
+/**
+ * SIXTH real-data audit regression tests (Phase 3.5B v7) — see PR #13's
+ * sixth real 28-lesson dry-run audit. The v6 fix correctly stopped an empty
+ * STRUCTURED scope from being read as "verified global," but its own
+ * finalizeScopeBasis call was skipped for a PARTITIONED (evidence-class-
+ * split) rule, on the theory that the shared merged description could name
+ * a restriction belonging to a different partition. Real data proved that
+ * theory unsafe: every partition emits the SAME description to downstream
+ * consumers, so if THAT text names a restriction, no partition sharing it
+ * may claim VERIFIED_GLOBAL. Three concrete real CoreFramework rules
+ * leaked through as VERIFIED_GLOBAL this way.
+ */
+describe("Real-audit v7 — the VERIFIED_GLOBAL restriction gate applies to every emitted rule partition, not just unsplit rules", () => {
+  /** Builds a CoreFramework where ONE Gemini rule cites both a scope-blind legacy rule (forcing a partition split) and a genuinely-unscoped KnowledgeItem, so the resulting rule is guaranteed to be partitioned into 2 (mirroring the real production shape) even though this test only cares about the final scopeBasis of whichever partition would otherwise have been VERIFIED_GLOBAL. */
+  async function buildPartitionedRule(description: string) {
+    const instance = makeInstance({
+      strategy: makeStrategy({ market_context_rules: [{ description: "Confirm order flow context.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }] }),
+    });
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      { analysisId: 1, lessonId: 10, lessonTitle: "Lesson 10", knowledge: { summary: "s", knowledgeItems: [makeKnowledgeItem({ statement: description, scope: emptyScope() })], examples: [], conflictsAndAmbiguities: [] } },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [{ key: "trade_management", title: "Trade Management", rules: [{ description, classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 2, sourceKeys: ["k1", "k2"], conflictSourceKeys: [] }] }],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [instance], normalized.globalItems);
+    return coreFramework.sections[0].rules;
+  }
+
+  it("real failure A: \"For momentum day trading, standard candlestick charts and Level 2 order flow provide sufficient confirmation before entry.\" MUST NOT become VERIFIED_GLOBAL, even as a partitioned rule", async () => {
+    const rules = await buildPartitionedRule("For momentum day trading, standard candlestick charts and Level 2 order flow provide sufficient confirmation before entry.");
+    for (const rule of rules) expect(rule.scopeBasis).not.toBe("VERIFIED_GLOBAL");
+  });
+
+  it("real failure B: \"In momentum day trading, scale out partial profits — 50% to 80% of the position at the first target, retaining a 10% to 20% runner for extended moves.\" MUST NOT become VERIFIED_GLOBAL, even as a partitioned rule", async () => {
+    const rules = await buildPartitionedRule("In momentum day trading, scale out partial profits — 50% to 80% of the position at the first target, retaining a 10% to 20% runner for extended moves.");
+    for (const rule of rules) expect(rule.scopeBasis).not.toBe("VERIFIED_GLOBAL");
+  });
+
+  it("real failure C: \"For momentum day trading, use direct-access broker platforms (such as Interactive Brokers) with a Book Trader or hotkeys interface to execute quickly during fast momentum entries.\" MUST NOT become VERIFIED_GLOBAL, even as a partitioned rule", async () => {
+    const rules = await buildPartitionedRule("For momentum day trading, use direct-access broker platforms (such as Interactive Brokers) with a Book Trader or hotkeys interface to execute quickly during fast momentum entries.");
+    for (const rule of rules) expect(rule.scopeBasis).not.toBe("VERIFIED_GLOBAL");
+  });
+
+  it("genuine broad claim survives partitioning: \"Whenever you're trading, what you always want is at least a two R multiple\" with multiple independent broad sources MAY remain VERIFIED_GLOBAL even as a partitioned rule", async () => {
+    const rules = await buildPartitionedRule("Whenever you're trading, what you always want is at least a two R multiple.");
+    expect(rules.some((r) => r.scopeBasis === "VERIFIED_GLOBAL")).toBe(true);
+  });
+
+  it("no evidence or provenance is dropped by the reclassification — every partition, its sources, and the rule's numerical values all still survive in the output", async () => {
+    const rules = await buildPartitionedRule("For momentum day trading, scale out 50% to 80% of the position.");
+    expect(rules.length).toBeGreaterThan(0);
+    expect(rules.flatMap((r) => r.sources).length).toBeGreaterThan(0);
+  });
+
+  it("Master Checklist invariant (v7): assertMasterChecklistSourcesGlobal independently re-runs the restriction gate against each selected rule's own description and rejects one that shouldn't have been marked VERIFIED_GLOBAL, even if scopeBasis was set incorrectly upstream", async () => {
+    const { assertMasterChecklistSourcesGlobal } = await import("../src/synthesis/runSynthesis.js");
+    const mislabeledRule = {
+      description: "For momentum day trading, standard candlestick charts provide sufficient confirmation.",
+      classification: "explicit" as const,
+      supportLevel: "SINGLE_SOURCE" as const,
+      supportCount: 1,
+      sources: [],
+      conflictSources: [],
+      exceptions: [],
+      numericalValues: [],
+      scope: null,
+      scopeBasis: "VERIFIED_GLOBAL" as const, // incorrectly set upstream — the invariant must catch this independently
+    };
+    expect(() => assertMasterChecklistSourcesGlobal([mislabeledRule])).toThrow(/restriction gate|VERIFIED_GLOBAL/);
+  });
+
+  it("Master Checklist invariant (v7): a genuinely unrestricted VERIFIED_GLOBAL rule passes the independent re-check without throwing", async () => {
+    const { assertMasterChecklistSourcesGlobal } = await import("../src/synthesis/runSynthesis.js");
+    const genuineRule = {
+      description: "Always define your risk before entering a trade.",
+      classification: "explicit" as const,
+      supportLevel: "MULTI_SOURCE" as const,
+      supportCount: 2,
+      sources: [],
+      conflictSources: [],
+      exceptions: [],
+      numericalValues: [],
+      scope: null,
+      scopeBasis: "VERIFIED_GLOBAL" as const,
+    };
+    expect(() => assertMasterChecklistSourcesGlobal([genuineRule])).not.toThrow();
   });
 });
 
@@ -2069,6 +2427,57 @@ describe("Real-audit v5, Blocker 1 — deterministic cluster-merge guard makes c
     const guarded = applyClusterMergeGuard(geminiMergedCluster, [orb1m, orb5m]);
     expect(guarded).toHaveLength(1);
     expect(guarded[0].memberInstanceIds.sort()).toEqual([21, 22]);
+  });
+
+  it("Regression C (v7): a real-shape foundational B&R (11) vs Top-Down Multi-Timeframe B&R (19) pair whose rule-count differences are spread THINLY across several categories (+1 each, never reaching the old >=2-per-category bar) — the exact real dry-run failure that produced 15 clusters instead of 16 — still SPLITS apart", async () => {
+    const { applyClusterMergeGuard } = await import("../src/synthesis/clusterMergeGuard.js");
+    const br = makeSignature({ strategyInstanceId: 11, originalName: "Break and Retest (B&R) Setup", timeframes: ["5m"] });
+    const topDown = makeSignature({
+      strategyInstanceId: 19,
+      originalName: "Top-Down Multi-Timeframe Break and Retest",
+      timeframes: ["1H", "5m"],
+      // Every diff below is exactly +1 — under the OLD dual-threshold logic (>=2 count
+      // difference in >=2 categories) NONE of these categories would have counted, so
+      // hasRuleShapeDivergence would have been false and this pair would have stayed
+      // merged even with the genuine timeframe-hierarchy mismatch present.
+      ruleCounts: {
+        ...br.ruleCounts,
+        setup_conditions: br.ruleCounts.setup_conditions + 1,
+        confirmation_rules: br.ruleCounts.confirmation_rules + 1,
+        market_context_rules: br.ruleCounts.market_context_rules + 1,
+        trade_management_rules: br.ruleCounts.trade_management_rules + 1,
+      },
+    });
+
+    const geminiMergedCluster = [
+      { clusterKey: "br-multi", proposedCanonicalName: "Multi-Timeframe Break and Retest Strategy", memberInstanceIds: [11, 19], similarityRationale: "same break/retest mechanics", differencesNotes: "one adds HTF context" },
+    ];
+
+    const guarded = applyClusterMergeGuard(geminiMergedCluster, [br, topDown]);
+    expect(guarded).toHaveLength(2);
+    expect(guarded.map((c) => c.memberInstanceIds)).toEqual(expect.arrayContaining([[11], [19]]));
+  });
+
+  it("Regression D (v7): ORB 22 + ORB 27 with a couple of harmless one-off rule-count differences (ordinary lesson-to-lesson wording variance, spread across too few categories to be a real shape change) remain ONE merged canonical strategy — the new distributed-divergence signal does not over-trigger on modest noise", async () => {
+    const { applyClusterMergeGuard } = await import("../src/synthesis/clusterMergeGuard.js");
+    const orb22 = makeSignature({ strategyInstanceId: 22, originalName: "Opening Range Breakout", timeframes: ["5m"] });
+    const orb27 = makeSignature({
+      strategyInstanceId: 27,
+      originalName: "Opening Range Breakout (Systematic)",
+      timeframes: ["5m"],
+      // Only 2 categories move, each by 1 — below MIN_DISTRIBUTED_CATEGORIES (3), so this
+      // never reaches the distributed-divergence branch either, exactly like the
+      // concentrated branch's existing single-off-by-one tolerance.
+      ruleCounts: { ...orb22.ruleCounts, confirmation_rules: orb22.ruleCounts.confirmation_rules + 1, stop_loss_rules: orb22.ruleCounts.stop_loss_rules + 1 },
+    });
+
+    const geminiMergedCluster = [
+      { clusterKey: "orb", proposedCanonicalName: "Opening Range Breakout", memberInstanceIds: [22, 27], similarityRationale: "same ORB mechanics", differencesNotes: "" },
+    ];
+
+    const guarded = applyClusterMergeGuard(geminiMergedCluster, [orb22, orb27]);
+    expect(guarded).toHaveLength(1);
+    expect(guarded[0].memberInstanceIds.sort()).toEqual([22, 27]);
   });
 
   it("stability: identical source signatures produce the SAME final canonical membership structure regardless of whether Gemini's raw clustering call happens to merge or split B&R/Top-Down B&R", async () => {

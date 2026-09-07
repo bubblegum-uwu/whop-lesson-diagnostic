@@ -72,6 +72,41 @@ import type { ApplicabilityLeak, ApplicabilityPolicyValue, PlaybookSection } fro
  *     matchedUnverifiedRules (comparisons against OTHER, undisclosed
  *     non-global rules) are untouched, so real broadening that happens to
  *     also mention its own declared scope is still caught by those.
+ *
+ * Real-audit fix (v7) — a SIXTH real dry run found four more false
+ * positives (key_levels, setup_selection, risk_management,
+ * target_selection), all from the SAME root cause the matchedTerms signal
+ * had from the start: it fires whenever a course-wide-known scoped
+ * vocabulary term appears ANYWHERE in a section's content, together with an
+ * absolute-claim word appearing ANYWHERE ELSE in that same section —
+ * completely unrelated occurrences, no requirement the two actually
+ * describe the same claim. A DESCRIPTIVE_MIXED section legitimately mixes
+ * several separately-qualified rules (e.g. "Beginners should risk 1%.
+ * Experienced traders should target 2R on every trade." — "2R... every
+ * trade" is itself backed by genuinely global evidence and is not what
+ * "beginners"/"experienced" restrict), so a pure section-wide co-occurrence
+ * check flags the section merely for discussing ANY scoped concept BY
+ * NAME, however properly it's labeled. matchedTerms is now diagnostic only
+ * (still reports which vocabulary terms are literally present, for the
+ * leak payload); the actual trigger is a SENTENCE-level check — an
+ * absolute-claim sentence is only a leak when THAT sentence itself names no
+ * qualifying term (course-wide vocabulary OR this section's own declared
+ * scope, which can include a strategy name). This is the same
+ * co-occurrence mechanism the SCOPED-policy branch already uses, just at
+ * sentence instead of whole-section granularity — DESCRIPTIVE_MIXED
+ * sections legitimately mix several independently-qualified claims, unlike
+ * a SCOPED section's single declared scope covering the whole section, so
+ * the finer granularity is what's actually correct here. Real broadening
+ * remains caught unweakened: an unqualified absolute sentence with no local
+ * qualifier still trips this signal, and matchedScopedRules/
+ * matchedUnverifiedRules/unexplainedOwnScope (paraphrase-overlap against a
+ * SPECIFIC known non-global rule, and un-stated own-scope) are untouched.
+ * A second, related false positive (key_levels) came from
+ * frameworkScopeSplit.ts's collectNonGlobalRuleDescriptions matching a
+ * rule's SCOPED partition even when that same description ALSO has a
+ * VERIFIED_GLOBAL sibling partition (partitioning shares one description
+ * verbatim across every partition) — fixed at the source in that function,
+ * not here.
  */
 const ABSOLUTE_CLAIM_PATTERN = /\b(all|every|always|universal(?:ly)?|without exception|in all cases|regardless of|no matter (?:the|what))\b/i;
 
@@ -117,12 +152,19 @@ function scopeTerms(scope: KnowledgeItemScope): string[] {
   return [...scope.marketsOrInstruments, ...scope.sessions, ...scope.timeframes, ...scope.traderProfiles, ...scope.strategies].map((v) => v.toLowerCase());
 }
 
+/** Naive sentence split — deterministic, good enough for a lexical co-occurrence check (never used for anything beyond "does this sentence mention that term"). */
+function splitSentences(text: string): string[] {
+  return text.split(/(?<=[.!?])\s+/).filter((s) => s.trim().length > 0);
+}
+
 export interface ApplicabilityAuditInput {
   key: string;
   content: string;
   scope?: KnowledgeItemScope;
   scopeBasis?: PlaybookSection["scopeBasis"];
   applicabilityPolicy?: ApplicabilityPolicyValue;
+  /** Real-audit fix (v7) — see PlaybookSectionSchema's doc comment. True when at least one of this section's own citations is independently VERIFIED_GLOBAL, even though the aggregate scopeBasis above may read "SCOPED" (combineScopeBasis's SCOPED-dominates priority). */
+  hasIndependentGlobalEvidence?: boolean;
 }
 
 export interface ApplicabilityAuditResult {
@@ -172,6 +214,39 @@ export function findPlaybookApplicabilityLeaks(
       if (containsTerm(section.content, term)) matchedTerms.add(term);
     }
 
+    // Real-audit fix (v7) — matchedTerms above (retained for the leak payload's diagnostic
+    // "matchedTerms" field) no longer gates the leak by itself: it was true whenever a scoped
+    // term appeared ANYWHERE in the section, regardless of whether it actually qualifies the
+    // sentence making the absolute claim. The refined trigger requires BOTH: (1) the section
+    // actually discusses some real, known-restricted concept at all (course-wide vocabulary, or
+    // this section's own declared scope — which can be a strategy name) — a section with NO
+    // known restricted material behind it is never a leak via this signal, only possibly via
+    // matchedScopedRules/matchedUnverifiedRules or ownBasis below; and (2) some sentence makes
+    // an absolute claim WITHOUT naming any qualifying term in that SAME sentence. A
+    // properly-qualified section ("Beginners should risk 1%. Experienced traders should target
+    // 2R on every trade.", or "The Gap Fill target applies within Gap Fill setups specifically.")
+    // never trips this, since each absolute-claim sentence names its own qualifier.
+    //
+    // But that sentence-level heuristic ALONE still over-fires on a section that mixes
+    // properly-qualified scoped material with a SEPARATE, genuinely global claim (the
+    // "polarity-inversion"/"2R"/"narrow-specialization" real false positives): the global
+    // claim's own sentence legitimately has no local qualifier — it doesn't need one — yet
+    // OTHER, properly-qualified sentences in the same section make knownRestrictedConceptPresent
+    // true, so the unqualified-but-genuinely-global sentence would wrongly trip this signal.
+    // hasIndependentGlobalEvidence (see PlaybookSectionSchema) distinguishes that case: this
+    // sentence-level signal is skipped entirely for a section that ALSO has independently
+    // VERIFIED_GLOBAL evidence, relying instead on the more precise matchedScopedRules/
+    // matchedUnverifiedRules paraphrase-overlap checks below (which stay fully sensitive
+    // regardless — a genuine broadening of specific known-restricted text is still caught). A
+    // section with NO global partition at all (hasIndependentGlobalEvidence false/unset) keeps
+    // the sentence-level check exactly as described above.
+    const localQualifierTerms = new Set<string>([...scopeVocabulary, ...(section.scope && isKnowledgeItemScoped(section.scope) ? scopeTerms(section.scope) : [])]);
+    const knownRestrictedConceptPresent = [...localQualifierTerms].some((term) => containsTerm(section.content, term));
+    const hasUnqualifiedAbsoluteClaim =
+      !section.hasIndependentGlobalEvidence &&
+      knownRestrictedConceptPresent &&
+      splitSentences(section.content).some((sentence) => ABSOLUTE_CLAIM_PATTERN.test(sentence) && ![...localQualifierTerms].some((term) => containsTerm(sentence, term)));
+
     const sectionWords = significantWords(section.content);
     const matchedScopedRules = new Set<string>();
     for (const rule of scopedRules) {
@@ -192,10 +267,20 @@ export function findPlaybookApplicabilityLeaks(
     // should. This suppresses ONLY the ownBasis==="SCOPED" trigger; real
     // broadening is still caught below via matchedTerms/matchedScopedRules,
     // which compare against OTHER, undisclosed non-global rules.
+    //
+    // Real-audit fix (v7) — ALSO suppressed when the section has independent
+    // VERIFIED_GLOBAL evidence (see hasUnqualifiedAbsoluteClaim's comment
+    // above for the same reasoning): ownBasis reads "SCOPED" merely because
+    // combineScopeBasis's SCOPED-dominates priority means citing even ONE
+    // scoped rule alongside a genuinely global one still aggregates to
+    // "SCOPED" — that alone must not brand the whole section's absolute
+    // claims a leak when a real, independently-sufficient global partition
+    // also backs it. A section with NO global partition at all keeps this
+    // trigger exactly as before.
     const ownScopeStatedInProse = section.scope && isKnowledgeItemScoped(section.scope) && scopeTerms(section.scope).some((t) => containsTerm(section.content, t));
-    const unexplainedOwnScope = ownBasis === "SCOPED" && !ownScopeStatedInProse;
+    const unexplainedOwnScope = ownBasis === "SCOPED" && !ownScopeStatedInProse && !section.hasIndependentGlobalEvidence;
 
-    if (matchedTerms.size > 0 || matchedScopedRules.size > 0 || unexplainedOwnScope) {
+    if (hasUnqualifiedAbsoluteClaim || matchedScopedRules.size > 0 || unexplainedOwnScope) {
       universalApplicabilityLeaks.push({ sectionKey: section.key, matchedTerms: [...matchedTerms].sort(), matchedNonGlobalRules: [...matchedScopedRules].sort() });
     } else if (matchedUnverifiedRules.size > 0 || ownBasis === "UNVERIFIED") {
       unverifiedUniversalClaims.push({ sectionKey: section.key, matchedTerms: [], matchedNonGlobalRules: [...matchedUnverifiedRules].sort() });
