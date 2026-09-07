@@ -15,10 +15,12 @@ function currentMonthLabel(): string {
 export function UsagePage() {
   return (
     <div className="knovera-page">
-      <h1>Usage &amp; Spend</h1>
-      <p className="knovera-usage-month">{currentMonthLabel()}</p>
+      <div>
+        <h1 className="knovera-page-title">Usage &amp; Spend</h1>
+        <p className="knovera-usage-month">{currentMonthLabel()}</p>
+      </div>
 
-      <div className="knovera-usage-table">
+      <div className="kv-card knovera-usage-table">
         {PROJECTS.map((project) => (
           <div key={project.id} className="knovera-usage-row">
             <span className="knovera-usage-project">{project.name}</span>

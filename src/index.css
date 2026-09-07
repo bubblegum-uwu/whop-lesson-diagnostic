@@ -93,17 +93,23 @@ input {
 button {
   margin-top: 1.25rem;
   padding: 0.65rem 1.1rem;
-  border-radius: 6px;
+  border-radius: 8px;
   border: none;
-  background: #4b7bec;
-  color: white;
+  background: var(--kv-accent, #c9a876);
+  color: #16130c;
   font-weight: 600;
   cursor: pointer;
   align-self: flex-start;
+  font-family: inherit;
+  transition: filter 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  filter: brightness(1.08);
 }
 
 button:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -215,9 +221,9 @@ button:disabled {
 
 .strategy-card {
   padding: 1.25rem;
-  border-radius: 8px;
-  background: #131722;
-  border: 1px solid #232838;
+  border-radius: var(--kv-radius-md, 10px);
+  background: var(--kv-surface, #131722);
+  border: 1px solid var(--kv-border, #232838);
   margin-bottom: 1.25rem;
 }
 
@@ -434,10 +440,16 @@ button:disabled {
 .link-button {
   background: none;
   border: none;
-  color: #7fbfe0;
+  color: var(--kv-accent, #c9a876);
   cursor: pointer;
   padding: 0;
   font-size: inherit;
+  font-family: inherit;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.link-button:hover {
   text-decoration: underline;
 }
 
@@ -1211,171 +1223,424 @@ button:disabled {
   margin-top: 0.5rem;
 }
 
+
 /* ==========================================================================
-   Phase 4A — Knovera product shell (landing, app nav, Projects/Sources/
-   Synthesis/Usage pages). Additive only — every rule above this point is
-   the pre-existing app and is untouched. Reuses the same dark palette
-   (#0f1115 background, #e7e9ee text, #2b2f3a borders, #7fd0ff accent)
-   rather than introducing a second visual language.
+   Phase 4A — Knovera product shell design system (landing, app nav,
+   Projects/Sources/Synthesis/Usage pages). Additive only — every rule above
+   this point is the pre-existing diagnostic app and is untouched.
+
+   Visual-polish pass: a small token system (surfaces, text, one accent,
+   radius, spacing, shadow) drives every rule below instead of one-off hex
+   values per screen, so the five Phase 4 pages read as one product.
    ========================================================================== */
+
+:root {
+  /* Surfaces — deep, near-black, with two elevation steps above the page. */
+  --kv-bg: #0a0a0c;
+  --kv-surface: #131316;
+  --kv-surface-2: #1a1a1f;
+  --kv-surface-hover: #1f1f25;
+  --kv-border: #26262b;
+  --kv-border-strong: #35353c;
+
+  /* Text — soft neutrals, never pure white/black. */
+  --kv-text: #ebebee;
+  --kv-text-secondary: #a3a3ad;
+  --kv-text-muted: #6b6b74;
+
+  /* One accent — a warm, restrained gold rather than another SaaS blue.
+     Used sparingly: CTAs, active states, the wordmark mark, small emphasis. */
+  --kv-accent: #c9a876;
+  --kv-accent-hover: #dabb8d;
+  --kv-accent-soft: rgba(201, 168, 118, 0.12);
+  --kv-accent-border: rgba(201, 168, 118, 0.35);
+
+  --kv-success: #7fb88f;
+  --kv-warning: #cf9a55;
+  --kv-error: #d97b6f;
+  --kv-success-soft: rgba(127, 184, 143, 0.12);
+  --kv-warning-soft: rgba(207, 154, 85, 0.12);
+  --kv-error-soft: rgba(217, 123, 111, 0.12);
+
+  --kv-radius-sm: 7px;
+  --kv-radius-md: 11px;
+  --kv-radius-lg: 18px;
+  --kv-radius-pill: 999px;
+
+  --kv-space-1: 4px;
+  --kv-space-2: 8px;
+  --kv-space-3: 12px;
+  --kv-space-4: 16px;
+  --kv-space-5: 24px;
+  --kv-space-6: 32px;
+  --kv-space-7: 48px;
+  --kv-space-8: 64px;
+
+  --kv-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --kv-shadow-md: 0 6px 20px -6px rgba(0, 0, 0, 0.5);
+  --kv-shadow-lg: 0 20px 60px -12px rgba(0, 0, 0, 0.6);
+
+  --kv-font: -apple-system, "SF Pro Text", "Inter", system-ui, "Segoe UI", sans-serif;
+}
+
+.knovera-shell,
+.knovera-landing {
+  font-family: var(--kv-font);
+}
+
+/* ---- Shared primitives ---------------------------------------------------- */
+
+.kv-card {
+  background: var(--kv-surface);
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius-md);
+  box-shadow: var(--kv-shadow-sm);
+}
+
+.knovera-cta,
+.knovera-cta-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease, transform 120ms ease;
+}
+
+.knovera-cta {
+  background: linear-gradient(155deg, var(--kv-accent), #b8925f);
+  color: #16130c;
+  border: none;
+  border-radius: var(--kv-radius-md);
+  padding: 0.8rem 1.5rem;
+  font-size: 0.98rem;
+  font-weight: 600;
+  box-shadow: 0 10px 30px -10px rgba(201, 168, 118, 0.45);
+}
+
+.knovera-cta:hover {
+  background: linear-gradient(155deg, var(--kv-accent-hover), #c49f6c);
+  transform: translateY(-1px);
+}
+
+.knovera-cta-arrow {
+  transition: transform 150ms ease;
+}
+
+.knovera-cta:hover .knovera-cta-arrow {
+  transform: translateX(3px);
+}
+
+.knovera-cta-secondary {
+  background: var(--kv-surface-2);
+  color: var(--kv-text);
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius-sm);
+  padding: 0.55rem 1.05rem;
+  font-size: 0.87rem;
+  font-weight: 600;
+}
+
+.knovera-cta-secondary:hover:not(:disabled) {
+  border-color: var(--kv-border-strong);
+  background: var(--kv-surface-hover);
+}
+
+.knovera-cta-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.kv-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border-radius: var(--kv-radius-pill);
+  padding: 0.22rem 0.65rem;
+  white-space: nowrap;
+}
+
+.kv-badge-accent {
+  color: var(--kv-accent);
+  background: var(--kv-accent-soft);
+  border: 1px solid var(--kv-accent-border);
+}
+
+.kv-badge-success {
+  color: var(--kv-success);
+  background: var(--kv-success-soft);
+}
+
+.kv-badge-muted {
+  color: var(--kv-text-muted);
+  background: var(--kv-surface-2);
+  border: 1px solid var(--kv-border);
+}
+
+/* ---- Wordmark -------------------------------------------------------------- */
+
+.kv-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--kv-text);
+  text-decoration: none;
+}
+
+.kv-wordmark-text {
+  font-size: 1.05rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.kv-mark {
+  color: var(--kv-accent);
+  flex-shrink: 0;
+}
+
+/* ---- App shell -------------------------------------------------------------- */
 
 .knovera-shell {
   width: 100%;
+  min-height: 100vh;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  background: var(--kv-bg);
+  color: var(--kv-text);
 }
 
 .knovera-topnav {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 1rem 1.75rem;
-  border-bottom: 1px solid #202430;
-  background: #0f1115;
+  gap: var(--kv-space-6);
+  padding: 0.9rem var(--kv-space-6);
+  border-bottom: 1px solid var(--kv-border);
+  background: rgba(10, 10, 12, 0.85);
+  backdrop-filter: blur(10px);
   position: sticky;
   top: 0;
   z-index: 10;
 }
 
 .knovera-topnav-brand {
-  font-size: 1.05rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: #e7e9ee;
-  text-decoration: none;
+  margin-right: var(--kv-space-2);
 }
 
 .knovera-topnav-links {
   display: flex;
-  gap: 1.5rem;
+  gap: 0.2rem;
+  flex: 1;
 }
 
 .knovera-topnav-link {
-  color: #a7adba;
+  color: var(--kv-text-secondary);
   text-decoration: none;
-  font-size: 0.92rem;
-  font-weight: 500;
-  padding: 0.3rem 0;
-  border-bottom: 2px solid transparent;
+  font-size: 0.88rem;
+  font-weight: 550;
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--kv-radius-sm);
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .knovera-topnav-link:hover {
-  color: #e7e9ee;
+  color: var(--kv-text);
+  background: var(--kv-surface-2);
 }
 
 .knovera-topnav-link.active {
-  color: #7fd0ff;
-  border-bottom-color: #7fd0ff;
+  color: var(--kv-text);
+  background: var(--kv-surface-2);
+}
+
+.kv-topnav-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--kv-surface-2);
+  border: 1px solid var(--kv-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--kv-text-secondary);
 }
 
 .knovera-main {
   flex: 1;
   width: 100%;
-  max-width: 1400px;
+  max-width: 1320px;
   margin: 0 auto;
-  padding: 2rem 1.75rem 4rem;
+  padding: var(--kv-space-6) var(--kv-space-6) var(--kv-space-8);
   box-sizing: border-box;
 }
 
 .knovera-page {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: var(--kv-space-6);
 }
 
-/* ---- Landing ------------------------------------------------------------ */
+/* ---- Landing ---------------------------------------------------------------- */
 
 .knovera-landing {
   min-height: 100vh;
   width: 100%;
+  background: var(--kv-bg);
+  color: var(--kv-text);
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background:
-    radial-gradient(ellipse 900px 500px at 50% -10%, rgba(127, 208, 255, 0.12), transparent),
-    #0f1115;
-  padding: 3rem 1.5rem;
+  flex-direction: column;
   box-sizing: border-box;
 }
 
-.knovera-landing-inner {
-  max-width: 760px;
-  text-align: center;
+.knovera-landing-topbar {
+  padding: var(--kv-space-5) var(--kv-space-6) 0;
+}
+
+.knovera-landing-body {
+  flex: 1;
   display: flex;
-  flex-direction: column;
   align-items: center;
+  width: 100%;
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: var(--kv-space-7) var(--kv-space-6);
+  box-sizing: border-box;
 }
 
-.knovera-landing-mark {
-  font-size: 1.1rem;
-  font-weight: 700;
-  letter-spacing: 0.14em;
+.knovera-landing-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  align-items: center;
+  gap: var(--kv-space-8);
+  width: 100%;
+}
+
+.knovera-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  background: linear-gradient(120deg, #7fd0ff, #cbb8ff);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  margin-bottom: 1.5rem;
+  color: var(--kv-accent);
+  margin: 0 0 var(--kv-space-5);
 }
 
-.knovera-landing-tagline {
-  font-size: 1.15rem;
-  font-weight: 600;
-  color: #e7e9ee;
-  margin: 0 0 2rem;
+.knovera-eyebrow::before {
+  content: "";
+  width: 16px;
+  height: 1px;
+  background: var(--kv-accent);
+  display: inline-block;
 }
 
 .knovera-landing-hero {
-  font-size: clamp(1.5rem, 3.4vw, 2.35rem);
-  font-weight: 600;
-  line-height: 1.42;
-  color: #d4d8e0;
-  margin: 0 0 1.5rem;
-  letter-spacing: -0.01em;
+  font-size: clamp(2.6rem, 5vw, 4.1rem);
+  font-weight: 620;
+  line-height: 1.06;
+  letter-spacing: -0.02em;
+  color: var(--kv-text);
+  margin: 0 0 var(--kv-space-5);
 }
 
 .knovera-landing-support {
-  color: #8b91a0;
-  font-size: 1rem;
-  margin: 0 0 2.5rem;
+  color: var(--kv-text-secondary);
+  font-size: 1.08rem;
+  line-height: 1.6;
+  max-width: 46ch;
+  margin: 0 0 var(--kv-space-6);
 }
 
-.knovera-cta {
-  background: linear-gradient(120deg, #7fd0ff, #a7b8ff);
-  color: #0f1115;
-  border: none;
-  border-radius: 999px;
-  padding: 0.85rem 2.25rem;
-  font-size: 1rem;
-  font-weight: 700;
-  cursor: pointer;
-  box-shadow: 0 8px 30px -8px rgba(127, 208, 255, 0.45);
+.knovera-landing-support strong {
+  color: var(--kv-text);
+  font-weight: 620;
 }
 
-.knovera-cta:hover {
-  filter: brightness(1.05);
+.knovera-landing-cta-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--kv-space-4);
 }
 
-.knovera-cta-secondary {
-  background: #171a21;
-  color: #e7e9ee;
-  border: 1px solid #2b2f3a;
-  border-radius: 8px;
-  padding: 0.55rem 1.1rem;
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
+.knovera-landing-microcopy {
+  color: var(--kv-text-muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.02em;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
 }
 
-.knovera-cta-secondary:hover:not(:disabled) {
-  border-color: #7fd0ff;
-  color: #7fd0ff;
+/* ---- Landing visual: abstract knowledge graph, SVG + CSS only ------------- */
+
+.knovera-graph-wrap {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  max-height: 520px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.knovera-cta-secondary:disabled {
+.knovera-graph-svg {
+  width: 100%;
+  height: 100%;
+}
+
+.knovera-graph-edge {
+  stroke: var(--kv-border-strong);
+  stroke-width: 1;
+  opacity: 0.55;
+}
+
+.knovera-graph-edge-active {
+  stroke: var(--kv-accent);
+  stroke-width: 1.1;
   opacity: 0.5;
-  cursor: not-allowed;
+}
+
+.knovera-graph-node {
+  fill: var(--kv-surface-2);
+  stroke: var(--kv-border-strong);
+  stroke-width: 1;
+}
+
+.knovera-graph-node-core {
+  fill: var(--kv-accent);
+  stroke: none;
+}
+
+.knovera-graph-pulse {
+  animation: kv-pulse 4.5s ease-in-out infinite;
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+.knovera-graph-pulse-delay {
+  animation-delay: 1.6s;
+}
+
+.knovera-graph-pulse-delay-2 {
+  animation-delay: 3s;
+}
+
+@keyframes kv-pulse {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.35); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .knovera-graph-pulse,
+  .knovera-graph-pulse-delay,
+  .knovera-graph-pulse-delay-2 {
+    animation: none;
+  }
 }
 
 /* ---- Projects ------------------------------------------------------------ */
@@ -1385,129 +1650,209 @@ button:disabled {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 1rem;
+  gap: var(--kv-space-4);
 }
 
-.knovera-page-header h1 {
+.knovera-page-title {
   margin: 0;
+  font-size: 1.9rem;
+  font-weight: 620;
+  letter-spacing: -0.01em;
 }
 
 .knovera-project-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 1.1rem;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--kv-space-4);
 }
 
 .knovera-project-card {
   display: flex;
   flex-direction: column;
-  gap: 0.75rem;
-  align-items: flex-start;
-  background: #14161b;
-  border: 1px solid #2b2f3a;
-  border-radius: 12px;
-  padding: 1.4rem;
+  gap: var(--kv-space-4);
+  padding: var(--kv-space-5);
+  transition: border-color 150ms ease, background-color 150ms ease;
+}
+
+.knovera-project-card.operational:hover {
+  border-color: var(--kv-border-strong);
+  background: var(--kv-surface-hover);
 }
 
 .knovera-project-card-top {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  width: 100%;
-  gap: 0.75rem;
+  gap: var(--kv-space-3);
 }
 
 .knovera-project-card-top h2 {
+  margin: 0 0 0.3rem;
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+
+.knovera-project-card-source {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 0.83rem;
+  color: var(--kv-text-muted);
 }
 
-.knovera-badge-type {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: #7fbfe0;
-  background: #17232f;
-  border-radius: 999px;
-  padding: 0.25rem 0.65rem;
-  white-space: nowrap;
+.knovera-project-card-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kv-space-2) var(--kv-space-5);
+  padding-top: var(--kv-space-3);
+  border-top: 1px solid var(--kv-border);
 }
 
-.knovera-badge-soon {
+.knovera-project-card-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.knovera-project-card-stat-value {
+  font-size: 1rem;
+  font-weight: 620;
+  color: var(--kv-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.knovera-project-card-stat-label {
   font-size: 0.72rem;
-  font-weight: 600;
-  color: #e0c67f;
-  background: #332c17;
-  border-radius: 999px;
-  padding: 0.22rem 0.6rem;
-  white-space: nowrap;
+  color: var(--kv-text-muted);
 }
 
-.knovera-badge-operational {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: #7fe0a0;
-  background: #17331f;
-  border-radius: 999px;
-  padding: 0.22rem 0.6rem;
-  white-space: nowrap;
+.knovera-project-card-footer {
+  display: flex;
+  justify-content: flex-end;
 }
 
-/* ---- New Project dialog --------------------------------------------------- */
+.knovera-open-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--kv-accent);
+  background: none;
+  border: none;
+  font-size: 0.87rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+.knovera-open-link:disabled {
+  color: var(--kv-text-muted);
+  cursor: not-allowed;
+}
+
+.knovera-open-link:hover:not(:disabled) .knovera-cta-arrow {
+  transform: translateX(3px);
+}
+
+.knovera-project-card.secondary {
+  border-style: dashed;
+  background: transparent;
+  box-shadow: none;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 132px;
+}
+
+.knovera-new-project-button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--kv-space-2);
+  background: none;
+  border: none;
+  color: var(--kv-text-secondary);
+  cursor: pointer;
+  font-family: inherit;
+  width: 100%;
+  text-align: left;
+}
+
+.knovera-new-project-button:hover {
+  color: var(--kv-text);
+}
+
+.knovera-new-project-plus {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--kv-border-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  color: var(--kv-text-muted);
+}
+
+/* ---- New Project dialog ---------------------------------------------------- */
 
 .knovera-dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(6, 7, 10, 0.65);
+  background: rgba(6, 6, 8, 0.7);
+  backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
-  padding: 1.5rem;
+  padding: var(--kv-space-5);
 }
 
 .knovera-dialog {
-  background: #171a21;
-  border: 1px solid #2b2f3a;
-  border-radius: 14px;
-  padding: 1.75rem;
+  background: var(--kv-surface);
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius-lg);
+  box-shadow: var(--kv-shadow-lg);
+  padding: var(--kv-space-6);
   max-width: 420px;
   width: 100%;
 }
 
 .knovera-dialog h2 {
   margin: 0 0 0.25rem;
+  font-size: 1.15rem;
+  font-weight: 620;
 }
 
 .knovera-dialog-subtitle {
-  color: #a7adba;
-  font-size: 0.88rem;
-  margin: 0 0 1.25rem;
+  color: var(--kv-text-secondary);
+  font-size: 0.87rem;
+  margin: 0 0 var(--kv-space-4);
 }
 
 .knovera-type-options {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: var(--kv-space-2);
 }
 
 .knovera-type-option {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  background: #14161b;
-  border: 1px solid #2b2f3a;
-  border-radius: 8px;
+  gap: var(--kv-space-3);
+  background: var(--kv-surface-2);
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius-sm);
   padding: 0.75rem 1rem;
-  color: #e7e9ee;
-  font-size: 0.92rem;
-  font-weight: 600;
+  color: var(--kv-text);
+  font-size: 0.9rem;
+  font-weight: 550;
   cursor: pointer;
   text-align: left;
+  font-family: inherit;
+  transition: border-color 120ms ease;
 }
 
 .knovera-type-option.selected {
-  border-color: #7fd0ff;
+  border-color: var(--kv-accent-border);
+  background: var(--kv-accent-soft);
 }
 
 .knovera-type-option-name {
@@ -1515,150 +1860,202 @@ button:disabled {
 }
 
 .knovera-dialog-notice {
-  margin-top: 1.1rem;
-  color: #e0c67f;
-  background: #1c1a10;
-  border: 1px solid #332c17;
-  border-radius: 8px;
+  margin-top: var(--kv-space-4);
+  color: var(--kv-warning);
+  background: var(--kv-warning-soft);
+  border: 1px solid rgba(207, 154, 85, 0.3);
+  border-radius: var(--kv-radius-sm);
   padding: 0.65rem 0.85rem;
-  font-size: 0.85rem;
+  font-size: 0.84rem;
 }
 
 .knovera-dialog-actions {
-  margin-top: 1.25rem;
+  margin-top: var(--kv-space-5);
   display: flex;
   justify-content: flex-end;
 }
 
-/* ---- Project workspace header (Sources/Synthesis) ------------------------- */
+/* ---- Project workspace header (Sources/Synthesis) -------------------------- */
 
 .knovera-project-header {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: var(--kv-space-3);
 }
 
 .knovera-back-link {
-  color: #8b91a0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--kv-text-muted);
   text-decoration: none;
-  font-size: 0.85rem;
-  margin-bottom: 0.5rem;
+  font-size: 0.83rem;
+  width: fit-content;
+  transition: color 120ms ease;
 }
 
 .knovera-back-link:hover {
-  color: #e7e9ee;
+  color: var(--kv-text-secondary);
+}
+
+.knovera-project-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--kv-space-3);
+  flex-wrap: wrap;
 }
 
 .knovera-project-header h1 {
   margin: 0;
-  font-size: 1.5rem;
+  font-size: 1.7rem;
+  font-weight: 620;
+  letter-spacing: -0.01em;
 }
 
 .knovera-project-type {
-  margin: 0 0 0.75rem;
-  color: #a7adba;
-  font-size: 0.9rem;
+  margin: 0;
 }
 
-.knovera-project-tabs {
-  display: flex;
-  gap: 0.5rem;
-  border-bottom: 1px solid #2b2f3a;
+.knovera-segmented-tabs {
+  display: inline-flex;
+  gap: 0.15rem;
+  background: var(--kv-surface);
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius-md);
+  padding: 0.2rem;
+  width: fit-content;
+  margin-top: var(--kv-space-2);
 }
 
 .knovera-project-tab {
-  color: #a7adba;
+  color: var(--kv-text-secondary);
   text-decoration: none;
-  font-size: 0.9rem;
-  font-weight: 600;
-  padding: 0.6rem 0.9rem;
-  border-bottom: 2px solid transparent;
+  font-size: 0.86rem;
+  font-weight: 570;
+  padding: 0.45rem 1rem;
+  border-radius: var(--kv-radius-sm);
+  transition: background-color 120ms ease, color 120ms ease;
 }
 
 .knovera-project-tab:hover {
-  color: #e7e9ee;
+  color: var(--kv-text);
 }
 
 .knovera-project-tab.active {
-  color: #7fd0ff;
-  border-bottom-color: #7fd0ff;
+  color: var(--kv-text);
+  background: var(--kv-surface-2);
+  box-shadow: var(--kv-shadow-sm);
 }
 
-/* ---- Sources page ---------------------------------------------------------- */
+/* ---- Sources page ----------------------------------------------------------- */
 
 .knovera-section-title {
   margin: 0;
-  font-size: 1.05rem;
-  color: #c7cad3;
+  font-size: 0.78rem;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--kv-text-muted);
 }
 
 .knovera-provider-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: var(--kv-space-4);
 }
 
 .knovera-provider-card {
-  background: #14161b;
-  border: 1px solid #2b2f3a;
-  border-radius: 10px;
-  padding: 1.1rem;
+  padding: var(--kv-space-4);
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--kv-space-3);
 }
 
 .knovera-provider-card.operational {
-  border-color: #234030;
+  border-color: var(--kv-accent-border);
+  background: linear-gradient(165deg, var(--kv-accent-soft), var(--kv-surface) 55%);
 }
 
 .knovera-provider-card-top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
+  gap: var(--kv-space-2);
+}
+
+.knovera-provider-card-icon-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kv-space-2);
+}
+
+.knovera-provider-icon {
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  color: var(--kv-text-secondary);
+}
+
+.knovera-provider-card.operational .knovera-provider-icon {
+  color: var(--kv-accent);
 }
 
 .knovera-provider-card-top h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 0.98rem;
+  font-weight: 600;
 }
 
 .knovera-provider-desc {
   margin: 0;
-  color: #8b91a0;
-  font-size: 0.85rem;
+  color: var(--kv-text-muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
 }
 
 .knovera-diagnostic-tools {
-  border: 1px dashed #2b2f3a;
-  border-radius: 10px;
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius-md);
   padding: 0.85rem 1.1rem;
+  background: var(--kv-surface);
 }
 
 .knovera-diagnostic-tools summary {
   cursor: pointer;
-  color: #a7adba;
-  font-size: 0.88rem;
-  font-weight: 600;
+  color: var(--kv-text-secondary);
+  font-size: 0.85rem;
+  font-weight: 570;
+  list-style: none;
+}
+
+.knovera-diagnostic-tools summary::-webkit-details-marker {
+  display: none;
+}
+
+.knovera-diagnostic-tools summary::before {
+  content: "▸ ";
+  color: var(--kv-text-muted);
+}
+
+.knovera-diagnostic-tools[open] summary::before {
+  content: "▾ ";
 }
 
 .knovera-diagnostic-tools[open] summary {
   margin-bottom: 0.9rem;
 }
 
-/* ---- Usage page ------------------------------------------------------------ */
+/* ---- Usage page --------------------------------------------------------------- */
 
 .knovera-usage-month {
-  color: #a7adba;
-  margin: -0.5rem 0 0.5rem;
+  color: var(--kv-text-muted);
+  margin: calc(-1 * var(--kv-space-3)) 0 0;
+  font-size: 0.86rem;
 }
 
 .knovera-usage-table {
   display: flex;
   flex-direction: column;
-  border: 1px solid #2b2f3a;
-  border-radius: 10px;
   overflow: hidden;
 }
 
@@ -1666,35 +2063,100 @@ button:disabled {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.9rem 1.1rem;
-  background: #14161b;
+  gap: var(--kv-space-4);
+  padding: var(--kv-space-4) var(--kv-space-5);
 }
 
 .knovera-usage-row + .knovera-usage-row {
-  border-top: 1px solid #2b2f3a;
+  border-top: 1px solid var(--kv-border);
 }
 
 .knovera-usage-project {
   font-weight: 600;
+  font-size: 0.94rem;
 }
 
 .knovera-usage-pending {
-  color: #8b91a0;
+  color: var(--kv-text-muted);
+  font-size: 0.83rem;
+}
+
+/* ---- CourseIntelligence secondary nav (Overview/Canonical Strategies/etc.) --
+   Restyles ONLY the tab bar's presentation — see CourseIntelligence.tsx,
+   whose tab STATE/behavior is unchanged (still a plain useState<Tab>). ---- */
+
+.ci-tabs {
+  display: flex;
+  gap: 0.15rem;
+  overflow-x: auto;
+  background: var(--kv-surface);
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius-md);
+  padding: 0.25rem;
+  width: fit-content;
+  max-width: 100%;
+  scrollbar-width: thin;
+}
+
+.ci-tab {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  font-family: inherit;
+  color: var(--kv-text-secondary);
   font-size: 0.85rem;
-  font-style: italic;
+  font-weight: 570;
+  padding: 0.5rem 1rem;
+  border-radius: var(--kv-radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.ci-tab:hover {
+  color: var(--kv-text);
+}
+
+.ci-tab.active {
+  color: var(--kv-text);
+  background: var(--kv-surface-2);
+  box-shadow: var(--kv-shadow-sm);
+}
+
+@media (max-width: 900px) {
+  .knovera-landing-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .knovera-graph-wrap {
+    max-height: 320px;
+    order: -1;
+  }
 }
 
 @media (max-width: 640px) {
   .knovera-topnav {
-    padding: 0.85rem 1.1rem;
+    padding: 0.85rem var(--kv-space-4);
+    gap: var(--kv-space-4);
   }
 
   .knovera-main {
-    padding: 1.5rem 1.1rem 3rem;
+    padding: var(--kv-space-5) var(--kv-space-4) var(--kv-space-7);
+  }
+
+  .knovera-landing-body {
+    padding: var(--kv-space-6) var(--kv-space-4);
+  }
+
+  .knovera-landing-topbar {
+    padding: var(--kv-space-4) var(--kv-space-4) 0;
   }
 
   .knovera-project-header h1 {
-    font-size: 1.3rem;
+    font-size: 1.4rem;
+  }
+
+  .knovera-page-title {
+    font-size: 1.5rem;
   }
 }
