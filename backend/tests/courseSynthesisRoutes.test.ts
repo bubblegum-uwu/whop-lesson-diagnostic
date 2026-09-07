@@ -570,7 +570,9 @@ describe("GET /api/course/synthesis", () => {
           unmatchedItemCount: 0,
           completeness: "COMPLETE",
         },
-        universalSectionScopeLeaks: [],
+        universalApplicabilityLeaks: [],
+        unverifiedUniversalClaims: [],
+        scopedApplicabilityLeaks: [],
       },
       decisionFramework: { nodes: [], readableSteps: [], scopeLeaks: [] },
     });

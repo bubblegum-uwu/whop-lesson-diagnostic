@@ -566,10 +566,57 @@ export const RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA = {
 
 // ---- Stage 5: comprehensive playbook --------------------------------------
 
+/**
+ * Real-audit fix (Phase 3.5B v5) — which applicability rules a playbook
+ * section is held to by the audit (see playbookApplicabilityAudit.ts).
+ * Assigned deterministically in CODE from the section's own KEY (see
+ * playbook.ts's SECTION_POLICY), never chosen by Gemini:
+ *   - "VERIFIED_GLOBAL_ONLY" — every cited source must be VERIFIED_GLOBAL;
+ *     universal prose is allowed and expected. Used only by
+ *     "master_trading_checklist", which is no longer Gemini-authored at
+ *     all (built deterministically — see runSynthesis.ts) precisely so
+ *     this can be true by construction, not just by policy.
+ *   - "SCOPED" — scoped/unverified material is expected; the section must
+ *     make its own applicability explicit. Used by
+ *     "scoped_execution_checklists".
+ *   - "DESCRIPTIVE_MIXED" — may summarize global/scoped/unverified
+ *     material together, but must never transform scoped/unverified
+ *     content into an absolute, course-wide operational requirement. The
+ *     default for ordinary prose sections (risk_management,
+ *     trade_management, strategy_variants, etc.).
+ *   - "CONFLICT_DOCUMENTATION" — may intentionally quote/compare
+ *     conflicting scoped rules side by side; never flagged merely for
+ *     mentioning them. Used only by "conflicts_and_ambiguities".
+ */
+export const ApplicabilityPolicySchema = z.enum(["VERIFIED_GLOBAL_ONLY", "SCOPED", "DESCRIPTIVE_MIXED", "CONFLICT_DOCUMENTATION"]);
+export type ApplicabilityPolicyValue = z.infer<typeof ApplicabilityPolicySchema>;
+
+export const RawPlaybookSectionSchema = z.object({
+  key: z.string().min(1),
+  title: z.string().min(1),
+  content: z.string(),
+  /** Real-audit fix (Phase 3.5B v5) — which pooled CoreFramework/canonical-strategy rule(s) (see synthesisSourcePool.ts) this section's prose is actually grounded in. Gemini cites these; it never gets to claim a scope/applicability directly — see PlaybookSectionSchema below, which derives that from these citations in code. */
+  sourceKeys: z.array(z.string()),
+});
+export type RawPlaybookSection = z.infer<typeof RawPlaybookSectionSchema>;
+
+export const RawPlaybookSchema = z.object({
+  title: z.string().min(1),
+  sections: z.array(RawPlaybookSectionSchema),
+  conflictsAndAmbiguities: z.array(ConflictSchema),
+});
+export type RawPlaybook = z.infer<typeof RawPlaybookSchema>;
+
 export const PlaybookSectionSchema = z.object({
   key: z.string().min(1),
   title: z.string().min(1),
   content: z.string(),
+  /** The validated (unknown keys dropped) citations this section's scope was derived from — kept for transparency, never re-trusted as authoritative on its own. Optional so deterministic (code-generated) sections and legacy fixtures can omit it. */
+  sourceKeys: z.array(z.string()).optional(),
+  /** Deterministically derived as the union of every cited source's own scope — never self-reported by Gemini. */
+  scope: KnowledgeItemScopeSchema.optional(),
+  scopeBasis: ScopeBasisSchema.optional(),
+  applicabilityPolicy: ApplicabilityPolicySchema.optional(),
 });
 export type PlaybookSection = z.infer<typeof PlaybookSectionSchema>;
 
@@ -580,7 +627,7 @@ export const PlaybookSchema = z.object({
 });
 export type Playbook = z.infer<typeof PlaybookSchema>;
 
-export const PLAYBOOK_RESPONSE_JSON_SCHEMA = {
+export const RAW_PLAYBOOK_RESPONSE_JSON_SCHEMA = {
   type: "object",
   properties: {
     title: { type: "string" },
@@ -588,8 +635,13 @@ export const PLAYBOOK_RESPONSE_JSON_SCHEMA = {
       type: "array",
       items: {
         type: "object",
-        properties: { key: { type: "string" }, title: { type: "string" }, content: { type: "string" } },
-        required: ["key", "title", "content"],
+        properties: {
+          key: { type: "string" },
+          title: { type: "string" },
+          content: { type: "string" },
+          sourceKeys: { type: "array", items: { type: "string" } },
+        },
+        required: ["key", "title", "content", "sourceKeys"],
       },
     },
     conflictsAndAmbiguities: { type: "array", items: conflictJsonSchema },
@@ -654,38 +706,60 @@ export type StrategyScopeMappingSummary = z.infer<typeof StrategyScopeMappingSum
  * Real-audit fix (Phase 3.5B v3, Blocker B) — a SECOND real dry run showed
  * "Master Trading Checklist" claiming to apply "before, during, and after
  * every trading session" while actually containing intraday/equities/
- * options-only steps (session windows, PMH/PML, 1-5 minute execution,
- * options contract rules). The primary fix is architectural (playbook.ts
- * now shows Gemini ONLY genuinely global rules for this section — see
- * frameworkScopeSplit.ts); this is the deterministic secondary safety net,
- * since prose (unlike a decision graph) has no citation mechanism to
- * validate by lineage alone. Best-effort: flags a universal-labeled
- * section whose text contains a term drawn from a REAL scoped rule's own
- * scope arrays (instrument/session/timeframe/trader-profile values) —
- * never generic NLP classification, per this codebase's stated preference
- * for a safer data-lineage-adjacent check over free-text understanding.
+ * options-only steps. v3/v4 fixed this with a single "universal-labeled
+ * section leaked scoped vocabulary" check applied only to
+ * "master_trading_checklist".
+ *
+ * Real-audit fix (Phase 3.5B v5) — a THIRD real dry run showed that single
+ * gate was simultaneously too broad (it also fired on
+ * "scoped_execution_checklists", "conflicts_and_ambiguities", and
+ * "strategy_variants" — sections that are SUPPOSED to discuss scoped or
+ * conflicting material) and, in the one place it actually mattered, still
+ * missed a real leak (a "risk_management"-shaped section paraphrasing a
+ * scoped 2R rule as applying "on every planned execution", never scanned
+ * because it wasn't the checklist). The fix is no longer one lexical gate —
+ * every playbook section now carries structured provenance
+ * (PlaybookSectionSchema's sourceKeys/scope/scopeBasis/applicabilityPolicy)
+ * and is validated according to ITS OWN policy (see
+ * playbookApplicabilityAudit.ts). Lexical/prose matching (vocabulary terms,
+ * word-overlap with a known non-global rule) is now only a SECONDARY
+ * safeguard layered on top of that structural check, not the primary
+ * evidence model — since even a citation can miss content Gemini
+ * paraphrased without citing.
+ *
+ * Three independent, differently-severe categories replace the old single
+ * "universalSectionScopeLeaks" gate:
+ *   - universalApplicabilityLeaks — a non-exempt section (policy
+ *     DESCRIPTIVE_MIXED or SCOPED) broadened a KNOWN scoped restriction
+ *     into an absolute/universal claim. The clearest, most severe leak —
+ *     we KNOW the true restriction and the prose contradicts it.
+ *   - unverifiedUniversalClaims — a non-exempt section asserted something
+ *     as universal that rests on UNVERIFIED evidence — we cannot confirm
+ *     it's actually restricted, but we also never proved it's universal.
+ *     A real gap, but a weaker claim than contradicting known evidence.
+ *   - scopedApplicabilityLeaks — a SCOPED-policy section (e.g.
+ *     "scoped_execution_checklists") whose own derived scope is non-empty
+ *     but never actually STATED anywhere in its own prose — applicability
+ *     must be explicit, not merely correct in the background data.
+ * "master_trading_checklist" (policy VERIFIED_GLOBAL_ONLY) and
+ * "conflicts_and_ambiguities" (policy CONFLICT_DOCUMENTATION) are exempt
+ * from all three by construction/policy — see playbook.ts's SECTION_POLICY.
  */
-export const UniversalSectionScopeLeakSchema = z.object({
+export const ApplicabilityLeakSchema = z.object({
   sectionKey: z.string(),
   matchedTerms: z.array(z.string()),
-  /**
-   * Real-audit fix (Phase 3.5B v4) — a THIRD real dry run showed a leak
-   * that plain vocabulary matching cannot catch: prose paraphrasing a known
-   * scoped/unverified rule ("on every planned execution") without repeating
-   * any of its literal scope-array words. Populated when this section's
-   * text shares significant word-overlap with a non-global (SCOPED or
-   * UNVERIFIED) rule's own description — see universalSectionAudit.ts.
-   * Optional/absent when only the vocabulary-term check matched.
-   */
+  /** Descriptions of non-global rules this section's prose significantly overlaps under absolute-claim language, even with zero literal vocabulary-term matches. */
   matchedNonGlobalRules: z.array(z.string()).optional().default([]),
 });
-export type UniversalSectionScopeLeak = z.infer<typeof UniversalSectionScopeLeakSchema>;
+export type ApplicabilityLeak = z.infer<typeof ApplicabilityLeakSchema>;
 
-/** The final, persisted playbook document: Gemini's validated Playbook plus code-generated coverage metadata and sections (Canonical Strategy Library, Coverage Notes, Source Index — see runSynthesis.ts). */
+/** The final, persisted playbook document: Gemini's validated Playbook plus code-generated coverage metadata and sections (Canonical Strategy Library, Coverage Notes, Source Index, Master Trading Checklist — see runSynthesis.ts). */
 export interface CoursePlaybookDocument extends Playbook {
   frameworkCoverage: FrameworkCoverage;
   strategyScopeMapping: StrategyScopeMappingSummary;
-  universalSectionScopeLeaks: UniversalSectionScopeLeak[];
+  universalApplicabilityLeaks: ApplicabilityLeak[];
+  unverifiedUniversalClaims: ApplicabilityLeak[];
+  scopedApplicabilityLeaks: ApplicabilityLeak[];
 }
 
 // ---- Stage 6: master decision framework -----------------------------------

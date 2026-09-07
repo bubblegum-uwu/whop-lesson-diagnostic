@@ -1,6 +1,7 @@
 import type { GeminiUsage } from "../gemini/client.js";
 import { callStructuredStage, type SynthesisStageDeps } from "./geminiStage.js";
 import { chunkSignatures, type StrategySignature } from "./normalize.js";
+import { applyClusterMergeGuard } from "./clusterMergeGuard.js";
 import { CLUSTER_BATCH_RESPONSE_JSON_SCHEMA, CLUSTER_MERGE_RESPONSE_JSON_SCHEMA, ClusterBatchResultSchema, type ClusterProposal } from "./schema.js";
 
 /**
@@ -74,7 +75,12 @@ export async function clusterStrategyInstances(
     clusters = data.clusters;
   }
 
-  return { clusters: fillOrphans(clusters, signatures), usages };
+  // Real-audit fix (Phase 3.5B v5, Blocker 1) — deterministic structural
+  // safety net applied AFTER Gemini's own clustering (see
+  // clusterMergeGuard.ts): only ever reverses an over-merge Gemini
+  // proposed, so canonical identity is stable across runs over unchanged
+  // source data instead of depending on a single model call's judgment.
+  return { clusters: applyClusterMergeGuard(fillOrphans(clusters, signatures), signatures), usages };
 }
 
 function buildChunkClusterPrompt(chunk: StrategySignature[]): string {

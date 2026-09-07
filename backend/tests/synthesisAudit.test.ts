@@ -129,23 +129,22 @@ describe("Real-audit Blocker 1 — deterministic canonical strategy library comp
             text: JSON.stringify({
               title: "Playbook",
               sections: [
-                { key: "course_philosophy", title: "Philosophy", content: "p" },
-                { key: "pre_market_preparation", title: "Prep", content: "p" },
-                { key: "higher_timeframe_framework", title: "HTF", content: "p" },
-                { key: "market_context_regime", title: "Regime", content: "p" },
-                { key: "key_levels", title: "Levels", content: "p" },
-                { key: "setup_selection", title: "Setup", content: "The playbook recognizes fifteen canonical strategies." },
-                { key: "entry_framework", title: "Entry", content: "e" },
-                { key: "confirmation_framework", title: "Confirmation", content: "c" },
-                { key: "risk_management", title: "Risk", content: "r" },
-                { key: "stop_placement", title: "Stops", content: "s" },
-                { key: "target_selection", title: "Targets", content: "t" },
-                { key: "trade_management", title: "Management", content: "m" },
-                { key: "no_trade_conditions", title: "No Trade", content: "n" },
-                { key: "strategy_variants", title: "Variants", content: "v" },
-                { key: "common_mistakes_warnings", title: "Warnings", content: "w" },
-                { key: "conflicts_and_ambiguities", title: "Conflicts", content: "c" },
-                { key: "master_trading_checklist", title: "Checklist", content: "ck" },
+                { key: "course_philosophy", title: "Philosophy", content: "p", sourceKeys: [] },
+                { key: "pre_market_preparation", title: "Prep", content: "p", sourceKeys: [] },
+                { key: "higher_timeframe_framework", title: "HTF", content: "p", sourceKeys: [] },
+                { key: "market_context_regime", title: "Regime", content: "p", sourceKeys: [] },
+                { key: "key_levels", title: "Levels", content: "p", sourceKeys: [] },
+                { key: "setup_selection", title: "Setup", content: "The playbook recognizes fifteen canonical strategies.", sourceKeys: [] },
+                { key: "entry_framework", title: "Entry", content: "e", sourceKeys: [] },
+                { key: "confirmation_framework", title: "Confirmation", content: "c", sourceKeys: [] },
+                { key: "risk_management", title: "Risk", content: "r", sourceKeys: [] },
+                { key: "stop_placement", title: "Stops", content: "s", sourceKeys: [] },
+                { key: "target_selection", title: "Targets", content: "t", sourceKeys: [] },
+                { key: "trade_management", title: "Management", content: "m", sourceKeys: [] },
+                { key: "no_trade_conditions", title: "No Trade", content: "n", sourceKeys: [] },
+                { key: "strategy_variants", title: "Variants", content: "v", sourceKeys: [] },
+                { key: "common_mistakes_warnings", title: "Warnings", content: "w", sourceKeys: [] },
+                { key: "conflicts_and_ambiguities", title: "Conflicts", content: "c", sourceKeys: [] },
               ],
               conflictsAndAmbiguities: [],
             }),
@@ -934,8 +933,8 @@ describe("Real-audit Blocker C — a decision node's applicability can never dis
   });
 });
 
-describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be built from scoped/intraday-only material; scoped content routes to 'scoped_execution_checklists' instead", () => {
-  it("shows Gemini ONLY genuinely-global core framework material for master_trading_checklist; the 9:30-11 AM/options-scoped rule appears only in the scoped_execution_checklists material", async () => {
+describe("Real-audit v5, Blocker 2 — 'master_trading_checklist' is built deterministically from ONLY VERIFIED_GLOBAL CoreFramework rules, never asked of Gemini", () => {
+  it("synthesizePlaybook no longer produces (or is even asked to produce) a 'master_trading_checklist' section", async () => {
     const { synthesizePlaybook } = await import("../src/synthesis/playbook.js");
     let capturedPrompt = "";
     const gemini = makeGemini({
@@ -944,113 +943,17 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
         return { text: JSON.stringify({ title: "P", sections: [], conflictsAndAmbiguities: [] }), usage };
       }),
     });
-
-    const coreFramework = {
-      sections: [
-        {
-          key: "risk",
-          title: "Risk",
-          rules: [
-            { description: "Always define risk before entry.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 3, sources: [], conflictSources: [], exceptions: [], numericalValues: [], scope: null },
-            {
-              description: "Trade only 9:30-11:00 AM ET, liquid mega-cap stocks with options volume.",
-              classification: "explicit",
-              supportLevel: "SINGLE_SOURCE",
-              supportCount: 1,
-              sources: [],
-              conflictSources: [],
-              exceptions: [],
-              numericalValues: [],
-              scope: { strategies: [], marketsOrInstruments: ["options", "stocks"], timeframes: ["1m", "5m"], sessions: ["market-open"], traderProfiles: [] },
-            },
-          ],
-        },
-      ],
-    };
     const strategy = fullCanonicalStrategyV3({ name: "Strategy" });
+    await synthesizePlaybook({ gemini, model: "m" }, "Trading Accelerator", [strategy as never], { sections: [] } as never);
 
-    await synthesizePlaybook({ gemini, model: "m" }, "Trading Accelerator", [strategy as never], coreFramework as never);
-
-    expect(capturedPrompt).toContain("scoped_execution_checklists");
-    expect(capturedPrompt).toContain("EXCLUSIVELY from the GENUINELY GLOBAL core framework rules");
-    expect(capturedPrompt).toContain("Always define risk before entry.");
-
-    // The full coreFramework JSON dump (used by OTHER sections like risk_management) legitimately
-    // contains the scoped rule too — so isolate the GENUINELY GLOBAL material block shown
-    // specifically as master_trading_checklist's own input and check ONLY that block.
-    const globalMaterialStart = capturedPrompt.indexOf("GENUINELY GLOBAL core framework material (only source for master_trading_checklist):");
-    const scopedMaterialStart = capturedPrompt.indexOf("SCOPED-OR-UNVERIFIED core framework material");
-    expect(globalMaterialStart).toBeGreaterThan(-1);
-    expect(scopedMaterialStart).toBeGreaterThan(globalMaterialStart);
-    const globalMaterialBlock = capturedPrompt.slice(globalMaterialStart, scopedMaterialStart);
-
-    expect(globalMaterialBlock).toContain("Always define risk before entry.");
-    // The 9:30-11 AM/options/mega-cap rule must NOT appear in the block shown as master_trading_checklist's own source material.
-    expect(globalMaterialBlock).not.toContain("Trade only 9:30-11:00 AM ET");
-    expect(globalMaterialBlock).not.toContain("mega-cap");
-
-    // It must instead be present in the SCOPED material block that follows (source for scoped_execution_checklists).
-    const scopedMaterialBlock = capturedPrompt.slice(scopedMaterialStart);
-    expect(scopedMaterialBlock).toContain("Trade only 9:30-11:00 AM ET");
+    const keysListMatch = /using these keys: ([^.]+)\./.exec(capturedPrompt);
+    expect(keysListMatch).not.toBeNull();
+    const requiredKeys = keysListMatch![1].split(",").map((k) => k.trim());
+    expect(requiredKeys).not.toContain("master_trading_checklist");
+    expect(capturedPrompt).toContain("never written by you");
   });
 
-  it("findUniversalSectionScopeLeaks flags master_trading_checklist prose that leaks real scoped vocabulary under absolute-claim language (deterministic secondary safety net)", async () => {
-    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
-    const vocabulary = new Set(["options", "market-open"]);
-    const leaks = findUniversalSectionScopeLeaks(
-      [{ key: "master_trading_checklist", content: "Across every session, only trade liquid options names during market-open." }],
-      vocabulary,
-    );
-    expect(leaks).toHaveLength(1);
-    expect(leaks[0].sectionKey).toBe("master_trading_checklist");
-    expect(leaks[0].matchedTerms.sort()).toEqual(["market-open", "options"]);
-  });
-
-  it("findUniversalSectionScopeLeaks does NOT flag a section merely discussing scoped content without any absolute-claim language", async () => {
-    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
-    const vocabulary = new Set(["options", "market-open"]);
-    const leaks = findUniversalSectionScopeLeaks(
-      [{ key: "risk_management", content: "For options traders during the market-open session, size down as a beginner." }],
-      vocabulary,
-    );
-    expect(leaks).toEqual([]);
-  });
-
-  it("findUniversalSectionScopeLeaks flags a NON-checklist section (e.g. risk_management) that paraphrases a known scoped/unverified rule's own substance under absolute-claim language, even with zero literal vocabulary-term overlap — the exact real-audit leak", async () => {
-    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
-    const nonGlobalRuleDescriptions = ["Structure trades to target a minimum reward-to-risk ratio of at least 2:1."];
-    const leaks = findUniversalSectionScopeLeaks(
-      [{ key: "risk_management", content: "The system enforces a minimum reward-to-risk ratio of at least 2:1 on every planned execution." }],
-      new Set(), // deliberately empty — the leaked prose never repeats a literal scope-array word like "options"/"beginner"
-      nonGlobalRuleDescriptions,
-    );
-    expect(leaks).toHaveLength(1);
-    expect(leaks[0].sectionKey).toBe("risk_management");
-    expect(leaks[0].matchedTerms).toEqual([]);
-    expect(leaks[0].matchedNonGlobalRules).toEqual(nonGlobalRuleDescriptions);
-  });
-
-  it("findUniversalSectionScopeLeaks does NOT flag master_trading_checklist when its prose stays genuinely global", async () => {
-    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
-    const vocabulary = new Set(["options", "market-open"]);
-    const leaks = findUniversalSectionScopeLeaks(
-      [{ key: "master_trading_checklist", content: "Always define risk before entry and confirm the higher-timeframe context." }],
-      vocabulary,
-    );
-    expect(leaks).toEqual([]);
-  });
-
-  it("findUniversalSectionScopeLeaks does NOT flag a non-universal section (e.g. scoped_execution_checklists) for legitimately containing scoped vocabulary", async () => {
-    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
-    const vocabulary = new Set(["options", "market-open"]);
-    const leaks = findUniversalSectionScopeLeaks(
-      [{ key: "scoped_execution_checklists", content: "Options traders: only trade during market-open." }],
-      vocabulary,
-    );
-    expect(leaks).toEqual([]);
-  });
-
-  it("runSynthesis wires universalSectionScopeLeaks onto the final playbook document from the real course-wide scope vocabulary, catching a leak the prompt restriction alone missed", async () => {
+  it("runSynthesis builds master_trading_checklist deterministically from ONLY VERIFIED_GLOBAL CoreFramework rules — a scoped rule's text never appears in it, even if Gemini tries to write one anyway", async () => {
     const clusterJson = JSON.stringify({
       clusters: [{ clusterKey: "s1", proposedCanonicalName: "Strategy", memberInstanceIds: [1], similarityRationale: "r", differencesNotes: "" }],
     });
@@ -1065,18 +968,9 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
                 {
                   key: "risk",
                   title: "Risk",
-                  // RAW core-framework rule shape: cites "k1" (the pooled, already-scoped
-                  // KnowledgeItem below) rather than self-reporting `scope` — coreFramework.ts
-                  // derives the rule's scope deterministically from that citation.
                   rules: [
-                    {
-                      description: "Trade only during market-open with options.",
-                      classification: "explicit",
-                      supportLevel: "SINGLE_SOURCE",
-                      supportCount: 1,
-                      sourceKeys: ["k1"],
-                      conflictSourceKeys: [],
-                    },
+                    { description: "Always define risk before entry.", classification: "explicit", supportLevel: "MULTI_SOURCE", supportCount: 3, sourceKeys: ["k1"], conflictSourceKeys: [] },
+                    { description: "Trade only during market-open with options.", classification: "explicit", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["k2"], conflictSourceKeys: [] },
                   ],
                 },
               ],
@@ -1085,12 +979,13 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
           };
         }
         if (prompt.includes("Comprehensive Trading Playbook")) {
-          // Simulates Gemini paraphrasing scoped material into master_trading_checklist DESPITE the prompt restriction —
-          // exactly the gap the deterministic secondary check exists to catch.
+          // Even if Gemini disobeys and tries to write a "master_trading_checklist" section anyway
+          // (should not happen given the prompt, but never trusted), it is simply not spliced in —
+          // the deterministic one from runSynthesis.ts always wins at that key.
           return {
             text: JSON.stringify({
               title: "Playbook",
-              sections: [{ key: "master_trading_checklist", title: "Checklist", content: "Across every session, always trade only during market-open with options." }],
+              sections: [{ key: "master_trading_checklist", title: "Rogue Checklist", content: "Trade options during market-open, always.", sourceKeys: [] }],
               conflictsAndAmbiguities: [],
             }),
             usage,
@@ -1107,15 +1002,16 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
         lessonTitle: "Lesson 10",
         knowledge: {
           summary: "s",
-          // Genuinely scoped (instrument + session, no strategy) — flows into coreFramework's
-          // courseKnowledge pool (knowledgeNormalize.ts's otherScopedItems), never a canonical strategy.
-          knowledgeItems: [makeKnowledgeItem({ statement: "Trade only during market-open with options.", scope: emptyScope({ marketsOrInstruments: ["options"], sessions: ["market-open"] }) })],
+          // k1 (global, pooled first) backs "Always define risk before entry."; k2 (scoped) backs the market-open/options rule.
+          knowledgeItems: [
+            makeKnowledgeItem({ statement: "Always define risk before entry.", scope: emptyScope() }),
+            makeKnowledgeItem({ statement: "Trade only during market-open with options.", scope: emptyScope({ marketsOrInstruments: ["options"], sessions: ["market-open"] }) }),
+          ],
           examples: [],
           conflictsAndAmbiguities: [],
         },
       },
     ];
-
     const input: RunSynthesisInput = {
       courseTitle: "Trading Accelerator",
       instances: [makeInstance()],
@@ -1125,9 +1021,192 @@ describe("Real-audit Blocker B — 'master_trading_checklist' can no longer be b
     };
     const result = await runSynthesis({ gemini, model: "m" }, input);
 
-    expect(result.playbook.universalSectionScopeLeaks).toHaveLength(1);
-    expect(result.playbook.universalSectionScopeLeaks[0].sectionKey).toBe("master_trading_checklist");
-    expect(result.playbook.universalSectionScopeLeaks[0].matchedTerms.sort()).toEqual(["market-open", "options"]);
+    const checklistSections = result.playbook.sections.filter((s) => s.key === "master_trading_checklist");
+    expect(checklistSections).toHaveLength(1); // Gemini's rogue attempt is never spliced in alongside the real one.
+    const checklist = checklistSections[0];
+    expect(checklist.applicabilityPolicy).toBe("VERIFIED_GLOBAL_ONLY");
+    expect(checklist.content).toContain("Always define risk before entry.");
+    expect(checklist.content).not.toContain("market-open");
+    expect(checklist.content).not.toContain("Rogue Checklist");
+    expect(checklist.content).not.toContain("options");
+  });
+
+  it("assertMasterChecklistSourcesGlobal (the synthesis invariant) throws SynthesisInvariantError if a SCOPED or UNVERIFIED rule were ever selected — fails the build rather than merely warning (real-audit requirement)", async () => {
+    const { assertMasterChecklistSourcesGlobal } = await import("../src/synthesis/runSynthesis.js");
+    const { SynthesisInvariantError } = await import("../src/synthesis/errors.js");
+
+    const scopedRule = {
+      description: "options-only",
+      classification: "explicit" as const,
+      supportLevel: "SINGLE_SOURCE" as const,
+      supportCount: 1,
+      sources: [],
+      conflictSources: [],
+      exceptions: [],
+      numericalValues: [],
+      scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: [] },
+      scopeBasis: "SCOPED" as const,
+    };
+    const unverifiedRule = { ...scopedRule, description: "legacy", scope: null, scopeBasis: "UNVERIFIED" as const };
+    const verifiedGlobalRule = { ...scopedRule, description: "genuinely global", scope: null, scopeBasis: "VERIFIED_GLOBAL" as const };
+
+    expect(() => assertMasterChecklistSourcesGlobal([verifiedGlobalRule])).not.toThrow();
+    expect(() => assertMasterChecklistSourcesGlobal([verifiedGlobalRule, scopedRule])).toThrow(SynthesisInvariantError);
+    expect(() => assertMasterChecklistSourcesGlobal([unverifiedRule])).toThrow(SynthesisInvariantError);
+  });
+});
+
+describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-aware categorized leaks replace the single universalSectionScopeLeaks gate", () => {
+  it("SCOPED policy (scoped_execution_checklists): options/1m/9:30 material with EXPLICIT applicability stated is NOT flagged", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const scope = { strategies: [], marketsOrInstruments: ["options"], timeframes: ["1m"], sessions: ["market-open"], traderProfiles: [] };
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "scoped_execution_checklists",
+          content: "Intraday Equities/Options Checklist (1-minute, market-open session only): every step below applies ONLY to intraday options trades during the market-open session on the 1-minute chart.",
+          scope,
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "SCOPED",
+        },
+      ],
+      new Set(["options", "1m", "market-open"]),
+    );
+    expect(result.scopedApplicabilityLeaks).toEqual([]);
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+  });
+
+  it("SCOPED policy: absolute-claim language in a sentence that never states the section's own declared scope IS an applicability leak (broadening beyond declared scope)", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const scope = { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: [] };
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "scoped_execution_checklists",
+          content: "This checklist is for options trades. Always scale out 50% at target 1 on every trade you take.",
+          scope,
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "SCOPED",
+        },
+      ],
+      new Set(["options"]),
+    );
+    expect(result.scopedApplicabilityLeaks).toHaveLength(1);
+    expect(result.scopedApplicabilityLeaks[0].sectionKey).toBe("scoped_execution_checklists");
+  });
+
+  it("CONFLICT_DOCUMENTATION policy (conflicts_and_ambiguities): mentioning/quoting conflicting SCOPED rules side by side is NEVER flagged", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "conflicts_and_ambiguities",
+          content: "One options-only lesson states every beginner must always wait for a 5-minute close, while a different futures lesson states every trader must always enter on the 1-minute close — these directly conflict.",
+          scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: ["5m"], sessions: [], traderProfiles: ["beginner"] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "CONFLICT_DOCUMENTATION",
+        },
+      ],
+      new Set(["options", "5m", "beginner"]),
+      [{ description: "Always wait for a 5-minute close.", basis: "SCOPED" }],
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+    expect(result.scopedApplicabilityLeaks).toEqual([]);
+  });
+
+  it("VERIFIED_GLOBAL_ONLY policy (master_trading_checklist): exempt from all checks by policy — universal prose is expected and allowed", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "master_trading_checklist",
+          content: "Always define risk before entry — this applies to every strategy, every instrument, every session, without exception.",
+          scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "VERIFIED_GLOBAL",
+          applicabilityPolicy: "VERIFIED_GLOBAL_ONLY",
+        },
+      ],
+      new Set(),
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+    expect(result.scopedApplicabilityLeaks).toEqual([]);
+  });
+
+  it("DESCRIPTIVE_MIXED policy (e.g. risk_management): a section whose OWN derived scopeBasis is SCOPED, using absolute-claim language, is a universalApplicabilityLeak — the primary provenance signal, independent of vocabulary/word-overlap", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "risk_management",
+          content: "The system enforces a minimum reward-to-risk ratio on every planned execution.",
+          scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner"] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(), // deliberately empty — proves this fires from provenance (scopeBasis), not vocabulary
+    );
+    expect(result.universalApplicabilityLeaks).toHaveLength(1);
+    expect(result.universalApplicabilityLeaks[0].sectionKey).toBe("risk_management");
+  });
+
+  it("DESCRIPTIVE_MIXED policy: a section whose OWN derived scopeBasis is UNVERIFIED, using absolute-claim language, is an unverifiedUniversalClaim (not a universalApplicabilityLeak)", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "market_context_regime",
+          content: "Always confirm Intraday Fundamentals and QQQ/SPY relative strength before every trade.",
+          scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "UNVERIFIED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+    );
+    expect(result.unverifiedUniversalClaims).toHaveLength(1);
+    expect(result.unverifiedUniversalClaims[0].sectionKey).toBe("market_context_regime");
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+  });
+
+  it("DESCRIPTIVE_MIXED policy: still catches a leak via word-overlap with a known non-global rule even when the section's own citations are empty/VERIFIED_GLOBAL (secondary lexical safeguard)", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [{ description: "Structure trades to target a minimum reward-to-risk ratio of at least 2:1.", basis: "SCOPED" as const }];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "risk_management",
+          content: "The system enforces a minimum reward-to-risk ratio of at least 2:1 on every planned execution.",
+          scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "VERIFIED_GLOBAL", // this section's OWN citations are (incorrectly) all global — the lexical check is what catches it
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(), // no literal vocabulary term repeated
+      nonGlobalRules,
+    );
+    expect(result.universalApplicabilityLeaks).toHaveLength(1);
+    expect(result.universalApplicabilityLeaks[0].matchedNonGlobalRules).toEqual([nonGlobalRules[0].description]);
+  });
+
+  it("DESCRIPTIVE_MIXED policy: no absolute-claim language at all -> never flagged, regardless of scopeBasis", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "strategy_variants",
+          content: "For options traders, this variant scales out differently.",
+          scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(["options"]),
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
   });
 });
 
@@ -1273,7 +1352,7 @@ describe("Real-audit v4, Proof 1 — CoreFramework consolidated rules cannot be 
     expect(rule.scopeBasis).toBe("VERIFIED_GLOBAL");
   });
 
-  it("mixing a legacy market_context_rules citation with a genuinely global KnowledgeItem citation on the SAME consolidated rule still yields UNVERIFIED — global evidence never dilutes away the unverifiable part", async () => {
+  it("real-audit fix v5: mixing a legacy market_context_rules citation with a genuinely global KnowledgeItem citation on ONE Gemini-authored rule is PARTITIONED into two separate output rules — global evidence is never diluted away by the unverifiable part, and the unverifiable part is never laundered into global either", async () => {
     const instance = makeInstance({
       strategy: makeStrategy({ market_context_rules: [{ description: "Confirm QQQ/SPY alignment.", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }] }),
     });
@@ -1301,9 +1380,19 @@ describe("Real-audit v4, Proof 1 — CoreFramework consolidated rules cannot be 
     const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
     const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [instance], normalized.globalItems);
 
-    const rule = coreFramework.sections[0].rules[0];
-    expect(rule.scope).toBeNull();
-    expect(rule.scopeBasis).toBe("UNVERIFIED");
+    // Real-audit fix (v5) — this real dry-run failure (the "2R rule") showed the OLD behavior
+    // (one diluted UNVERIFIED rule) was itself wrong: it threw away independently-sufficient
+    // global evidence. Both rules now survive, each carrying only its own evidence class.
+    const rules = coreFramework.sections[0].rules;
+    expect(rules).toHaveLength(2);
+    const globalRule = rules.find((r) => r.scopeBasis === "VERIFIED_GLOBAL");
+    const unverifiedRule = rules.find((r) => r.scopeBasis === "UNVERIFIED");
+    expect(globalRule).toBeDefined();
+    expect(unverifiedRule).toBeDefined();
+    expect(globalRule!.description).toBe("Confirm QQQ/SPY alignment and always define your risk.");
+    expect(unverifiedRule!.description).toBe("Confirm QQQ/SPY alignment and always define your risk.");
+    expect(globalRule!.scope).toBeNull();
+    expect(unverifiedRule!.scope).toBeNull();
   });
 });
 
@@ -1457,19 +1546,272 @@ describe("Real-audit v4, Proof 1 (decision framework) — an UNVERIFIED pre-stra
   });
 });
 
-describe("Real-audit v4, Proof 3 — universalSectionScopeLeaks stays empty for a correctly constructed playbook despite real scoped/unverified underlying data", () => {
-  it("a playbook that precisely qualifies its scoped/unverified material (never absolute language) produces zero leaks", async () => {
+describe("Real-audit v5, Proof 3 — a correctly constructed playbook produces zero applicability leaks across all three categories despite real scoped/unverified underlying data", () => {
+  it("a playbook that precisely qualifies its scoped/unverified material (never absolute language outside its declared scope) produces zero leaks in any category", async () => {
     const scopeVocabulary = new Set(["options", "beginner"]);
-    const nonGlobalRuleDescriptions = ["Structure trades to target a minimum reward-to-risk ratio of at least 2:1.", "Confirm Intraday Fundamentals and QQQ/SPY relative strength/order flow."];
-    const { findUniversalSectionScopeLeaks } = await import("../src/synthesis/universalSectionAudit.js");
+    const nonGlobalRules: import("../src/synthesis/frameworkScopeSplit.js").TaggedNonGlobalRule[] = [
+      { description: "Structure trades to target a minimum reward-to-risk ratio of at least 2:1.", basis: "SCOPED" },
+      { description: "Confirm Intraday Fundamentals and QQQ/SPY relative strength/order flow.", basis: "UNVERIFIED" },
+    ];
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
 
     const wellBehavedSections = [
-      { key: "risk_management", content: "As a baseline, define your risk before entry. For options traders who are beginners, a minimum 2:1 reward-to-risk ratio is typically enforced." },
-      { key: "master_trading_checklist", content: "Always define your risk before entry and confirm the higher-timeframe context — these hold for every strategy in this course." },
-      { key: "scoped_execution_checklists", content: "Intraday Equities/Options Checklist: confirm Intraday Fundamentals and QQQ/SPY relative strength before entering a Momentum Stock Breakout trade." },
+      {
+        key: "risk_management",
+        content: "As a baseline, define your risk before entry. For options traders who are beginners, a minimum 2:1 reward-to-risk ratio is typically enforced.",
+        scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner"] },
+        scopeBasis: "SCOPED" as const,
+        applicabilityPolicy: "DESCRIPTIVE_MIXED" as const,
+      },
+      {
+        key: "master_trading_checklist",
+        content: "Always define your risk before entry and confirm the higher-timeframe context — these hold for every strategy in this course.",
+        scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+        scopeBasis: "VERIFIED_GLOBAL" as const,
+        applicabilityPolicy: "VERIFIED_GLOBAL_ONLY" as const,
+      },
+      {
+        key: "scoped_execution_checklists",
+        content:
+          "Intraday Equities/Options Checklist (applies only to intraday options trades): confirm Intraday Fundamentals and QQQ/SPY relative strength before entering a Momentum Stock Breakout trade.",
+        scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: [] },
+        scopeBasis: "SCOPED" as const,
+        applicabilityPolicy: "SCOPED" as const,
+      },
     ];
 
-    const leaks = findUniversalSectionScopeLeaks(wellBehavedSections, scopeVocabulary, nonGlobalRuleDescriptions);
-    expect(leaks).toEqual([]);
+    const result = findPlaybookApplicabilityLeaks(wellBehavedSections, scopeVocabulary, nonGlobalRules);
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+    expect(result.scopedApplicabilityLeaks).toEqual([]);
+  });
+});
+
+describe("Real-audit v5, Proof 2 (continued) — a VERIFIED_GLOBAL rule survives partitioning even alongside SCOPED corroboration (the exact 2R real-audit failure, with both evidence classes present at once)", () => {
+  it("citing a genuinely global knowledge item AND a scoped one on the SAME Gemini-authored rule produces a VERIFIED_GLOBAL rule (independently sufficient) plus a separate SCOPED corroborating rule — the global evidence is never narrowed away", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: [
+            // k1 — genuinely global: general expectancy/trade-management teaching with no restriction.
+            makeKnowledgeItem({ statement: "Whenever you're trading, target at least a two R multiple.", scope: emptyScope() }),
+            // k2 — scoped corroboration: the SAME principle, options/beginner-specific.
+            makeKnowledgeItem({ statement: "Beginners trading options should target at least a two R multiple.", scope: emptyScope({ marketsOrInstruments: ["options"], traderProfiles: ["beginner"] }) }),
+          ],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "risk",
+                  title: "Risk",
+                  rules: [
+                    {
+                      description: "Structure trades to target a minimum reward-to-risk ratio of at least 2:1.",
+                      classification: "explicit",
+                      supportLevel: "MULTI_SOURCE",
+                      supportCount: 2,
+                      sourceKeys: ["k1", "k2"], // Gemini cites BOTH global and scoped evidence on one rule — the exact real-audit failure.
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    // otherScopedItems carries k2 (options/beginner-scoped); globalItems carries k1 — both pooled, in that order, by extractCoreFramework's buildKeyedPool.
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], [...normalized.globalItems, ...normalized.otherScopedItems]);
+
+    const rules = coreFramework.sections[0].rules;
+    expect(rules).toHaveLength(2);
+    const globalRule = rules.find((r) => r.scopeBasis === "VERIFIED_GLOBAL");
+    const scopedRule = rules.find((r) => r.scopeBasis === "SCOPED");
+    expect(globalRule).toBeDefined();
+    expect(scopedRule).toBeDefined();
+    expect(globalRule!.scope).toBeNull();
+    expect(scopedRule!.scope).toEqual({ strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner"] });
+  });
+
+  it("when only SCOPED evidence exists (no independent global support), the rule stays SCOPED — never promoted to VERIFIED_GLOBAL just because it's the only evidence available", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: [makeKnowledgeItem({ statement: "Beginners trading options should target at least a two R multiple.", scope: emptyScope({ marketsOrInstruments: ["options"], traderProfiles: ["beginner"] }) })],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [{ key: "risk", title: "Risk", rules: [{ description: "Target at least a 2:1 reward-to-risk ratio.", classification: "explicit", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["k1"], conflictSourceKeys: [] }] }],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], normalized.otherScopedItems);
+
+    const rules = coreFramework.sections[0].rules;
+    expect(rules).toHaveLength(1);
+    expect(rules[0].scopeBasis).toBe("SCOPED");
+    expect(rules[0].scope).toEqual({ strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["beginner"] });
+  });
+});
+
+describe("Real-audit v5, Blocker 1 — deterministic cluster-merge guard makes canonical identity stable across runs over unchanged source analyses", () => {
+  function makeSignature(overrides: Partial<import("../src/synthesis/normalize.js").StrategySignature>): import("../src/synthesis/normalize.js").StrategySignature {
+    return {
+      strategyInstanceId: 1,
+      lessonId: 1,
+      lessonTitle: "Lesson",
+      originalName: "Strategy",
+      normalizedName: "strategy",
+      markets: ["ES"],
+      timeframes: ["5m"],
+      indicators: [],
+      ruleCounts: {
+        setup_conditions: 1,
+        entry_rules: 1,
+        confirmation_rules: 1,
+        stop_loss_rules: 1,
+        profit_target_rules: 1,
+        trade_management_rules: 1,
+        invalidation_rules: 1,
+        no_trade_conditions: 0,
+        market_context_rules: 1,
+        visual_discretionary_rules: 0,
+      },
+      entrySummary: "e",
+      ...overrides,
+    };
+  }
+
+  it("Regression A: a foundational horizontal Break & Retest (instance 11) and a Top-Down Multi-Timeframe Break & Retest (instance 19) — materially different timeframe hierarchy AND rule shape — remain SEPARATE canonical strategies even when Gemini merges them into one cluster", async () => {
+    const { applyClusterMergeGuard } = await import("../src/synthesis/clusterMergeGuard.js");
+    const br = makeSignature({ strategyInstanceId: 11, originalName: "Break and Retest (B&R) Setup", timeframes: ["5m"] });
+    const topDown = makeSignature({
+      strategyInstanceId: 19,
+      originalName: "Top-Down Multi-Timeframe Break and Retest",
+      timeframes: ["1H", "5m"], // a genuine multi-timeframe hierarchy, not a single-timeframe substitution
+      ruleCounts: { ...br.ruleCounts, setup_conditions: 4, confirmation_rules: 4, market_context_rules: 4 }, // mandatory top-down context/confirmation steps added
+    });
+
+    const geminiMergedCluster = [
+      { clusterKey: "br-multi", proposedCanonicalName: "Multi-Timeframe Break and Retest Strategy", memberInstanceIds: [11, 19], similarityRationale: "same break/retest mechanics", differencesNotes: "one adds HTF context" },
+    ];
+
+    const guarded = applyClusterMergeGuard(geminiMergedCluster, [br, topDown]);
+    expect(guarded).toHaveLength(2);
+    expect(guarded.map((c) => c.memberInstanceIds)).toEqual(expect.arrayContaining([[11], [19]]));
+  });
+
+  it("Regression B: a 1-minute ORB and a 5-minute systematic ORB variant — same single-timeframe shape, same rule shape — remain ONE merged canonical strategy", async () => {
+    const { applyClusterMergeGuard } = await import("../src/synthesis/clusterMergeGuard.js");
+    const orb1m = makeSignature({ strategyInstanceId: 21, originalName: "1-Minute ORB", timeframes: ["1m"] });
+    const orb5m = makeSignature({ strategyInstanceId: 22, originalName: "5-Minute Systematic ORB", timeframes: ["5m"] }); // same ruleCounts shape as orb1m — only the traded timeframe differs
+
+    const geminiMergedCluster = [
+      { clusterKey: "orb", proposedCanonicalName: "Opening Range Breakout", memberInstanceIds: [21, 22], similarityRationale: "same ORB mechanics, different timeframe", differencesNotes: "" },
+    ];
+
+    const guarded = applyClusterMergeGuard(geminiMergedCluster, [orb1m, orb5m]);
+    expect(guarded).toHaveLength(1);
+    expect(guarded[0].memberInstanceIds.sort()).toEqual([21, 22]);
+  });
+
+  it("stability: identical source signatures produce the SAME final canonical membership structure regardless of whether Gemini's raw clustering call happens to merge or split B&R/Top-Down B&R", async () => {
+    const { applyClusterMergeGuard } = await import("../src/synthesis/clusterMergeGuard.js");
+    const br = makeSignature({ strategyInstanceId: 11, originalName: "Break and Retest (B&R) Setup", timeframes: ["5m"] });
+    const topDown = makeSignature({
+      strategyInstanceId: 19,
+      originalName: "Top-Down Multi-Timeframe Break and Retest",
+      timeframes: ["1H", "5m"],
+      ruleCounts: { ...br.ruleCounts, setup_conditions: 4, confirmation_rules: 4, market_context_rules: 4 },
+    });
+
+    // Run A: Gemini happens to merge them (as the real dry run that produced 15 did).
+    const runAMerged = applyClusterMergeGuard(
+      [{ clusterKey: "br-multi", proposedCanonicalName: "Multi-Timeframe Break and Retest Strategy", memberInstanceIds: [11, 19], similarityRationale: "r", differencesNotes: "" }],
+      [br, topDown],
+    );
+    // Run B: Gemini happens to keep them separate (as the previously-accepted run that produced 16 did).
+    const runBSeparate = applyClusterMergeGuard(
+      [
+        { clusterKey: "br", proposedCanonicalName: "Break and Retest (B&R) Setup", memberInstanceIds: [11], similarityRationale: "r", differencesNotes: "" },
+        { clusterKey: "td-br", proposedCanonicalName: "Top-Down Multi-Timeframe Break and Retest", memberInstanceIds: [19], similarityRationale: "r", differencesNotes: "" },
+      ],
+      [br, topDown],
+    );
+
+    const membershipOf = (clusters: { memberInstanceIds: number[] }[]) => clusters.map((c) => [...c.memberInstanceIds].sort()).sort();
+    expect(membershipOf(runAMerged)).toEqual(membershipOf(runBSeparate));
+    expect(membershipOf(runAMerged)).toEqual([[11], [19]]);
+  });
+
+  it("clusterStrategyInstances (end-to-end, real Gemini call path) applies the guard automatically — a Gemini response merging B&R/Top-Down B&R is still split apart in the final result", async () => {
+    const br = makeInstance({ strategyInstanceId: 11, lessonId: 11, strategyName: "Break and Retest (B&R) Setup", strategy: makeStrategy({ strategy_name: "Break and Retest (B&R) Setup", timeframes: ["5m"] }) });
+    const topDown = makeInstance({
+      strategyInstanceId: 19,
+      lessonId: 19,
+      strategyName: "Top-Down Multi-Timeframe Break and Retest",
+      strategy: makeStrategy({
+        strategy_name: "Top-Down Multi-Timeframe Break and Retest",
+        timeframes: ["1H", "5m"],
+        setup_conditions: [{ description: "HTF alignment 1", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }, { description: "HTF alignment 2", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }, { description: "HTF alignment 3", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }, { description: "HTF alignment 4", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }],
+        confirmation_rules: [{ description: "c1", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }, { description: "c2", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }, { description: "c3", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }, { description: "c4", classification: "explicit", confidence: 0.9, start_timestamp: "0:00", end_timestamp: null, evidence: "e" }],
+      }),
+    });
+    const { buildStrategySignature } = await import("../src/synthesis/normalize.js");
+    const signatures = [buildStrategySignature(br), buildStrategySignature(topDown)];
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          clusters: [{ clusterKey: "br-multi", proposedCanonicalName: "Multi-Timeframe Break and Retest Strategy", memberInstanceIds: [11, 19], similarityRationale: "r", differencesNotes: "" }],
+        }),
+        usage,
+      })),
+    });
+
+    const { clusterStrategyInstances } = await import("../src/synthesis/cluster.js");
+    const { clusters } = await clusterStrategyInstances({ gemini, model: "m" }, signatures);
+    expect(clusters).toHaveLength(2);
+    expect(clusters.map((c) => c.memberInstanceIds)).toEqual(expect.arrayContaining([[11], [19]]));
   });
 });

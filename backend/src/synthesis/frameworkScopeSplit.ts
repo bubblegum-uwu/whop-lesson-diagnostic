@@ -1,7 +1,7 @@
 import type { KnowledgeItemScope } from "../gemini/schema.js";
 import { isKnowledgeItemScoped } from "../gemini/schema.js";
-import { effectiveScopeBasis } from "./scopeBasis.js";
-import { STRATEGY_RULE_CATEGORIES } from "./decisionFramework.js";
+import { effectiveScopeBasis, type ScopeBasis } from "./scopeBasis.js";
+import { STRATEGY_RULE_CATEGORIES } from "./synthesisSourcePool.js";
 import type { CanonicalStrategy, CoreFramework } from "./schema.js";
 
 /**
@@ -76,29 +76,36 @@ export function collectScopeVocabulary(coreFramework: CoreFramework, extraScopes
   return vocabulary;
 }
 
+/** A non-global rule description tagged with WHY it's non-global — see playbookApplicabilityAudit.ts, which routes a leak to "universalApplicabilityLeaks" (a KNOWN restriction was erased) vs. "unverifiedUniversalClaims" (an UNKNOWN-but-unproven restriction was asserted as fact) accordingly. */
+export interface TaggedNonGlobalRule {
+  description: string;
+  basis: "SCOPED" | "UNVERIFIED";
+}
+
 /**
- * Real-audit fix (Phase 3.5B v4) — every rule description that is NOT
+ * Real-audit fix (Phase 3.5B v4/v5) — every rule description that is NOT
  * verified-global (i.e. SCOPED or UNVERIFIED), pooled from both
- * coreFramework and (optionally) every canonical strategy's own rules.
- * Used by universalSectionAudit.ts to catch a playbook section that uses
- * absolute-claim language ("all", "every", "always"...) while its prose
- * significantly overlaps one of these — the exact failure mode a real
- * dry run found (a section paraphrased a scoped rule as if it were
- * universal without repeating any of its literal scope-array words, so
- * collectScopeVocabulary's term-matching alone could never have caught it).
+ * coreFramework and (optionally) every canonical strategy's own rules,
+ * tagged with which. Used by playbookApplicabilityAudit.ts to catch a
+ * playbook section that uses absolute-claim language ("all", "every",
+ * "always"...) while its prose significantly overlaps one of these — the
+ * exact failure mode a real dry run found (a section paraphrased a scoped
+ * rule as if it were universal without repeating any of its literal
+ * scope-array words, so collectScopeVocabulary's term-matching alone could
+ * never have caught it).
  */
-export function collectNonGlobalRuleDescriptions(coreFramework: CoreFramework, canonicalStrategies: CanonicalStrategy[] = []): string[] {
-  const descriptions: string[] = [];
+export function collectNonGlobalRuleDescriptions(coreFramework: CoreFramework, canonicalStrategies: CanonicalStrategy[] = []): TaggedNonGlobalRule[] {
+  const descriptions: TaggedNonGlobalRule[] = [];
+  const addIfNonGlobal = (rule: { description: string; scope: KnowledgeItemScope | null; scopeBasis?: ScopeBasis }) => {
+    const basis = effectiveScopeBasis(rule);
+    if (basis === "SCOPED" || basis === "UNVERIFIED") descriptions.push({ description: rule.description, basis });
+  };
   for (const section of coreFramework.sections) {
-    for (const rule of section.rules) {
-      if (effectiveScopeBasis(rule) !== "VERIFIED_GLOBAL") descriptions.push(rule.description);
-    }
+    for (const rule of section.rules) addIfNonGlobal(rule);
   }
   for (const strategy of canonicalStrategies) {
     for (const category of STRATEGY_RULE_CATEGORIES) {
-      for (const rule of strategy[category]) {
-        if (effectiveScopeBasis(rule) !== "VERIFIED_GLOBAL") descriptions.push(rule.description);
-      }
+      for (const rule of strategy[category]) addIfNonGlobal(rule);
     }
   }
   return descriptions;

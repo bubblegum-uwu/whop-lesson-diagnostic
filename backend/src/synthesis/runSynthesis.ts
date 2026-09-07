@@ -12,7 +12,8 @@ import { normalizeLessonKnowledge, collectRawStrategyScopeNames, type LessonKnow
 import { buildClusterCandidates, resolveStrategyScopeNames, type ScopeMappingResult } from "./strategyScopeMapping.js";
 import { SynthesisInvariantError } from "./errors.js";
 import { collectScopeVocabulary, collectNonGlobalRuleDescriptions } from "./frameworkScopeSplit.js";
-import { findUniversalSectionScopeLeaks } from "./universalSectionAudit.js";
+import { findPlaybookApplicabilityLeaks } from "./playbookApplicabilityAudit.js";
+import { effectiveScopeBasis } from "./scopeBasis.js";
 import type { KnowledgeItemScope } from "../gemini/schema.js";
 import type {
   CanonicalStrategy,
@@ -23,6 +24,7 @@ import type {
   FrameworkCoverage,
   PlaybookSection,
   StrategyScopeMappingSummary,
+  SynthesizedRule,
 } from "./schema.js";
 
 /**
@@ -254,31 +256,55 @@ export async function runSynthesis(
   const librarySection = buildCanonicalStrategyLibrarySection(canonicalStrategies);
   assertCanonicalStrategyLibraryComplete(librarySection, canonicalStrategies);
 
-  // Real-audit fix (Phase 3.5B v3/v4, Blocker B/D-4) — deterministic
-  // secondary check that a section using absolute-claim ("all"/"every"/
-  // "always"/"universal"/...) language doesn't broaden real scoped/
-  // unverified material. Runs across EVERY playbook section (not just
-  // "master_trading_checklist" — a real dry run found the leak elsewhere).
-  // Two independent signals, both against real, already-known data: (1)
-  // literal scope-vocabulary terms (coreFramework AND each canonical
-  // strategy's own rule categories), and (2) significant word-overlap with
-  // a non-global (SCOPED or UNVERIFIED) rule's own description — see
-  // universalSectionAudit.ts and frameworkScopeSplit.ts.
+  // Real-audit fix (Phase 3.5B v5, Blocker 2) — "master_trading_checklist"
+  // is no longer Gemini-authored at all (like canonical_strategy_library):
+  // built directly from ONLY VERIFIED_GLOBAL CoreFramework rules, so
+  // scoped/unverified material can never cross-contaminate it, structurally
+  // rather than by policy. A defensive invariant re-verifies this before
+  // the section is ever spliced in — see errors.ts's SynthesisInvariantError.
+  const verifiedGlobalRules = selectVerifiedGlobalCoreFrameworkRules(coreFramework);
+  assertMasterChecklistSourcesGlobal(verifiedGlobalRules);
+  const checklistSection = buildMasterTradingChecklistSection(verifiedGlobalRules);
+  // Defense in depth: never trust a "master_trading_checklist" key Gemini produced anyway
+  // (should not happen given the prompt no longer asks for it, but the deterministic
+  // section above must always be the ONLY one at this key, never merely appended alongside a rogue one).
+  const geminiSections = geminiPlaybook.sections.filter((s) => s.key !== "master_trading_checklist");
+
+  // Real-audit fix (Phase 3.5B v3-v5, Blocker B/D-4) — deterministic
+  // secondary check that a playbook section broadens known scoped/
+  // unverified material into an absolute/universal claim. v5 replaced the
+  // single "universalSectionScopeLeaks" gate (too broad — it also fired on
+  // sections like scoped_execution_checklists/conflicts_and_ambiguities
+  // that are SUPPOSED to discuss scoped material) with three
+  // policy-aware, differently-severe categories — see
+  // playbookApplicabilityAudit.ts, which validates each Gemini-authored
+  // section according to its OWN applicabilityPolicy (assigned in
+  // playbook.ts's SECTION_POLICY) using that section's own DERIVED
+  // scope/scopeBasis (from its real citations) as the PRIMARY signal, with
+  // scope-vocabulary/word-overlap prose matching only as a secondary
+  // safeguard.
   const scopeVocabulary = collectScopeVocabulary(coreFramework, collectCanonicalStrategyScopes(canonicalStrategies));
   const nonGlobalRuleDescriptions = collectNonGlobalRuleDescriptions(coreFramework, canonicalStrategies);
-  const universalSectionScopeLeaks = findUniversalSectionScopeLeaks(geminiPlaybook.sections, scopeVocabulary, nonGlobalRuleDescriptions);
+  const { universalApplicabilityLeaks, unverifiedUniversalClaims, scopedApplicabilityLeaks } = findPlaybookApplicabilityLeaks(
+    geminiSections,
+    scopeVocabulary,
+    nonGlobalRuleDescriptions,
+  );
 
   const playbook: CoursePlaybookDocument = {
     ...geminiPlaybook,
     sections: [
-      ...insertCanonicalStrategyLibrarySection(geminiPlaybook.sections, librarySection),
+      ...insertCanonicalStrategyLibrarySection(geminiSections, librarySection),
+      checklistSection,
       buildCoverageNotesSection(input, frameworkCoverage, unmatchedStrategyKnowledge.length),
       buildSourceIndexSection(input, canonicalStrategies),
       ...(unmatchedStrategyKnowledge.length > 0 ? [buildUnmatchedStrategyKnowledgeSection(unmatchedStrategyKnowledge)] : []),
     ],
     frameworkCoverage,
     strategyScopeMapping,
-    universalSectionScopeLeaks,
+    universalApplicabilityLeaks,
+    unverifiedUniversalClaims,
+    scopedApplicabilityLeaks,
   };
 
   await emit("DECISION_FRAMEWORK", null, null, null);
@@ -503,6 +529,63 @@ function buildCanonicalStrategyLibrarySection(canonicalStrategies: CanonicalStra
     key: "canonical_strategy_library",
     title: "Canonical Strategy Library",
     content: `This course teaches exactly ${canonicalStrategies.length} distinct canonical strategy(ies), generated deterministically from the synthesized canonical-strategy set — this list can never omit, undercount, or overcount a strategy.\n\n${entries}`,
+  };
+}
+
+const EMPTY_SCOPE: KnowledgeItemScope = { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] };
+
+/**
+ * Real-audit fix (Phase 3.5B v5) — every CoreFramework rule VERIFIED to
+ * hold for every strategy/instrument/timeframe/session/trader-profile in
+ * this course (see scopeBasis.ts). This — and ONLY this — is what
+ * buildMasterTradingChecklistSection is allowed to draw from.
+ */
+export function selectVerifiedGlobalCoreFrameworkRules(coreFramework: CoreFramework): SynthesizedRule[] {
+  return coreFramework.sections.flatMap((section) => section.rules.filter((rule) => effectiveScopeBasis(rule) === "VERIFIED_GLOBAL"));
+}
+
+/**
+ * Defensive invariant guard (Phase 3.5B v5, Blocker 2) — re-verifies, at
+ * the exact point the checklist is about to be built, that every rule it
+ * will draw from is genuinely VERIFIED_GLOBAL. Should be structurally
+ * impossible to trip given selectVerifiedGlobalCoreFrameworkRules' own
+ * filter, but per the real-audit requirement this fails the synthesis
+ * outright (SynthesisInvariantError) rather than merely recording a
+ * warning — a future refactor that weakens the filter must be caught
+ * immediately, not silently ship a provenance-unsafe checklist.
+ */
+export function assertMasterChecklistSourcesGlobal(rules: SynthesizedRule[]): void {
+  for (const rule of rules) {
+    if (effectiveScopeBasis(rule) !== "VERIFIED_GLOBAL") {
+      throw new SynthesisInvariantError(
+        `Master Trading Checklist would include a non-VERIFIED_GLOBAL rule ("${rule.description}", scopeBasis=${rule.scopeBasis ?? "unset"}) — this must never happen, since the checklist is built exclusively from a VERIFIED_GLOBAL-only selection.`,
+      );
+    }
+  }
+}
+
+/**
+ * Real-audit fix (Phase 3.5B v3-v5, Blocker B) — deterministically built,
+ * never asked of Gemini (see playbook.ts's SECTION_POLICY, which omits
+ * "master_trading_checklist" from Gemini's own output entirely). This is
+ * what makes cross-contamination from scoped/unverified material
+ * structurally impossible for this section, rather than merely policed
+ * after the fact by the applicability audit.
+ */
+export function buildMasterTradingChecklistSection(verifiedGlobalRules: SynthesizedRule[]): PlaybookSection {
+  const content =
+    verifiedGlobalRules.length === 0
+      ? 'No genuinely course-wide (VERIFIED_GLOBAL) principle was identified across this course\'s material — every checklist-worthy rule found so far carries some real or unverified restriction. See "Scoped Execution Checklists" for applicable, correctly-labeled material.'
+      : `A concrete, step-by-step checklist built EXCLUSIVELY from principles VERIFIED to hold for every strategy, instrument, timeframe, session, and trader profile in this course — generated deterministically from the Core Trading Framework's own VERIFIED_GLOBAL rules, never authored by Gemini, so it can never contain instrument/session/timeframe/trader-profile-specific material. See "Scoped Execution Checklists" for anything specific to a particular market, timeframe, session, or trader profile.\n\n${verifiedGlobalRules.map((rule, i) => `${i + 1}. ${rule.description}`).join("\n")}`;
+
+  return {
+    key: "master_trading_checklist",
+    title: "Master Trading Checklist",
+    content,
+    sourceKeys: [],
+    scope: EMPTY_SCOPE,
+    scopeBasis: "VERIFIED_GLOBAL",
+    applicabilityPolicy: "VERIFIED_GLOBAL_ONLY",
   };
 }
 

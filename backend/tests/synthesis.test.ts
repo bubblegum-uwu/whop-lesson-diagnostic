@@ -21,7 +21,7 @@ import {
   CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
-  PLAYBOOK_RESPONSE_JSON_SCHEMA,
+  RAW_PLAYBOOK_RESPONSE_JSON_SCHEMA,
   RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   RULE_CATEGORY_KEYS,
   type RawCanonicalStrategy,
@@ -361,7 +361,7 @@ function validCoreFrameworkJson() {
 function validPlaybookJson() {
   return JSON.stringify({
     title: "Course Playbook",
-    sections: [{ key: "course_philosophy", title: "Course Philosophy", content: "c" }],
+    sections: [{ key: "course_philosophy", title: "Course Philosophy", content: "c", sourceKeys: [] }],
     conflictsAndAmbiguities: [],
   });
 }
@@ -1015,7 +1015,7 @@ describe("synthesis response schemas — no array-valued 'type' nodes", () => {
     CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
     RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
     CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
-    PLAYBOOK_RESPONSE_JSON_SCHEMA,
+    RAW_PLAYBOOK_RESPONSE_JSON_SCHEMA,
     RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   };
 

@@ -14,7 +14,7 @@ import {
   CLUSTER_BATCH_RESPONSE_JSON_SCHEMA,
   RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
-  PLAYBOOK_RESPONSE_JSON_SCHEMA,
+  RAW_PLAYBOOK_RESPONSE_JSON_SCHEMA,
   RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
 } from "../src/synthesis/schema.js";
 import { SCOPE_MAPPING_RESPONSE_JSON_SCHEMA } from "../src/synthesis/strategyScopeMapping.js";
@@ -149,7 +149,7 @@ async function main(): Promise<void> {
       [CLUSTER_BATCH_RESPONSE_JSON_SCHEMA, "cluster_chunk_or_merge"],
       [RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA, "canonical_strategy"],
       [RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA, "core_framework"],
-      [PLAYBOOK_RESPONSE_JSON_SCHEMA, "playbook"],
+      [RAW_PLAYBOOK_RESPONSE_JSON_SCHEMA, "playbook"],
       [RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA, "decision_framework"],
       [SCOPE_MAPPING_RESPONSE_JSON_SCHEMA, "strategy_scope_mapping"],
     ]);
@@ -194,18 +194,31 @@ async function main(): Promise<void> {
           `estimated_cost=${cost != null ? `$${cost.toFixed(4)}` : "n/a"}. Nothing was persisted to the database.`,
       );
 
-      // Real-audit fix (Phase 3.5B v3/v4) — surface the two deterministic
+      // Real-audit fix (Phase 3.5B v3-v5) — surface the deterministic
       // scope-fidelity checks directly in the console output, not just
-      // buried in the JSON file: both MUST be empty on real production
-      // data before this PR merges (see decisionScopeAudit.ts and
-      // universalSectionAudit.ts). Never weaken either check to make this
-      // line read PASS — a non-empty result here means real content needs
-      // fixing (prompt/pooling), not the detector.
+      // buried in the JSON file. v5 replaced the single, overly-broad
+      // "universalSectionScopeLeaks" gate (it fired on sections like
+      // scoped_execution_checklists/conflicts_and_ambiguities that are
+      // SUPPOSED to discuss scoped material) with three policy-aware
+      // categories — see playbookApplicabilityAudit.ts. The overall PASS
+      // condition is decisionFramework.scopeLeaks=0 AND
+      // universalApplicabilityLeaks=0 AND unverifiedUniversalClaims=0 AND
+      // scopedApplicabilityLeaks=0 — it must NOT fail merely because a
+      // scoped or conflict-documentation section contains scoped
+      // vocabulary (those are policy-exempt by design). Never weaken any
+      // of these checks to make this line read PASS — a non-empty result
+      // means real content needs fixing (prompt/pooling), not the detector.
       const decisionScopeLeakCount = result.decisionFramework.scopeLeaks.length;
-      const universalSectionLeakCount = result.playbook.universalSectionScopeLeaks.length;
+      const universalApplicabilityLeakCount = result.playbook.universalApplicabilityLeaks.length;
+      const unverifiedUniversalClaimCount = result.playbook.unverifiedUniversalClaims.length;
+      const scopedApplicabilityLeakCount = result.playbook.scopedApplicabilityLeaks.length;
+      const allChecksPass =
+        decisionScopeLeakCount === 0 && universalApplicabilityLeakCount === 0 && unverifiedUniversalClaimCount === 0 && scopedApplicabilityLeakCount === 0;
       console.log(
-        `Scope-fidelity check: decisionFramework.scopeLeaks=${decisionScopeLeakCount} (${decisionScopeLeakCount === 0 ? "PASS" : "FAIL — see decisionFramework.scopeLeaks in the JSON output"}), ` +
-          `playbook.universalSectionScopeLeaks=${universalSectionLeakCount} (${universalSectionLeakCount === 0 ? "PASS" : "FAIL — see playbook.universalSectionScopeLeaks in the JSON output"}).`,
+        `Scope-fidelity check: decisionFramework.scopeLeaks=${decisionScopeLeakCount}, ` +
+          `playbook.universalApplicabilityLeaks=${universalApplicabilityLeakCount}, ` +
+          `playbook.unverifiedUniversalClaims=${unverifiedUniversalClaimCount}, ` +
+          `playbook.scopedApplicabilityLeaks=${scopedApplicabilityLeakCount} — overall ${allChecksPass ? "PASS" : "FAIL — see the corresponding array(s) in the JSON output"}.`,
       );
 
       const unmatchedSection = result.playbook.sections.find((s) => s.key === "unmatched_strategy_scoped_knowledge");

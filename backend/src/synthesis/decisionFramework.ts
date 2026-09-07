@@ -1,9 +1,7 @@
 import type { GeminiUsage } from "../gemini/client.js";
-import type { KnowledgeItemScope } from "../gemini/schema.js";
-import { isKnowledgeItemScoped } from "../gemini/schema.js";
 import { callGeminiForStage, parseStageJson, validateStageData, type SynthesisStageDeps } from "./geminiStage.js";
 import { findGlobalGateScopeLeaks } from "./decisionScopeAudit.js";
-import { unionScope, effectiveScopeBasis, type ScopeBasis } from "./scopeBasis.js";
+import { buildSynthesisSourcePool, resolveSourcePoolKeys, combineScopeBasis, type SourcePoolEntry } from "./synthesisSourcePool.js";
 import {
   RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   RawDecisionFrameworkSchema,
@@ -16,7 +14,6 @@ import {
 } from "./schema.js";
 
 const STAGE = "decision_framework";
-const EMPTY_SCOPE: KnowledgeItemScope = { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] };
 
 /**
  * Stage 6 — master decision framework. A structured step/decision graph
@@ -45,7 +42,7 @@ export async function synthesizeDecisionFramework(
   canonicalStrategies: CanonicalStrategy[],
   coreFramework: CoreFramework,
 ): Promise<{ decisionFramework: DecisionFramework; usage: GeminiUsage }> {
-  const { promptEntries, byKey } = buildDecisionSourcePool(canonicalStrategies, coreFramework);
+  const { poolEntries: promptEntries, byKey } = buildSynthesisSourcePool(canonicalStrategies, coreFramework);
   const prompt = buildPrompt(canonicalStrategies, promptEntries);
   const { rawText, usage, diagnostics } = await callGeminiForStage(deps, STAGE, prompt, RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA);
   const parsed = parseStageJson(STAGE, rawText, diagnostics);
@@ -58,108 +55,17 @@ export async function synthesizeDecisionFramework(
   return { decisionFramework, usage };
 }
 
-interface DecisionSourceEntry {
-  key: string;
-  description: string;
-  scope: KnowledgeItemScope;
-  /** Real-audit fix (Phase 3.5B v4) — see scopeBasis.ts. Read from the CoreFramework/canonical-strategy rule's own already-computed scopeBasis (via effectiveScopeBasis, so a rule that predates this field still falls back to the old null-scope-means-global convention). */
-  scopeBasis: ScopeBasis;
-}
-
-/** Every canonical-strategy rule category a decision node could plausibly be built from. Deliberately excludes `marketContext` (course-wide, already pooled via coreFramework) to avoid double-keying the same conceptual rule twice under two different pools. Exported so frameworkScopeSplit.ts's collectNonGlobalRuleDescriptions can iterate the exact same set without a second, potentially-drifting copy. */
-export const STRATEGY_RULE_CATEGORIES = [
-  "prerequisites",
-  "setup",
-  "entryRules",
-  "confirmationRules",
-  "stopLossRules",
-  "profitTargetRules",
-  "tradeManagementRules",
-  "invalidationRules",
-  "noTradeConditions",
-  "visualDiscretionaryRules",
-  "riskManagementRules",
-  "positionSizingRules",
-  "scalingInRules",
-  "scalingOutRules",
-  "runnerManagementRules",
-  "warnings",
-] as const satisfies readonly (keyof CanonicalStrategy)[];
-
-/**
- * Real-audit fix (Phase 3.5B v3) — every rule a decision node could
- * conceivably be built from, each assigned a stable "k"-prefixed key. This
- * is what lets a node's applicability be validated deterministically from
- * data lineage (which rule(s) it actually cites) instead of trusting
- * Gemini's own self-reported scope, which a real audit showed can silently
- * disagree with (or simply omit) the underlying rule's true scope.
- */
-function buildDecisionSourcePool(
-  canonicalStrategies: CanonicalStrategy[],
-  coreFramework: CoreFramework,
-): { promptEntries: DecisionSourceEntry[]; byKey: Map<string, DecisionSourceEntry> } {
-  const byKey = new Map<string, DecisionSourceEntry>();
-  let counter = 0;
-  const add = (description: string, scope: KnowledgeItemScope | null, scopeBasis: ScopeBasis | undefined) => {
-    const key = `k${++counter}`;
-    byKey.set(key, { key, description, scope: scope ?? EMPTY_SCOPE, scopeBasis: effectiveScopeBasis({ scope, scopeBasis }) });
-  };
-
-  for (const section of coreFramework.sections) {
-    for (const rule of section.rules) add(rule.description, rule.scope, rule.scopeBasis);
-  }
-  for (const strategy of canonicalStrategies) {
-    for (const category of STRATEGY_RULE_CATEGORIES) {
-      for (const rule of strategy[category]) add(`[${strategy.name}] ${rule.description}`, rule.scope, rule.scopeBasis);
-    }
-  }
-
-  return { promptEntries: [...byKey.values()], byKey };
-}
-
-/**
- * Real-audit fix (Phase 3.5B v4) — combines a node's cited entries'
- * scope/scopeBasis with the SAME priority scopeBasis.ts's aggregateScopeBasis
- * uses one layer downstream: a SCOPED citation dominates (its concrete
- * restriction is real and must survive); failing that, an UNVERIFIED
- * citation means the node's true applicability is NOT justified as global
- * even though the literal scope union is empty (this is what stops the
- * "Is Stock In Play?"-style false negative from resurfacing via an
- * UNVERIFIED CoreFramework rule instead of a self-reported one); only when
- * every citation is VERIFIED_GLOBAL does the node itself count as verified
- * global.
- */
-function combineScopeBasis(entries: DecisionSourceEntry[]): { scope: KnowledgeItemScope; scopeBasis: ScopeBasis } {
-  let scope = EMPTY_SCOPE;
-  let sawUnverified = false;
-  for (const entry of entries) {
-    if (entry.scopeBasis === "SCOPED") {
-      scope = unionScope(scope, entry.scope);
-    } else if (entry.scopeBasis === "UNVERIFIED") {
-      sawUnverified = true;
-    }
-  }
-  if (isKnowledgeItemScoped(scope)) return { scope, scopeBasis: "SCOPED" };
-  if (sawUnverified) return { scope, scopeBasis: "UNVERIFIED" };
-  if (entries.length > 0) return { scope, scopeBasis: "VERIFIED_GLOBAL" };
-  return { scope, scopeBasis: "UNVERIFIED" }; // zero valid citations — decisionScopeAudit's "ungrounded" check is what actually flags this case.
-}
-
 /**
  * Resolves a node's citations back to a validated key list (unknown/
  * invented keys dropped, never fabricated) and derives its scope/scopeBasis
- * as the combination of every cited rule's own scope/scopeBasis — this is
- * what makes a decision node's applicability provably consistent with the
- * structured rules it came from, closing the exact fidelity gap a real
- * audit found between a CoreFramework rule's scope and the decision node
- * built from it.
+ * as the combination of every cited rule's own scope/scopeBasis (see
+ * synthesisSourcePool.ts's combineScopeBasis) — this is what makes a
+ * decision node's applicability provably consistent with the structured
+ * rules it came from, closing the exact fidelity gap a real audit found
+ * between a CoreFramework rule's scope and the decision node built from it.
  */
-function enrichNode(raw: RawDecisionNode, byKey: Map<string, DecisionSourceEntry>): DecisionNode {
-  const validEntries: DecisionSourceEntry[] = [];
-  for (const key of raw.sourceKeys) {
-    const entry = byKey.get(key);
-    if (entry) validEntries.push(entry);
-  }
+function enrichNode(raw: RawDecisionNode, byKey: Map<string, SourcePoolEntry>): DecisionNode {
+  const validEntries = resolveSourcePoolKeys(raw.sourceKeys, byKey);
   const { scope, scopeBasis } = combineScopeBasis(validEntries);
   return {
     id: raw.id,
@@ -174,7 +80,7 @@ function enrichNode(raw: RawDecisionNode, byKey: Map<string, DecisionSourceEntry
   };
 }
 
-function buildPrompt(canonicalStrategies: CanonicalStrategy[], promptEntries: DecisionSourceEntry[]): string {
+function buildPrompt(canonicalStrategies: CanonicalStrategy[], promptEntries: SourcePoolEntry[]): string {
   const strategyNames = canonicalStrategies.map((s) => s.name);
   const globalEntries = promptEntries.filter((e) => e.scopeBasis === "VERIFIED_GLOBAL").map(({ key, description }) => ({ key, description }));
   const scopedEntries = promptEntries.filter((e) => e.scopeBasis === "SCOPED").map(({ key, description, scope }) => ({ key, description, scope }));

@@ -219,10 +219,19 @@ export interface CoreFramework {
   sections: CoreFrameworkSection[];
 }
 
+/** Real-audit fix (Phase 3.5B v5) — which applicability rules a section is held to by the audit (see backend playbookApplicabilityAudit.ts). Assigned deterministically in code from the section's key, never chosen by Gemini. */
+export type ApplicabilityPolicy = "VERIFIED_GLOBAL_ONLY" | "SCOPED" | "DESCRIPTIVE_MIXED" | "CONFLICT_DOCUMENTATION";
+
 export interface PlaybookSection {
   key: string;
   title: string;
   content: string;
+  /** Real-audit fix (Phase 3.5B v5) — which pooled CoreFramework/canonical-strategy rule(s) this section's prose is grounded in; Gemini cites these, never a scope/applicability claim directly. Optional — absent for deterministic (code-generated) sections. */
+  sourceKeys?: string[];
+  /** Deterministically derived as the union of every cited source's own scope — never self-reported by Gemini. */
+  scope?: KnowledgeItemScope;
+  scopeBasis?: ScopeBasis;
+  applicabilityPolicy?: ApplicabilityPolicy;
 }
 
 export type FrameworkCoverageStatus = "COMPLETE" | "PARTIAL";
@@ -252,11 +261,19 @@ export interface StrategyScopeMappingSummary {
   completeness: FrameworkCoverageStatus;
 }
 
-/** Real-audit fix (Phase 3.5B v3/v4) — a playbook section using absolute-claim language ("all"/"every"/"always"/"universal"/...) whose prose either contains a real scoped vocabulary term OR significantly overlaps a known non-global (SCOPED/UNVERIFIED) rule's own description (see universalSectionAudit.ts). Scanned across every section, not just "master_trading_checklist". Best-effort secondary check on top of the primary fix (playbook.ts restricting/annotating what Gemini is shown). */
-export interface UniversalSectionScopeLeak {
+/**
+ * Real-audit fix (Phase 3.5B v3-v5) — a playbook section broadening known
+ * scoped/unverified material into an absolute/universal claim (see backend
+ * playbookApplicabilityAudit.ts). v5 replaced a single, overly-broad
+ * "universalSectionScopeLeaks" gate (it also fired on sections like
+ * scoped_execution_checklists/conflicts_and_ambiguities that are SUPPOSED
+ * to discuss scoped material) with three policy-aware, differently-severe
+ * categories on CoursePlaybook below — see each field's own doc comment.
+ */
+export interface ApplicabilityLeak {
   sectionKey: string;
   matchedTerms: string[];
-  /** Real-audit fix (Phase 3.5B v4) — descriptions of non-global rules this section's prose significantly overlaps under absolute-claim language, even with zero literal vocabulary-term matches. */
+  /** Descriptions of non-global rules this section's prose significantly overlaps under absolute-claim language, even with zero literal vocabulary-term matches. */
   matchedNonGlobalRules: string[];
 }
 
@@ -266,7 +283,12 @@ export interface CoursePlaybook {
   conflictsAndAmbiguities: Conflict[];
   frameworkCoverage: FrameworkCoverage;
   strategyScopeMapping: StrategyScopeMappingSummary;
-  universalSectionScopeLeaks: UniversalSectionScopeLeak[];
+  /** A non-exempt section broadened a KNOWN scoped restriction into an absolute/universal claim — the clearest, most severe leak. */
+  universalApplicabilityLeaks: ApplicabilityLeak[];
+  /** A non-exempt section asserted something as universal resting only on UNVERIFIED evidence — a real gap, but weaker than contradicting known evidence. */
+  unverifiedUniversalClaims: ApplicabilityLeak[];
+  /** A SCOPED-policy section (e.g. "scoped_execution_checklists") used absolute-claim language without ever stating its own declared scope. */
+  scopedApplicabilityLeaks: ApplicabilityLeak[];
 }
 
 export interface DecisionNode {
