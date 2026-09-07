@@ -110,6 +110,24 @@ import type { GeminiThinkingLevel } from "../gemini/client.js";
  * wire format. playbook/core_framework/decision_framework are also
  * unchanged by v5 — no real usage data exists yet for any of them.
  *
+ * v6 (current) — core_framework raised, 16384 -> 65536, after a real
+ * production dry run reached this stage (the first five stages, including
+ * the previously-unstable clustering, all completed successfully) and was
+ * truncated:
+ *
+ *   stage=core_framework max_output_tokens=16384 output_tokens=15717
+ *   interaction_status=incomplete ends_with_brace=false
+ *
+ * output_tokens=15717 against a 16384 budget is ~95.9% consumed — the same
+ * shared thinking/output-budget truncation signature documented above for
+ * cluster_chunk (v1/v2) and canonical_strategy (v3), now confirmed for
+ * core_framework too now that real data actually exercises it. Raised
+ * directly to the model's documented 65536 ceiling for the same reason
+ * canonical_strategy/playbook were: there is no principled smaller number
+ * to try first when the failure mode is thinking consuming the budget
+ * before the visible JSON finishes. No other stage's behavior, prompt, or
+ * schema changed as part of this — only this one budget.
+ *
  * tests/synthesisCanonicalLoadTest.test.ts and
  * scripts/canonicalStrategyDiagnostic.ts (both opt-in, real API) exist
  * specifically to keep calibrating these; re-run them after any change
@@ -138,8 +156,8 @@ export const SYNTHESIS_MAX_OUTPUT_TOKENS = {
    * an accidental runaway generation.
    */
   canonical_strategy: 32768,
-  /** Pooled cross-strategy rule categories — less comparison-heavy than clustering (pooling already-canonicalized rules, not raw pairwise comparison). Kept at v2's 16384 — no evidence yet it's undersized. */
-  core_framework: 16384,
+  /** v6: RAISED from 16384 to 65536 after a real production dry run confirmed truncation at 16384 (output_tokens=15717, incomplete, ends_with_brace=false) — see the v6 changelog above. */
+  core_framework: 65536,
   /**
    * Raised to 65536 alongside canonical_strategy, though NOT yet directly
    * confirmed insufficient at 32768 by a real diagnostic run — this stage

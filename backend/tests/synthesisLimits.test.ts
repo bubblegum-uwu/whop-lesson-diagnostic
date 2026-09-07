@@ -10,8 +10,11 @@ import { SYNTHESIS_MAX_OUTPUT_TOKENS, CANONICAL_STRATEGY_THINKING_LEVEL } from "
  * thinking-level override confirmed by two real A/B/C diagnostic
  * comparisons (1-member and 2-member clusters) to produce identical
  * correctness at 33-40% lower cost, scoped to canonical_strategy only.
- * Guards against silently regressing these, and against any stage
- * silently exceeding the model's actual output-token ceiling.
+ * Also locks in the v6 revision — core_framework RAISED from 16384 to the
+ * documented ceiling after a real production dry run confirmed truncation
+ * there (see synthesis/limits.ts's changelog). Guards against silently
+ * regressing these, and against any stage silently exceeding the model's
+ * actual output-token ceiling.
  */
 const GEMINI_3_8_FLASH_MAX_OUTPUT_TOKENS = 65536;
 
@@ -29,8 +32,11 @@ describe("SYNTHESIS_MAX_OUTPUT_TOKENS", () => {
     expect(SYNTHESIS_MAX_OUTPUT_TOKENS.cluster_merge).toBe(32768);
   });
 
-  it("keeps core_framework/decision_framework unchanged — no evidence yet they're undersized", () => {
-    expect(SYNTHESIS_MAX_OUTPUT_TOKENS.core_framework).toBe(16384);
+  it("raises core_framework to the documented gemini-3.8-flash ceiling (v6) — a real production dry run confirmed truncation at the old 16384 (output_tokens=15717, incomplete, ends_with_brace=false)", () => {
+    expect(SYNTHESIS_MAX_OUTPUT_TOKENS.core_framework).toBe(GEMINI_3_8_FLASH_MAX_OUTPUT_TOKENS);
+  });
+
+  it("keeps decision_framework unchanged — no evidence yet it's undersized", () => {
     expect(SYNTHESIS_MAX_OUTPUT_TOKENS.decision_framework).toBe(16384);
   });
 
