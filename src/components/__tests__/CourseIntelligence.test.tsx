@@ -152,7 +152,7 @@ function baseSynthesisData(overrides: Partial<CourseSynthesisData> = {}): Course
       unverifiedUniversalClaims: [],
       scopedApplicabilityLeaks: [],
     },
-    decisionFramework: { nodes: [], readableSteps: ["Determine HTF context", "Manage the trade"], scopeLeaks: [] },
+    decisionFramework: { nodes: [], readableSteps: ["Determine HTF context", "Manage the trade"], scopeLeaks: [], readableStepLeaks: [] },
     ...overrides,
   };
 }

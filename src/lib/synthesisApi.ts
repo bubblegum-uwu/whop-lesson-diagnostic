@@ -311,6 +311,8 @@ export interface DecisionFramework {
   readableSteps: string[];
   /** Real-audit fix (Phase 3.5B v3) — deterministic post-check output: any entry here is a bug in the returned graph — either a scoped node structurally placed on the unconditional global path ("scoped_source"), or a substantive node citing no source at all ("ungrounded", never treated as global by default). Should be empty by construction. */
   scopeLeaks: { nodeId: string; label: string; reason: "ungrounded" | "unverified_source" | "scoped_source"; scope: KnowledgeItemScope }[];
+  /** Real-audit fix (v9, Part 3) — the `readableSteps` counterpart to `scopeLeaks`: a plain-text step whose wording closely echoes a known SCOPED ("scoped_mechanic") or UNVERIFIED ("unverified_mechanic") rule without deferring to the selected strategy's own rules. Participates in the same overall scope-fidelity PASS/FAIL as `scopeLeaks`. Should be empty by construction. */
+  readableStepLeaks: { stepIndex: number; step: string; reason: "scoped_mechanic" | "unverified_mechanic"; matchedNonGlobalRules: string[] }[];
 }
 
 export interface CourseSynthesisData {

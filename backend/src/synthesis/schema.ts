@@ -853,6 +853,28 @@ export const DecisionNodeScopeLeakSchema = z.object({
 });
 export type DecisionNodeScopeLeak = z.infer<typeof DecisionNodeScopeLeakSchema>;
 
+/**
+ * Real-audit fix (v9, Part 3) — `nodes` carry a deterministically-derived
+ * `scope`/`scopeBasis` (see `DecisionNodeScopeLeakSchema` above), but
+ * `readableSteps` are plain fallback-prose strings with NO audited scope
+ * metadata at all — a TENTH real dry run found real scope broadening living
+ * there even while `scopeLeaks` (the node-level check) read empty: a step
+ * required every strategy to use retest entry + candle-body-close
+ * confirmation + relative-strength confirmation, and a separate step
+ * required every strategy to use HOD/LOD-target scaling + trailing runners
+ * — mechanics that are real, but only for SOME canonical strategies, not
+ * "the process" as a whole. See decisionScopeAudit.ts's
+ * findReadableStepScopeLeaks for the deterministic check.
+ */
+export const DecisionReadableStepLeakSchema = z.object({
+  stepIndex: z.number().int().nonnegative(),
+  step: z.string(),
+  /** "scoped_mechanic" = the step's wording closely echoes a KNOWN SCOPED rule (a real, named restriction is being erased); "unverified_mechanic" = it echoes an UNVERIFIED rule (no proven course-wide applicability either). */
+  reason: z.enum(["scoped_mechanic", "unverified_mechanic"]),
+  matchedNonGlobalRules: z.array(z.string()),
+});
+export type DecisionReadableStepLeak = z.infer<typeof DecisionReadableStepLeakSchema>;
+
 export const DecisionFrameworkSchema = z.object({
   nodes: z.array(DecisionNodeSchema),
   readableSteps: z.array(z.string()),
@@ -865,6 +887,15 @@ export const DecisionFrameworkSchema = z.object({
    * in this codebase never silently drops what it can't confidently place.
    */
   scopeLeaks: z.array(DecisionNodeScopeLeakSchema).optional().default([]),
+  /**
+   * Real-audit fix (v9, Part 3) — the `readableSteps` counterpart to
+   * `scopeLeaks` above, computed by decisionScopeAudit.ts's
+   * findReadableStepScopeLeaks. Participates in the SAME overall PASS/FAIL
+   * calculation as `scopeLeaks` (see scripts/synthesisDryRun.ts) — a
+   * readable step is never exempt from scope fidelity merely because it's
+   * fallback prose rather than a graph node.
+   */
+  readableStepLeaks: z.array(DecisionReadableStepLeakSchema).optional().default([]),
 });
 export type DecisionFramework = z.infer<typeof DecisionFrameworkSchema>;
 

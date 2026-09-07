@@ -200,8 +200,13 @@ async function main(): Promise<void> {
       // "universalSectionScopeLeaks" gate (it fired on sections like
       // scoped_execution_checklists/conflicts_and_ambiguities that are
       // SUPPOSED to discuss scoped material) with three policy-aware
-      // categories — see playbookApplicabilityAudit.ts. The overall PASS
+      // categories — see playbookApplicabilityAudit.ts. v9 Part 3 adds
+      // decisionFramework.readableStepLeaks (see decisionScopeAudit.ts's
+      // findReadableStepScopeLeaks) to the SAME gate — readableSteps carried
+      // no audited scope metadata before, so a real leak there could sit
+      // undetected while every other count above read 0. The overall PASS
       // condition is decisionFramework.scopeLeaks=0 AND
+      // decisionFramework.readableStepLeaks=0 AND
       // universalApplicabilityLeaks=0 AND unverifiedUniversalClaims=0 AND
       // scopedApplicabilityLeaks=0 — it must NOT fail merely because a
       // scoped or conflict-documentation section contains scoped
@@ -209,13 +214,19 @@ async function main(): Promise<void> {
       // of these checks to make this line read PASS — a non-empty result
       // means real content needs fixing (prompt/pooling), not the detector.
       const decisionScopeLeakCount = result.decisionFramework.scopeLeaks.length;
+      const decisionReadableStepLeakCount = result.decisionFramework.readableStepLeaks.length;
       const universalApplicabilityLeakCount = result.playbook.universalApplicabilityLeaks.length;
       const unverifiedUniversalClaimCount = result.playbook.unverifiedUniversalClaims.length;
       const scopedApplicabilityLeakCount = result.playbook.scopedApplicabilityLeaks.length;
       const allChecksPass =
-        decisionScopeLeakCount === 0 && universalApplicabilityLeakCount === 0 && unverifiedUniversalClaimCount === 0 && scopedApplicabilityLeakCount === 0;
+        decisionScopeLeakCount === 0 &&
+        decisionReadableStepLeakCount === 0 &&
+        universalApplicabilityLeakCount === 0 &&
+        unverifiedUniversalClaimCount === 0 &&
+        scopedApplicabilityLeakCount === 0;
       console.log(
         `Scope-fidelity check: decisionFramework.scopeLeaks=${decisionScopeLeakCount}, ` +
+          `decisionFramework.readableStepLeaks=${decisionReadableStepLeakCount}, ` +
           `playbook.universalApplicabilityLeaks=${universalApplicabilityLeakCount}, ` +
           `playbook.unverifiedUniversalClaims=${unverifiedUniversalClaimCount}, ` +
           `playbook.scopedApplicabilityLeaks=${scopedApplicabilityLeakCount} — overall ${allChecksPass ? "PASS" : "FAIL — see the corresponding array(s) in the JSON output"}.`,

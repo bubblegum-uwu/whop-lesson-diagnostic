@@ -1,7 +1,8 @@
 import type { GeminiUsage } from "../gemini/client.js";
 import { callGeminiForStage, parseStageJson, validateStageData, type SynthesisStageDeps } from "./geminiStage.js";
-import { findGlobalGateScopeLeaks } from "./decisionScopeAudit.js";
+import { findGlobalGateScopeLeaks, findReadableStepScopeLeaks } from "./decisionScopeAudit.js";
 import { buildSynthesisSourcePool, resolveSourcePoolKeys, combineScopeBasis, type SourcePoolEntry } from "./synthesisSourcePool.js";
+import { collectNonGlobalRuleDescriptions } from "./frameworkScopeSplit.js";
 import {
   RAW_DECISION_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   RawDecisionFrameworkSchema,
@@ -49,9 +50,15 @@ export async function synthesizeDecisionFramework(
   const raw = validateStageData(STAGE, parsed, RawDecisionFrameworkSchema);
 
   const nodes: DecisionNode[] = raw.nodes.map((n) => enrichNode(n, byKey));
-  const scopeLeaks = findGlobalGateScopeLeaks({ nodes, readableSteps: raw.readableSteps, scopeLeaks: [] });
+  const scopeLeaks = findGlobalGateScopeLeaks({ nodes, readableSteps: raw.readableSteps, scopeLeaks: [], readableStepLeaks: [] });
+  // Real-audit fix (v9, Part 3) — the same non-global rule pool already built for the prompt
+  // above (SCOPED/UNVERIFIED entries from CoreFramework + every canonical strategy) is reused
+  // here to audit readableSteps, the one part of this stage's output that carried no scope
+  // metadata at all until now. See decisionScopeAudit.ts's findReadableStepScopeLeaks.
+  const nonGlobalRules = collectNonGlobalRuleDescriptions(coreFramework, canonicalStrategies);
+  const readableStepLeaks = findReadableStepScopeLeaks(raw.readableSteps, nonGlobalRules);
 
-  const decisionFramework = validateStageData(STAGE, { nodes, readableSteps: raw.readableSteps, scopeLeaks }, DecisionFrameworkSchema);
+  const decisionFramework = validateStageData(STAGE, { nodes, readableSteps: raw.readableSteps, scopeLeaks, readableStepLeaks }, DecisionFrameworkSchema);
   return { decisionFramework, usage };
 }
 

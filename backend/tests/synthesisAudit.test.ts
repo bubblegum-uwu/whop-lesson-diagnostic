@@ -1158,7 +1158,7 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
     expect(result.scopedApplicabilityLeaks).toEqual([]);
   });
 
-  it("DESCRIPTIVE_MIXED policy (e.g. risk_management): a section whose OWN derived scopeBasis is SCOPED, using absolute-claim language, is a universalApplicabilityLeak — the primary provenance signal, independent of vocabulary/word-overlap", async () => {
+  it("real-audit fix (v9): DESCRIPTIVE_MIXED policy (e.g. risk_management) — a section is NOT flagged merely because its own derived scopeBasis is SCOPED, with no actual matched non-global rule (aggregate ownBasis alone is no longer an independent trigger — see v9's top doc comment)", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
     const result = findPlaybookApplicabilityLeaks(
       [
@@ -1170,13 +1170,34 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
           applicabilityPolicy: "DESCRIPTIVE_MIXED",
         },
       ],
-      new Set(), // deliberately empty — proves this fires from provenance (scopeBasis), not vocabulary
+      new Set(), // no matching nonGlobalRules passed — nothing for the sentence to actually overlap
     );
-    expect(result.universalApplicabilityLeaks).toHaveLength(1);
-    expect(result.universalApplicabilityLeaks[0].sectionKey).toBe("risk_management");
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
   });
 
-  it("DESCRIPTIVE_MIXED policy: a section whose OWN derived scopeBasis is UNVERIFIED, using absolute-claim language, is an unverifiedUniversalClaim (not a universalApplicabilityLeak)", async () => {
+  it("DESCRIPTIVE_MIXED policy: a section is flagged as an unverifiedUniversalClaim when a specific absolute-claim sentence closely matches a known UNVERIFIED rule and states no local qualifier", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [{ description: "Confirm Intraday Fundamentals and QQQ/SPY relative strength before entering.", basis: "UNVERIFIED" as const }];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "market_context_regime",
+          content: "Always confirm Intraday Fundamentals and QQQ/SPY relative strength before every trade.",
+          scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "UNVERIFIED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+      nonGlobalRules,
+    );
+    expect(result.unverifiedUniversalClaims).toHaveLength(1);
+    expect(result.unverifiedUniversalClaims[0].sectionKey).toBe("market_context_regime");
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+  });
+
+  it("real-audit fix (v9): DESCRIPTIVE_MIXED policy — a section is NOT flagged merely because its own derived scopeBasis is UNVERIFIED, with no actual matched non-global rule", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
     const result = findPlaybookApplicabilityLeaks(
       [
@@ -1190,8 +1211,7 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
       ],
       new Set(),
     );
-    expect(result.unverifiedUniversalClaims).toHaveLength(1);
-    expect(result.unverifiedUniversalClaims[0].sectionKey).toBe("market_context_regime");
+    expect(result.unverifiedUniversalClaims).toEqual([]);
     expect(result.universalApplicabilityLeaks).toEqual([]);
   });
 
@@ -1250,8 +1270,9 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
     expect(result.unverifiedUniversalClaims).toEqual([]);
   });
 
-  it("real-audit fix (v6), do-not-weaken check: DESCRIPTIVE_MIXED strategy_variants with ownBasis SCOPED that does NOT name its own declared scope anywhere in the prose IS still flagged — the suppression only applies when the section actually discloses its own scope", async () => {
+  it("real-audit fix (v9), do-not-weaken check: DESCRIPTIVE_MIXED strategy_variants with a specific sentence that does NOT name its own declared scope and closely matches a known SCOPED rule IS still flagged", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [{ description: "Wait for candle close before entry on every trade.", basis: "SCOPED" as const }];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
@@ -1263,19 +1284,20 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
         },
       ],
       new Set(),
+      nonGlobalRules,
     );
     expect(result.universalApplicabilityLeaks).toHaveLength(1);
     expect(result.universalApplicabilityLeaks[0].sectionKey).toBe("strategy_variants");
   });
 
-  it("real-audit fix (v6), do-not-weaken check: a strategy_variants section naming its OWN parent strategy is still flagged when it separately overlaps a DIFFERENT, undisclosed non-global rule's text (matchedScopedRules is untouched by the ownBasis suppression)", async () => {
+  it("real-audit fix (v9), do-not-weaken check: a strategy_variants section naming its OWN parent strategy in one sentence is still flagged when a SEPARATE sentence overlaps a DIFFERENT, undisclosed non-global rule's text without stating its own applicability (matchedScopedRules stays fully sensitive per-sentence — local qualification only defeats the leak for the sentence it actually appears in)", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
     const nonGlobalRules = [{ description: "Wait for the 84% re-entry confirmation before adding to a runner position.", basis: "SCOPED" as const }];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
           key: "strategy_variants",
-          content: "For the Inside Bar strategy: always wait for the 84% re-entry confirmation before adding to a runner position on every trade.",
+          content: "This mechanic belongs specifically to the Inside Bar strategy. Always wait for the 84% re-entry confirmation before adding to a runner position on every trade.",
           scope: { strategies: ["Inside Bar"], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
           scopeBasis: "SCOPED",
           applicabilityPolicy: "DESCRIPTIVE_MIXED",
@@ -1290,29 +1312,30 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
 });
 
 /**
- * SIXTH real-data audit regression tests (Phase 3.5B v7, corrected in v8) —
- * see PR #13's sixth real 28-lesson dry-run audit. Four DESCRIPTIVE_MIXED
- * sections (key_levels, setup_selection, risk_management, target_selection)
- * were false-positive-flagged for the same underlying reason: each mixes a
- * genuinely VERIFIED_GLOBAL rule with properly-qualified SCOPED material,
- * and combineScopeBasis's "SCOPED dominates" priority (correct for the
- * union `scope` itself) made the section's AGGREGATE `scopeBasis` read
- * "SCOPED" even though the specific absolute claim in question is
- * independently globally backed.
+ * SIXTH real-data audit regression tests (Phase 3.5B v7, corrected in
+ * v8/v9) — see PR #13's sixth real 28-lesson dry-run audit. Four
+ * DESCRIPTIVE_MIXED sections (key_levels, setup_selection,
+ * risk_management, target_selection) were false-positive-flagged for the
+ * same underlying reason: each mixes a genuinely VERIFIED_GLOBAL rule with
+ * properly-qualified SCOPED material, and combineScopeBasis's "SCOPED
+ * dominates" priority (correct for the union `scope` itself) made the
+ * section's AGGREGATE `scopeBasis` read "SCOPED" even though the specific
+ * absolute claim in question is independently globally backed.
  *
- * v7's fix (a section-level `hasIndependentGlobalEvidence` flag) itself
- * caused a real false NEGATIVE (market_context_regime, see the v8 describe
- * block below) by excusing a genuinely non-global sentence merely because
- * the section also cited something global elsewhere. v8 replaces it with
- * SENTENCE-level matching against a real `globalRules` pool (mirroring
- * `nonGlobalRules`) — these tests now pass the actual global rule
- * descriptions each false-positive section's genuinely-global sentence
- * should match, instead of a section-level boolean.
+ * v7's fix (a section-level `hasIndependentGlobalEvidence` flag) caused a
+ * real false NEGATIVE (market_context_regime, see the v8/v9 describe block
+ * below). v8 replaced it with sentence-level matching against a
+ * `globalRules` pool; v9 found THAT could also suppress a real leak (a
+ * sentence mixing an erased restriction with genuinely global wording) and
+ * removed it entirely (see playbookApplicabilityAudit.ts's top doc
+ * comment) — as of v9, mechanism A only ever flags a sentence when it
+ * ACTUALLY overlaps a specific known SCOPED/UNVERIFIED rule, so these four
+ * sections are correctly unflagged simply because no such rule is passed
+ * (or, for target_selection, because every claim is locally qualified).
  */
 describe("Real-audit v7/v8 — DESCRIPTIVE_MIXED sections mixing genuinely global evidence with properly-qualified scoped material are not false-positive-flagged", () => {
-  it("real false positive: key_levels — the polarity-inversion claim matches a known VERIFIED_GLOBAL rule description; unrelated, properly-qualified SCOPED chase/stop rules do not universalize the section", async () => {
+  it("real false positive: key_levels — the polarity-inversion claim has no matching non-global rule (empty pool); unrelated, properly-qualified SCOPED chase/stop rules do not universalize the section", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
-    const globalRules = [{ description: "A broken key level that gets retested always acts as polarity-inverted support or resistance." }];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
@@ -1322,21 +1345,18 @@ describe("Real-audit v7/v8 — DESCRIPTIVE_MIXED sections mixing genuinely globa
             "For options day trading, never chase price more than 0.5% beyond the level. " +
             "Scalpers should tighten stops to the nearest micro key level.",
           scope: { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: ["scalper"] },
-          scopeBasis: "SCOPED", // combineScopeBasis: SCOPED dominates once ANY citation is scoped, even with an independently-global one also present
+          scopeBasis: "SCOPED", // combineScopeBasis: SCOPED dominates once ANY citation is scoped, even with an independently-global one also present — no longer used as a trigger at all (v9)
           applicabilityPolicy: "DESCRIPTIVE_MIXED",
         },
       ],
       new Set(["options", "scalper"]),
-      [],
-      globalRules,
     );
     expect(result.universalApplicabilityLeaks).toEqual([]);
     expect(result.unverifiedUniversalClaims).toEqual([]);
   });
 
-  it("real false positive: setup_selection — the narrow-specialization claim matches a known VERIFIED_GLOBAL rule description; beginner/experienced counts are explicitly qualified in prose", async () => {
+  it("real false positive: setup_selection — the narrow-specialization claim has no matching non-global rule; beginner/experienced counts are explicitly qualified in prose", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
-    const globalRules = [{ description: "Every trader should always specialize narrowly in a small set of setups rather than trading everything." }];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
@@ -1351,16 +1371,13 @@ describe("Real-audit v7/v8 — DESCRIPTIVE_MIXED sections mixing genuinely globa
         },
       ],
       new Set(["beginner", "experienced"]),
-      [],
-      globalRules,
     );
     expect(result.universalApplicabilityLeaks).toEqual([]);
     expect(result.unverifiedUniversalClaims).toEqual([]);
   });
 
-  it("real false positive: risk_management — the 2R claim matches a known VERIFIED_GLOBAL rule description; beginner/options/scalping rules are explicitly labeled as such in prose", async () => {
+  it("real false positive: risk_management — the 2R claim has no matching non-global rule; beginner/options/scalping rules are explicitly labeled as such in prose", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
-    const globalRules = [{ description: "Whenever you're trading, what you always want is at least a two R multiple." }];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
@@ -1375,8 +1392,6 @@ describe("Real-audit v7/v8 — DESCRIPTIVE_MIXED sections mixing genuinely globa
         },
       ],
       new Set(["options", "beginner", "scalper"]),
-      [],
-      globalRules,
     );
     expect(result.universalApplicabilityLeaks).toEqual([]);
     expect(result.unverifiedUniversalClaims).toEqual([]);
@@ -1405,10 +1420,9 @@ describe("Real-audit v7/v8 — DESCRIPTIVE_MIXED sections mixing genuinely globa
     expect(result.unverifiedUniversalClaims).toEqual([]);
   });
 
-  it("do-not-weaken check: a section with a genuinely global sentence elsewhere is still flagged when its OWN scoped material is separately paraphrased as universal (matchedScopedRules stays fully sensitive — the global-rule match only excuses the SPECIFIC sentence it actually matches)", async () => {
+  it("do-not-weaken check: a single sentence combining an erased restriction with genuinely global wording is still flagged (a real non-global match always wins, regardless of whether the SAME sentence also reads as globally backed)", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
     const nonGlobalRules = [{ description: "Beginner options traders should risk no more than 1% of account equity on every trade.", basis: "SCOPED" as const }];
-    const globalRules = [{ description: "Target at least a two R multiple on every trade." }];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
@@ -1421,7 +1435,6 @@ describe("Real-audit v7/v8 — DESCRIPTIVE_MIXED sections mixing genuinely globa
       ],
       new Set(),
       nonGlobalRules,
-      globalRules,
     );
     expect(result.universalApplicabilityLeaks).toHaveLength(1);
     expect(result.universalApplicabilityLeaks[0].matchedNonGlobalRules).toEqual([nonGlobalRules[0].description]);
@@ -1497,7 +1510,6 @@ describe("Real-audit v8 — sentence-level matching catches real leaks the secti
           scope: { strategies: [], marketsOrInstruments: ["equities"], timeframes: [], sessions: ["9:30-11:00"], traderProfiles: [] },
           scopeBasis: "SCOPED",
           applicabilityPolicy: "DESCRIPTIVE_MIXED",
-          // NO globalRules passed at all — this section has no independently-global partition backing this claim.
         },
       ],
       new Set(["equities", "9:30-11:00"]),
@@ -1508,14 +1520,21 @@ describe("Real-audit v8 — sentence-level matching catches real leaks the secti
     expect(result.universalApplicabilityLeaks[0].matchedNonGlobalRules).toEqual([nonGlobalRules[0].description]);
   });
 
-  it("real leak: pre_market_preparation generic daily/premarket routine stated as an absolute requirement with no qualifying scope and no matching global evidence", async () => {
+  it("real leak (v9 exact wording): pre_market_preparation — 'As a general baseline, traders conduct top-down macro analysis' followed by scoped intraday/premarket mechanics (PMH/PML, 1h/5m ETH, IBKR Book Trader/hotkeys, QQQ/SPY) is flagged: the generalizing preamble is not locally qualified to the scoped workflow it introduces", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
-    const nonGlobalRules = [{ description: "Every morning, review the overnight session and mark key levels before the open.", basis: "UNVERIFIED" as const }];
+    const nonGlobalRules = [
+      {
+        description:
+          "As a general baseline, traders conduct top-down macro analysis, marking PMH/PML on the 1h and 5m ETH chart and using IBKR's Book Trader and hotkeys to prepare QQQ/SPY watchlists before the open.",
+        basis: "UNVERIFIED" as const,
+      },
+    ];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
           key: "pre_market_preparation",
-          content: "Every morning, review the overnight session and mark key levels before the open, checking economic calendar events and news catalysts.",
+          content:
+            "As a general baseline, traders conduct top-down macro analysis, marking PMH/PML on the 1h and 5m ETH chart and using IBKR's Book Trader and hotkeys to prepare QQQ/SPY watchlists before the open.",
           scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
           scopeBasis: "UNVERIFIED",
           applicabilityPolicy: "DESCRIPTIVE_MIXED",
@@ -1527,33 +1546,40 @@ describe("Real-audit v8 — sentence-level matching catches real leaks the secti
     expect(result.universalApplicabilityLeaks.length + result.unverifiedUniversalClaims.length).toBeGreaterThan(0);
   });
 
-  it("real leak: higher_timeframe_framework 'anchors all trade execution' stated as an absolute requirement with SCOPED evidence and no local qualifier or matching global evidence", async () => {
+  it("real leak (v9 exact wording): higher_timeframe_framework — 'the framework dictates lower-timeframe execution' and '1h/4h are used exclusively for thesis and never execution' — not valid for every strategy/timeframe (swing/higher-timeframe strategies execute directly off 1h/4h) — flagged with no local qualifier and only SCOPED matching evidence", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
-    const nonGlobalRules = [{ description: "The weekly-to-1m top-down framework anchors trade execution for the multi-timeframe strategies.", basis: "SCOPED" as const }];
+    // Deliberately no scope/scopeVocabulary overlap with the leak sentence's own wording — the
+    // section names its OWN topic ("1h/4h") but that is not, by itself, a stated qualifier for
+    // the SEPARATE claim that the framework "dictates" lower-timeframe execution for every
+    // strategy (a claim about applicability BEYOND the intraday multi-timeframe workflow, not a
+    // restriction of it).
+    const nonGlobalRules = [
+      { description: "For the intraday multi-timeframe strategies, the framework dictates lower-timeframe execution; 1h/4h are used exclusively for thesis and never execution.", basis: "SCOPED" as const },
+    ];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
           key: "higher_timeframe_framework",
-          content: "This weekly-to-1m top-down analysis framework anchors all trade execution decisions across the course.",
-          scope: { strategies: [], marketsOrInstruments: [], timeframes: ["weekly", "1m"], sessions: [], traderProfiles: [] },
-          scopeBasis: "SCOPED",
+          content: "The framework dictates lower-timeframe execution, and 1h/4h are used exclusively for thesis and never execution.",
           applicabilityPolicy: "DESCRIPTIVE_MIXED",
         },
       ],
-      new Set(["weekly", "1m"]),
+      new Set(),
       nonGlobalRules,
     );
     expect(result.universalApplicabilityLeaks).toHaveLength(1);
   });
 
-  it("real leak: trade_management generic 50-80% scale-out / runner progression stated as an absolute requirement with SCOPED evidence, no local qualifier, no matching global evidence", async () => {
+  it("real leak (v9 exact wording): trade_management — 'Traders must always scale out' 50%-80% at the first target with 10%-20% runners is flagged: scaling mechanics are scoped to intraday/momentum contexts, not course-wide mechanics, with no local qualifier and only SCOPED/UNVERIFIED matching evidence", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
-    const nonGlobalRules = [{ description: "For momentum day trading, scale out 50% to 80% of the position and let the remainder run as a runner.", basis: "UNVERIFIED" as const }];
+    const nonGlobalRules = [
+      { description: "For intraday momentum trades, traders should scale out 50% to 80% of the position at the first target, letting the remaining 10% to 20% run as a runner.", basis: "UNVERIFIED" as const },
+    ];
     const result = findPlaybookApplicabilityLeaks(
       [
         {
           key: "trade_management",
-          content: "Every position should always scale out 50% to 80% at the first target, letting the remainder run as a runner.",
+          content: "Traders must always scale out 50% to 80% of the position at the first target, letting the remaining 10% to 20% run as a runner.",
           scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
           scopeBasis: "UNVERIFIED",
           applicabilityPolicy: "DESCRIPTIVE_MIXED",
@@ -1597,6 +1623,157 @@ describe("Real-audit v8 — sentence-level matching catches real leaks the secti
         },
       ],
       new Set(),
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+  });
+
+  it("confirmation_framework must remain accepted (v9 required outcome) once it explicitly names ALL THREE exceptions — Inside Bar, Trendline Break, and ORB — not just Inside Bar alone (real matching SCOPED rule included, proving qualification defeats the leak rather than an empty rule pool)", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [{ description: "Always wait for candle closure to confirm structural respect or rejection before entering a position.", basis: "SCOPED" as const }];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "confirmation_framework",
+          content:
+            "For setups other than the Inside Bar's resting buy-stop/sell-stop direct entry, the Trendline Break's break-of-trendline direct entry, and the ORB's opening-range-break direct entry, " +
+            "always wait for candle closure to confirm structural respect or rejection before entering a position.",
+          scope: { strategies: ["Inside Bar", "Trendline Break", "ORB"], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+      nonGlobalRules,
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+  });
+});
+
+/**
+ * Real-audit v9, Part 2 (remaining coverage) — the four required real
+ * no-leak sections not yet exercised by a dedicated test (course_philosophy,
+ * entry_framework, common_mistakes_warnings — target_selection/setup_selection/
+ * key_levels/risk_management/strategy_variants/confirmation_framework already
+ * covered above), plus the ONE remaining real leak (no_trade_conditions) whose
+ * underlying mechanism (B: collection-declaration) had zero test coverage
+ * anywhere in this file until now.
+ */
+describe("Real-audit v9 — remaining required no-leak sections and the no_trade_conditions collection-declaration leak (mechanism B)", () => {
+  it("no-leak: course_philosophy — general course framing/philosophy prose with no unqualified absolute rule matching any SCOPED/UNVERIFIED evidence", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "course_philosophy",
+          content:
+            "This course teaches a structured, evidence-based approach to reading price action and market structure. " +
+            "The goal is to build a repeatable process for evaluating setups rather than trading on impulse.",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+      [],
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+  });
+
+  it("no-leak: entry_framework must remain accepted (v9 required outcome) — it explicitly states a default for breakout/continuation setups and then names the direct-entry exceptions", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [
+      { description: "For breakout and continuation setups, wait for a confirmed retest before entering.", basis: "SCOPED" as const },
+    ];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "entry_framework",
+          content:
+            "By default, for breakout and continuation setups, always wait for a confirmed retest before entering. " +
+            "The Inside Bar, Trendline Break, and ORB strategies are direct-entry exceptions to this default and do not require a retest.",
+          scope: { strategies: ["breakout", "continuation"], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+      nonGlobalRules,
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+  });
+
+  it("no-leak: common_mistakes_warnings — cautionary prose describing frequently observed mistakes, phrased as observations/warnings rather than unqualified universal rules", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [
+      { description: "For momentum day trading, chasing an extended move without a pullback is a common mistake.", basis: "UNVERIFIED" as const },
+    ];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "common_mistakes_warnings",
+          content:
+            "A common mistake in momentum day trading is chasing an extended move without waiting for a pullback. " +
+            "Traders are cautioned to size positions appropriately for the volatility of the specific instrument being traded.",
+          scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "UNVERIFIED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+      nonGlobalRules,
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+  });
+
+  it("real leak (v9 exact wording, mechanism B): no_trade_conditions — 'The following explicit no-trade filters govern all playbook operations' declares a universal collection, but the list contains scoped rules (mandatory retests, 9:30-11:00 cutoff, VWAP directional rules, stock 'In Play', HOD/LOD-specific mechanics) — flagged via the collection-declaration sentence, not per-sentence absolute-claim matching", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [
+      { description: "A mandatory retest of the flipped level is required before entry.", basis: "SCOPED" as const },
+      { description: "No new trades may be initiated outside the 9:30 to 11:00 AM session window.", basis: "SCOPED" as const },
+      { description: "Directional bias must respect VWAP as support or resistance before entry.", basis: "SCOPED" as const },
+      { description: "The stock must be classified as 'In Play' with elevated relative volume before a setup qualifies.", basis: "SCOPED" as const },
+      { description: "HOD/LOD-specific mechanics govern when scaling out of a momentum position.", basis: "UNVERIFIED" as const },
+    ];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "no_trade_conditions",
+          content:
+            "The following explicit no-trade filters govern all playbook operations: " +
+            "a mandatory retest of the flipped level is required before entry; " +
+            "no new trades may be initiated outside the 9:30 to 11:00 AM session window; " +
+            "directional bias must respect VWAP as support or resistance before entry; " +
+            "the stock must be classified as 'In Play' with elevated relative volume before a setup qualifies; " +
+            "and HOD/LOD-specific mechanics govern when scaling out of a momentum position.",
+          scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "UNVERIFIED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+      nonGlobalRules,
+    );
+    expect(result.universalApplicabilityLeaks.length + result.unverifiedUniversalClaims.length).toBeGreaterThan(0);
+    expect(result.universalApplicabilityLeaks.some((leak) => leak.sectionKey === "no_trade_conditions") || result.unverifiedUniversalClaims.some((leak) => leak.sectionKey === "no_trade_conditions")).toBe(true);
+  });
+
+  it("no_trade_conditions is NOT flagged once the collection-declaration sentence is removed and each filter is qualified by its own scope individually, with a genuinely universal rule kept separate", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "no_trade_conditions",
+          content:
+            "For setups requiring a retest, a mandatory retest of the flipped level is required before entry. " +
+            "For intraday momentum strategies, no new trades may be initiated outside the 9:30 to 11:00 AM session window. " +
+            "Never risk more than the predefined stop-loss amount on any single trade.",
+          scope: { strategies: [], marketsOrInstruments: [], timeframes: [], sessions: ["9:30-11:00"], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(["9:30-11:00"]),
+      [],
     );
     expect(result.universalApplicabilityLeaks).toEqual([]);
   });
@@ -2320,6 +2497,169 @@ describe("Real-audit v8 — VERIFIED_GLOBAL requires POSITIVE proof of universal
   });
 });
 
+/**
+ * EIGHTH real-data audit regression tests (Phase 3.5B v9) — see PR #13's
+ * eighth real 28-lesson dry-run audit. The v8 multi-lesson positive-proof
+ * path itself was exploitable: a candle-color/hide-P&L rule stayed
+ * VERIFIED_GLOBAL because it cited TWO structurally unscoped KnowledgeItems
+ * from two distinct lessons, even though both citations' own statements
+ * openly limit the recommendation to a subset of traders ("A lot of people
+ * don't like the green and red...", "Me personally...", "Some people cannot
+ * actually bear to see a red candlestick...", "people that are scared of
+ * candlesticks..."). scopeBasis.ts's containsConditionalEvidenceLanguage
+ * closes this gap: such a citation no longer counts toward the required
+ * ">=2 distinct lessons," though it is never deleted and the base
+ * scopeBasis computation is otherwise unaffected.
+ */
+describe("Real-audit v9 — conditional/subset/preference evidence language does not count toward the multi-lesson positive-proof path", () => {
+  it("real failure: candle-color/hide-P&L rule cited from two distinct lessons, both structurally unscoped but each textually limited to a subset of traders => NOT VERIFIED_GLOBAL", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 8,
+        lessonTitle: "Lesson 8",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: [
+            makeKnowledgeItem({
+              statement: "A lot of people don't like the green and red candles, so consider neutral chart colors. Me personally, I find it helps to hide live P&L too.",
+              scope: emptyScope(),
+            }),
+          ],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+      {
+        analysisId: 2,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: [
+            makeKnowledgeItem({
+              statement: "Some people cannot actually bear to see a red candlestick, and people that are scared of candlesticks should switch to neutral tones and hide their live P&L.",
+              scope: emptyScope(),
+            }),
+          ],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "risk_management",
+                  title: "Risk Management",
+                  rules: [
+                    {
+                      description: "Alleviate visual emotional triggers by changing chart candle colors away from traditional green/red to neutral tones, and consider hiding live P&L to reduce emotional decision-making.",
+                      classification: "explicit",
+                      supportLevel: "MULTI_SOURCE",
+                      supportCount: 2,
+                      sourceKeys: ["k1", "k2"],
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], normalized.globalItems);
+    expect(coreFramework.sections[0].rules[0].scopeBasis).not.toBe("VERIFIED_GLOBAL");
+  });
+
+  it("do-not-delete-evidence check: the filtered citations' numerical values/exceptions still survive in the output even though the rule is downgraded", async () => {
+    const { aggregateScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    const itemA = makeKnowledgeItem({ statement: "A lot of people find it helpful to use neutral candle colors.", scope: emptyScope(), exceptions: ["skip if colorblind-friendly palette already in use"] });
+    const itemB = makeKnowledgeItem({ statement: "Some people cannot bear to see a red candlestick.", scope: emptyScope() });
+    const result = aggregateScopeBasis(["k1", "k2"], (key) => {
+      if (key === "k1") return { item: itemA, lessonId: 8 };
+      if (key === "k2") return { item: itemB, lessonId: 10 };
+      return undefined;
+    });
+    expect(result.unscopedEvidenceLessonIds).toEqual([]);
+    expect(result.exceptions).toContain("skip if colorblind-friendly palette already in use");
+  });
+
+  it("mixed case: one conditional-language citation and one genuinely broad citation from a DIFFERENT lesson still only count as 1 distinct broad lesson => NOT enough alone for the multi-lesson path", async () => {
+    const { aggregateScopeBasis, finalizeScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    const conditionalItem = makeKnowledgeItem({ statement: "A lot of people prefer neutral chart colors.", scope: emptyScope() });
+    const broadItem = makeKnowledgeItem({ statement: "Reducing visual stress improves decision quality during live trading.", scope: emptyScope() });
+    const result = aggregateScopeBasis(["k1", "k2"], (key) => {
+      if (key === "k1") return { item: conditionalItem, lessonId: 8 };
+      if (key === "k2") return { item: broadItem, lessonId: 15 };
+      return undefined;
+    });
+    expect(result.unscopedEvidenceLessonIds).toEqual([15]);
+    expect(
+      finalizeScopeBasis("VERIFIED_GLOBAL", "Reduce visual stress to improve decision quality.", undefined, result.unscopedEvidenceLessonIds, result.citationHadPositiveLanguage),
+    ).toBe("UNVERIFIED");
+  });
+
+  it("explicit genuine universal language still satisfies the explicit-universal path even when OTHER citations carry conditional language", async () => {
+    const { containsConditionalEvidenceLanguage, containsExplicitPositiveUniversalLanguage } = await import("../src/synthesis/scopeBasis.js");
+    expect(containsConditionalEvidenceLanguage("A lot of people find this helpful, but personally I always do it on every trade.")).toBe(true);
+    expect(containsExplicitPositiveUniversalLanguage("A lot of people find this helpful, but personally I always do it on every trade.")).toBe(true);
+  });
+
+  it("re-confirms the previous real failures remain NOT VERIFIED_GLOBAL after this fix: candle-close rule, HOD/LOD scaling rule, 25%-50% starter-size rule", async () => {
+    const { finalizeScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    expect(finalizeScopeBasis("VERIFIED_GLOBAL", "Always wait for candle closure to confirm structural respect or rejection before entering a position.", undefined, [10], false)).toBe("UNVERIFIED");
+    expect(
+      finalizeScopeBasis(
+        "VERIFIED_GLOBAL",
+        "Scale out partial profits at the initial key structural liquidity level, such as session High of Day for longs or Low of Day for shorts.",
+        undefined,
+        [10],
+        false,
+      ),
+    ).toBe("UNVERIFIED");
+    expect(finalizeScopeBasis("VERIFIED_GLOBAL", "When taking early or feeling-out entries, use a starter position of 25% to 50% of your normal size.", undefined, [10], false)).toBe("UNVERIFIED");
+  });
+
+  it("genuine 2R rule remains VERIFIED_GLOBAL after this fix: two distinct lessons, neither carrying conditional/subset language", async () => {
+    const { finalizeScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    expect(
+      finalizeScopeBasis("VERIFIED_GLOBAL", "Whenever you're trading, what you always want is at least a two R multiple.", undefined, [10, 11], false),
+    ).toBe("VERIFIED_GLOBAL");
+  });
+
+  it("Master Checklist invariant (v9): independently rejects a rule whose sources' quoted evidence carries only conditional/subset language, even across 2 distinct lessons", async () => {
+    const { assertMasterChecklistSourcesGlobal } = await import("../src/synthesis/runSynthesis.js");
+    const { SynthesisInvariantError } = await import("../src/synthesis/errors.js");
+    const conditionalRule = {
+      description: "Alleviate visual emotional triggers by changing chart candle colors to neutral tones and hiding live P&L.",
+      classification: "explicit" as const,
+      supportLevel: "MULTI_SOURCE" as const,
+      supportCount: 2,
+      sources: [
+        { lessonId: 8, lessonTitle: "L8", strategyInstanceId: null, startTimestamp: null, endTimestamp: null, evidence: "A lot of people don't like the green and red candles." },
+        { lessonId: 10, lessonTitle: "L10", strategyInstanceId: null, startTimestamp: null, endTimestamp: null, evidence: "Some people cannot actually bear to see a red candlestick." },
+      ],
+      conflictSources: [],
+      exceptions: [],
+      numericalValues: [],
+      scope: null,
+      scopeBasis: "VERIFIED_GLOBAL" as const, // incorrectly set upstream
+    };
+    expect(() => assertMasterChecklistSourcesGlobal([conditionalRule])).toThrow(SynthesisInvariantError);
+  });
+});
+
 describe("Real-audit v4, Proof 2 — the 2R rule resolves from real evidence, never forced to scope:null", () => {
   it("a 2R rule cited from an options/beginner-scoped KnowledgeItem preserves that exact scope and SCOPED basis through CoreFramework", async () => {
     const knowledgeSources: LessonKnowledgeSource[] = [
@@ -2467,6 +2807,142 @@ describe("Real-audit v4, Proof 1 (decision framework) — an UNVERIFIED pre-stra
     const leaks = findGlobalGateScopeLeaks(unconditionalPlacement as never);
     expect(leaks).toHaveLength(1);
     expect(leaks[0].reason).toBe("unverified_source");
+  });
+});
+
+/**
+ * Real-audit v9, Part 3 — decisionScopeAudit.ts's findReadableStepScopeLeaks
+ * extends the existing decision-framework scope-fidelity audit to also
+ * validate `readableSteps` (previously audited ONLY at the node level, per
+ * findGlobalGateScopeLeaks above), catching real scope broadening that lived
+ * entirely in the plain-text fallback walkthrough while decisionFramework.
+ * scopeLeaks read 0. Uses the exact real Step 5/Step 8 wording quoted from
+ * the latest real-data audit.
+ */
+describe("Real-audit v9, Part 3 — findReadableStepScopeLeaks catches real scope broadening in readableSteps that the node-level audit misses entirely", () => {
+  it("real failure: Step 5 — 'Evaluate the specific setup's rules: verify boundary break and displacement, require a clean pullback/retest of flipped structure, confirm...candle body closures, and verify relative strength...' is flagged — retest entry, candle-close confirmation, and relative-strength confirmation are NOT universal across every canonical strategy", async () => {
+    const { findReadableStepScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
+    const nonGlobalRules = [
+      {
+        description: "Require a clean pullback/retest of the flipped structure, confirm the setup with candle body closures, and verify relative strength before entering.",
+        basis: "SCOPED" as const,
+      },
+    ];
+    const leaks = findReadableStepScopeLeaks(
+      [
+        "Evaluate the specific setup's rules: verify boundary break and displacement, require a clean pullback/retest of flipped structure, confirm the setup with candle body closures, and verify relative strength before entering.",
+      ],
+      nonGlobalRules,
+    );
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0]).toMatchObject({ stepIndex: 0, reason: "scoped_mechanic" });
+    expect(leaks[0].matchedNonGlobalRules).toEqual([nonGlobalRules[0].description]);
+  });
+
+  it("real failure: Step 8 — 'Scale out partial profits at the initial structural target (such as HOD/LOD or pre-market extremes) and trail runners...' is flagged — HOD/LOD-target scaling and trailing runners are scoped intraday/momentum trade-management mechanics, not universal exit behavior", async () => {
+    const { findReadableStepScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
+    const nonGlobalRules = [
+      {
+        description: "Scale out partial profits at the initial structural target such as HOD/LOD or pre-market extremes and trail runners on the remaining position.",
+        basis: "UNVERIFIED" as const,
+      },
+    ];
+    const leaks = findReadableStepScopeLeaks(
+      ["Scale out partial profits at the initial structural target (such as HOD/LOD or pre-market extremes) and trail runners on the remaining position."],
+      nonGlobalRules,
+    );
+    expect(leaks).toHaveLength(1);
+    expect(leaks[0]).toMatchObject({ stepIndex: 0, reason: "unverified_mechanic" });
+  });
+
+  it("both real failures found together in a realistic multi-step walkthrough, with the correctly-global steps around them left unflagged", async () => {
+    const { findReadableStepScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
+    const nonGlobalRules = [
+      { description: "Require a clean pullback/retest of the flipped structure, confirm the setup with candle body closures, and verify relative strength before entering.", basis: "SCOPED" as const },
+      { description: "Scale out partial profits at the initial structural target such as HOD/LOD or pre-market extremes and trail runners on the remaining position.", basis: "UNVERIFIED" as const },
+    ];
+    const steps = [
+      "Determine the higher-timeframe context and market regime before looking for a setup.",
+      "Identify key levels the market is likely to react to.",
+      "Determine which canonical strategy, if any, applies to the current setup.",
+      "Evaluate the specific setup's rules: verify boundary break and displacement, require a clean pullback/retest of flipped structure, confirm the setup with candle body closures, and verify relative strength before entering.",
+      "Define the invalidation level and initial stop-loss before entering.",
+      "Scale out partial profits at the initial structural target (such as HOD/LOD or pre-market extremes) and trail runners on the remaining position.",
+    ];
+    const leaks = findReadableStepScopeLeaks(steps, nonGlobalRules);
+    expect(leaks.map((l) => l.stepIndex)).toEqual([3, 5]);
+  });
+
+  it("preferred safe wording (entry/confirmation deferral) is NOT flagged: 'Apply the selected canonical strategy's own prerequisites, entry, confirmation, invalidation and no-trade rules, including its documented exceptions.'", async () => {
+    const { findReadableStepScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
+    const nonGlobalRules = [
+      { description: "Require a clean pullback/retest of the flipped structure, confirm the setup with candle body closures, and verify relative strength before entering.", basis: "SCOPED" as const },
+    ];
+    const leaks = findReadableStepScopeLeaks(
+      ["Apply the selected canonical strategy's own prerequisites, entry, confirmation, invalidation and no-trade rules, including its documented exceptions."],
+      nonGlobalRules,
+    );
+    expect(leaks).toEqual([]);
+  });
+
+  it("preferred safe wording (exit/trade-management deferral) is NOT flagged even though it names the exact scoped mechanics from a SCOPED rule, because it defers to the selected strategy: 'Apply the selected strategy's own target and trade-management rules; use HOD/LOD scaling, runners, fixed-R exits, gap-fill targets, etc. only where that strategy specifies them.'", async () => {
+    const { findReadableStepScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
+    const nonGlobalRules = [
+      { description: "Scale out partial profits at the initial structural target such as HOD/LOD or pre-market extremes and trail runners on the remaining position.", basis: "UNVERIFIED" as const },
+    ];
+    const leaks = findReadableStepScopeLeaks(
+      ["Apply the selected strategy's own target and trade-management rules; use HOD/LOD scaling, runners, fixed-R exits, gap-fill targets, etc. only where that strategy specifies them."],
+      nonGlobalRules,
+    );
+    expect(leaks).toEqual([]);
+  });
+
+  it("a step with no matching non-global rule at all (genuinely global mechanic, e.g. defining an invalidation level) is never flagged, even with no deferral wording", async () => {
+    const { findReadableStepScopeLeaks } = await import("../src/synthesis/decisionScopeAudit.js");
+    const leaks = findReadableStepScopeLeaks(["Define the invalidation level and initial stop-loss before entering any trade."], []);
+    expect(leaks).toEqual([]);
+  });
+
+  it("synthesizeDecisionFramework end-to-end: readableStepLeaks is populated on the returned DecisionFramework and participates in the same object the PASS/FAIL gate reads, using a real Step 5-shaped readable step and a matching SCOPED CoreFramework rule", async () => {
+    const { synthesizeDecisionFramework } = await import("../src/synthesis/decisionFramework.js");
+    const coreFramework = {
+      sections: [
+        {
+          key: "entry_framework",
+          title: "Entry Framework",
+          rules: [
+            {
+              description: "Require a clean pullback/retest of the flipped structure and confirm with candle body closures before entering.",
+              classification: "explicit" as const,
+              supportLevel: "SINGLE_SOURCE" as const,
+              supportCount: 1,
+              sources: [{ lessonId: 1, lessonTitle: "Lesson 1", evidence: "e" }],
+              conflictSources: [],
+              scope: emptyScope({ strategies: ["Trendline Break"] }),
+              scopeBasis: "SCOPED" as const,
+            },
+          ],
+        },
+      ],
+    };
+    const canonicalStrategies: unknown[] = [];
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async () => ({
+        text: JSON.stringify({
+          nodes: [
+            { id: "start", type: "start", label: "Start", description: null, next: ["end"], branches: [], sourceKeys: [] },
+            { id: "end", type: "end", label: "End", description: null, next: [], branches: [], sourceKeys: [] },
+          ],
+          readableSteps: [
+            "Evaluate the specific setup's rules: require a clean pullback/retest of the flipped structure and confirm with candle body closures before entering.",
+          ],
+        }),
+        usage,
+      })),
+    });
+    const { decisionFramework } = await synthesizeDecisionFramework({ gemini, model: "m" }, canonicalStrategies as never, coreFramework as never);
+    expect(decisionFramework.readableStepLeaks).toHaveLength(1);
+    expect(decisionFramework.readableStepLeaks[0].reason).toBe("scoped_mechanic");
   });
 });
 

@@ -148,6 +148,56 @@ export function containsExplicitPositiveUniversalLanguage(text: string): boolean
 }
 
 /**
+ * Real-audit fix (Phase 3.5B v9) — an EIGHTH real dry run found the v8
+ * multi-lesson positive-proof path itself exploitable: a candle-color/
+ * hide-P&L rule stayed VERIFIED_GLOBAL because it cited TWO structurally
+ * unscoped KnowledgeItems from two distinct lessons — but both citations'
+ * own statements openly qualify the recommendation to a SUBSET of traders
+ * ("A lot of people don't like the green and red...", "Me personally...",
+ * "Some people cannot actually bear to see a red candlestick...", "people
+ * that are scared of candlesticks..."). Phase 3.5A's structured scope
+ * extraction missed this the same way v6 found it missing instrument/
+ * timeframe restrictions — except here the gap isn't a named restriction
+ * dimension at all, it's PREFERENCE/SUBSET framing: "some traders find
+ * this helpful" is not "every trader must do this," no matter how many
+ * separate lessons independently say "some traders find this helpful."
+ *
+ * This is deliberately a NARROWER, DIFFERENT check from
+ * containsExplicitApplicabilityLanguage above: it doesn't name a concrete
+ * instrument/timeframe/session/profile/strategy (so it can't safely
+ * downgrade the whole citation to "restricted, route through
+ * sawUnverifiedEvidence" the way v6's check does — we don't know a
+ * specific restriction, just that this specific mention doesn't prove
+ * universality). It therefore only ever affects the v8 positive-proof
+ * MULTI-LESSON count (see aggregateScopeBasis below) — a citation carrying
+ * this language never counts as one of the ">=2 distinct lessons" a rule
+ * needs, but is otherwise kept exactly as before: still real evidence,
+ * still contributes its numericalValues/exceptions, still lets the rule's
+ * base scopeBasis computation proceed unchanged. Explicit genuine
+ * universal language ("every trade", "whenever you're trading") is a
+ * completely separate, independently-sufficient path (see
+ * containsExplicitPositiveUniversalLanguage above) and is NOT filtered by
+ * this — a citation can carry both a "some people" hedge AND a genuine
+ * universal claim elsewhere in the same statement.
+ */
+const CONDITIONAL_EVIDENCE_PATTERNS: RegExp[] = [
+  /\bsome\s+people\b/i,
+  /\ba\s+lot\s+of\s+people\b/i,
+  /\bpeople\s+(?:who|that)\b/i,
+  /\btraders\s+who\b/i,
+  /\bfor\s+beginners?\b/i,
+  /\bbeginner\s+traders?\b/i,
+  /\bin\s+the\s+beginning\b/i,
+  /\bme\s+personally\b/i,
+  /\bpersonally\b/i,
+];
+
+/** True when `text` limits its recommendation to a subset/profile/preference rather than stating it broadly — see CONDITIONAL_EVIDENCE_PATTERNS above. Affects ONLY whether a citation counts toward the v8 positive-proof multi-lesson path (aggregateScopeBasis/finalizeScopeBasis) — never deletes evidence, never independently downgrades a basis. */
+export function containsConditionalEvidenceLanguage(text: string): boolean {
+  return CONDITIONAL_EVIDENCE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
  * The final correctness gate for VERIFIED_GLOBAL — applied to a rule's own
  * consolidated description AFTER aggregateScopeBasis has already computed
  * a basis from citations. Only ever downgrades, only ever to UNVERIFIED
@@ -283,7 +333,17 @@ export function aggregateScopeBasis(
       continue;
     }
     sawKnowledgeEvidence = true;
-    unscopedEvidenceLessonIds.add(found.lessonId);
+    // Real-audit fix (v9) — a citation whose own statement limits the recommendation to a
+    // subset/profile/preference ("a lot of people...", "me personally...", "some people
+    // cannot...") never counts toward the >=2-distinct-lesson positive-proof requirement,
+    // even though it's structurally unscoped and names no concrete restriction dimension.
+    // Evidence is NOT deleted: it still contributes numericalValues/exceptions below, and the
+    // base scopeBasis computation (this loop's sawKnowledgeEvidence/scopeUnion/
+    // sawUnverifiedEvidence priority) is completely unaffected — only whether THIS lesson can
+    // be counted as one of the required distinct broad-evidence lessons changes.
+    if (!containsConditionalEvidenceLanguage(found.item.statement)) {
+      unscopedEvidenceLessonIds.add(found.lessonId);
+    }
     if (containsExplicitPositiveUniversalLanguage(found.item.statement)) citationHadPositiveLanguage = true;
     numericalValues.push(...found.item.numericalValues);
     for (const exception of found.item.exceptions) exceptionsSet.add(exception);
