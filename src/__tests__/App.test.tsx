@@ -42,9 +42,9 @@ describe("App — Phase 4A routing shell", () => {
     expect(screen.getByRole("button", { name: "Enter Knovera" })).toBeInTheDocument();
   });
 
-  it("renders the Projects page directly at /projects", () => {
+  it("renders the Projects page directly at /projects — signed out, so it prompts sign-in rather than showing fabricated project data", () => {
     renderApp("/projects");
-    expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument();
+    expect(screen.getByText("Sign in with Whop to view your projects.")).toBeInTheDocument();
   });
 
   it("renders the Sources workspace directly at /projects/mastermind/sources (refreshable hash route)", () => {

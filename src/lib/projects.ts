@@ -1,8 +1,8 @@
+import type { ProjectSummary } from "./projectsApi";
+
 /**
- * Phase 4A — the Knovera Project abstraction, frontend-only for now (no
- * backend /api/projects endpoint exists yet; that's Phase 4B). A typed enum
- * rather than free text, per the Phase 4 spec, so a later real project list
- * (and a real GENERAL_KNOWLEDGE synthesis engine) can be introduced without
+ * The Knovera Project abstraction. A typed enum rather than free text, so a
+ * real GENERAL_KNOWLEDGE synthesis engine can be introduced later without
  * touching every call site that currently branches on this value.
  */
 export const ProjectType = {
@@ -19,29 +19,27 @@ export const PROJECT_TYPE_LABEL: Record<ProjectType, string> = {
 /** Only TRADING_STRATEGIES has a working synthesis engine (Phase 3.5B) — see CourseIntelligence.tsx. GENERAL_KNOWLEDGE is architecturally selectable but has no synthesis pipeline; nothing here should ever fabricate results for it. */
 export const OPERATIONAL_PROJECT_TYPES: ReadonlySet<ProjectType> = new Set([ProjectType.TRADING_STRATEGIES]);
 
-export interface Project {
-  /** Stable slug used in routes (e.g. /projects/:projectId/...). Phase 4B will replace this with a real DB id once projects are persisted. */
-  id: string;
-  name: string;
-  type: ProjectType;
-}
-
 /**
- * Phase 4A — a single hardcoded project representing everything already
- * built for "The Trading Accelerator" under Phase 3.5B. Phase 4B replaces
- * this with a real `projects` table + `GET /api/projects`; nothing here
- * persists or duplicates data — MasterMind is a label wrapped around the
- * existing single-course backend, which is untouched.
+ * Phase 4B — the pre-Phase-4B routes used the fixed slug "mastermind"
+ * (there was only ever one hardcoded project). Real projects now have a
+ * numeric backend id, but old links/bookmarks to `/projects/mastermind/...`
+ * should keep working rather than 404ing. Rather than adding a `slug`
+ * column to `projects` for this one legacy alias, `resolveProjectRoute`
+ * below resolves it by name against the fetched project list; new links
+ * (e.g. from the Projects page) use the real numeric id going forward. If a
+ * second project is ever added, this alias only ever matches "MasterMind"
+ * by name — see the Phase 4B PR description for why a schema field wasn't
+ * warranted here.
  */
-export const MASTERMIND_PROJECT: Project = {
-  id: "mastermind",
-  name: "MasterMind",
-  type: ProjectType.TRADING_STRATEGIES,
-};
+export const MASTERMIND_ROUTE_SLUG = "mastermind";
 
-export const PROJECTS: Project[] = [MASTERMIND_PROJECT];
-
-export function findProject(projectId: string | undefined): Project | null {
-  if (!projectId) return null;
-  return PROJECTS.find((p) => p.id === projectId) ?? null;
+/** Resolves a `:projectId` route param (the legacy slug, or a real numeric id as a string) against a fetched project list. Returns null if nothing matches. */
+export function resolveProjectRoute(projects: ProjectSummary[], routeParam: string | undefined): ProjectSummary | null {
+  if (!routeParam) return null;
+  if (routeParam === MASTERMIND_ROUTE_SLUG) {
+    return projects.find((p) => p.name === "MasterMind") ?? null;
+  }
+  const numericId = Number(routeParam);
+  if (!Number.isInteger(numericId)) return null;
+  return projects.find((p) => p.id === numericId) ?? null;
 }
