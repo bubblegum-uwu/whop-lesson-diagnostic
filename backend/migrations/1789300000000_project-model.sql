@@ -24,19 +24,22 @@ CREATE TABLE projects (
 
 ALTER TABLE courses ADD COLUMN project_id BIGINT REFERENCES projects(id) ON DELETE SET NULL;
 
--- Seed the one project this deployment has today, and backfill it onto the
--- existing course row. This system has at most one `courses` row (single
--- Whop course per deployment) and the specific whop_course_id varies by
--- environment (and is random per test) — matching on "every course without
--- a project yet" is the stable-identity-preserving equivalent of "the
--- configured course" without hardcoding a whop_course_id or a numeric id.
--- It is a no-op on a fresh/empty database (no course row exists to update),
--- and idempotent (a second run finds no project_id IS NULL rows left).
+-- Seed the one project this deployment has today, and backfill it onto
+-- *only* the configured Trading Accelerator course — matched by its stable
+-- Whop course identity (whop_course_id), the same identifier this
+-- deployment is configured with via WHOP_COURSE_ID (see config.ts /
+-- backend/README.md's deploy commands). Deliberately NOT "every course
+-- without a project yet": a database can contain other, unrelated course
+-- rows (e.g. leftover test fixtures), and those must never be silently
+-- claimed by MasterMind. On a fresh/empty database, or any environment
+-- where this whop_course_id hasn't been synced yet, the UPDATE matches
+-- zero rows and the migration still succeeds — MasterMind is still
+-- created, ready to be associated once/if that course is synced.
 INSERT INTO projects (name, project_type) VALUES ('MasterMind', 'TRADING_STRATEGIES');
 
 UPDATE courses
 SET project_id = (SELECT id FROM projects WHERE name = 'MasterMind')
-WHERE project_id IS NULL;
+WHERE whop_course_id = 'cors_4lb7N3oassoZwHJvrufOYy';
 
 -- Down Migration
 

@@ -13,6 +13,17 @@ afterAll(async () => {
   await pool.end();
 });
 
+/** The real, stable identity of the configured Trading Accelerator course — matches WHOP_COURSE_ID in backend/README.md's deploy commands. This is exactly what the Phase 4B migration's backfill targets (see 1789300000000_project-model.sql). */
+const MASTERMIND_WHOP_COURSE_ID = "cors_4lb7N3oassoZwHJvrufOYy";
+
+/** The migration's exact backfill statement, re-run here to prove its behavior directly (this repo has no dedicated migration-file test runner — see testDb.ts). */
+async function runMasterMindBackfill(whopCourseId: string) {
+  return pool.query(
+    `UPDATE courses SET project_id = (SELECT id FROM projects WHERE name = 'MasterMind') WHERE whop_course_id = $1`,
+    [whopCourseId],
+  );
+}
+
 interface TestProject {
   id: number;
   name: string;
@@ -157,5 +168,74 @@ describe("projectsRepo", () => {
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
     });
+  });
+});
+
+describe("Phase 4B migration backfill (1789300000000_project-model)", () => {
+  it("A: assigns the configured Trading Accelerator course — matched by its whop_course_id — to MasterMind", async () => {
+    const course = await upsertCourse(pool, {
+      whopCourseId: MASTERMIND_WHOP_COURSE_ID,
+      whopExperienceId: "exp_gdmood6JIzSsE7",
+      slug: "scarface-trades-mastermind",
+      title: "Scarface Trades Mastermind",
+    });
+
+    await runMasterMindBackfill(MASTERMIND_WHOP_COURSE_ID);
+
+    const found = await getProjectForCourse(pool, course.id);
+    expect(found?.name).toBe("MasterMind");
+    expect(found?.projectType).toBe("TRADING_STRATEGIES");
+  });
+
+  it("B: does NOT assign an unrelated course present at migration time — only an exact whop_course_id match qualifies, never a blanket 'unassigned' backfill", async () => {
+    const unrelated = await makeCourse(); // random whopCourseId, never MASTERMIND_WHOP_COURSE_ID
+
+    await runMasterMindBackfill(MASTERMIND_WHOP_COURSE_ID);
+
+    const found = await getProjectForCourse(pool, unrelated.id);
+    expect(found).toBeNull();
+  });
+
+  it("C: succeeds with zero rows updated when the target course doesn't exist yet (e.g. a fresh database) — MasterMind is still created and available", async () => {
+    const result = await runMasterMindBackfill(randomId("no_such_whop_course"));
+    expect(result.rowCount).toBe(0);
+
+    const projects = await listProjects(pool);
+    expect(projects.some((p) => p.name === "MasterMind" && p.projectType === "TRADING_STRATEGIES")).toBe(true);
+  });
+
+  it("D: never duplicates or removes lesson/analysis/synthesis rows — the backfill only ever touches courses.project_id", async () => {
+    const course = await makeCourse();
+    await syncLessons(pool, course.id, [lesson()]);
+    const lessonRow = await pool.query<{ id: string }>(`SELECT id FROM lessons WHERE course_id = $1`, [course.id]);
+    const lessonId = Number(lessonRow.rows[0].id);
+    const job = await createJob(pool, lessonId, randomId("fp"));
+    await createLessonAnalysis(pool, analysisInput(lessonId, job.jobId));
+    await createSynthesisRun(pool, {
+      courseId: course.id,
+      sourceAnalysisHash: randomId("hash"),
+      sourceAnalysisIds: [],
+      model: "gemini-3.8-flash",
+      synthesisPromptVersion: "test",
+      synthesisSchemaVersion: "test",
+      synthesizerVersion: "test",
+    });
+
+    const countRows = async (table: string): Promise<number> =>
+      Number((await pool.query<{ count: string }>(`SELECT COUNT(*) AS count FROM ${table}`)).rows[0].count);
+    const before = {
+      lessons: await countRows("lessons"),
+      lessonAnalyses: await countRows("lesson_analyses"),
+      synthesisRuns: await countRows("synthesis_runs"),
+    };
+
+    await runMasterMindBackfill(MASTERMIND_WHOP_COURSE_ID);
+
+    const after = {
+      lessons: await countRows("lessons"),
+      lessonAnalyses: await countRows("lesson_analyses"),
+      synthesisRuns: await countRows("synthesis_runs"),
+    };
+    expect(after).toEqual(before);
   });
 });
