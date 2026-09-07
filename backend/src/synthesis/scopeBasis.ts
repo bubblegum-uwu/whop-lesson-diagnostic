@@ -37,6 +37,102 @@ import { isKnowledgeItemScoped } from "../gemini/schema.js";
 export const SCOPE_BASIS_VALUES = ["VERIFIED_GLOBAL", "SCOPED", "UNVERIFIED"] as const;
 export type ScopeBasis = (typeof SCOPE_BASIS_VALUES)[number];
 
+/**
+ * Real-audit fix (Phase 3.5B v6) — a FIFTH real 28-lesson dry run found a
+ * concrete impossible classification: a CoreFramework rule reading "In
+ * options day trading, scale out 50% to 80% ..." was classified
+ * `scope: null, scopeBasis: VERIFIED_GLOBAL`. The v3-v5 fixes correctly
+ * stopped treating "no scope-aware citation" as global — but they never
+ * questioned the OTHER half of the assumption: that a scope-aware
+ * KnowledgeItem's empty STRUCTURED `scope` array is itself trustworthy.
+ * Phase 3.5A's structured extraction can miss a restriction that's still
+ * sitting right there in the item's own text (an extraction gap — never
+ * touched here, since Phase 3.5A itself is out of scope). "No structured
+ * scope was extracted" and "positively verified universal applicability"
+ * are NOT the same claim, and this is the deterministic check that keeps
+ * them apart: a rule/evidence item can only be downgraded FROM
+ * VERIFIED_GLOBAL by this, never promoted TO it, and never dropped —
+ * see finalizeScopeBasis below.
+ *
+ * Deliberately NOT a second, independent vocabulary system: every pattern
+ * here is a fixed, representative instance of one of the five dimensions
+ * KnowledgeItemScope already models (marketsOrInstruments, timeframes,
+ * sessions, traderProfiles, strategies) — this just recognizes them
+ * lexically in prose Phase 3.5A didn't structurally tag, using the exact
+ * category examples the real audit named.
+ */
+const EXPLICIT_APPLICABILITY_PATTERNS: RegExp[] = [
+  // named instrument/market
+  /\boptions?\b/i,
+  /\bfutures?\b/i,
+  /\bequit(?:y|ies)\b/i,
+  /\bstocks?\b/i,
+  /\bforex\b/i,
+  /\bcrypto(?:currency)?\b/i,
+  /\b(?:es|nq|mes|mnq|ym|rty)\b/,
+  /\b(?:qqq|spy|spx|dia)\b/i,
+  // named timeframe
+  /\b\d+\s*-?\s*(?:minute|min)s?\b/i,
+  /\b\d+\s*-?\s*m\b/,
+  /\b\d+\s*-?\s*(?:hour|hr)s?\b/i,
+  /\bdaily\b/i,
+  /\bweekly\b/i,
+  /\bmonthly\b/i,
+  /\bintraday\b/i,
+  // named session/window
+  /\bpre-?market\b/i,
+  /\bmarket\s+open\b/i,
+  /\bmarket\s+close\b/i,
+  /\bopening\s+range\b/i,
+  /\b0-?dte\b/i,
+  /\b9:30\b/,
+  /\b(?:monday|tuesday|wednesday|thursday|friday)\b/i,
+  // named trader profile
+  /\bbeginners?\b/i,
+  /\bexperienced\b/i,
+  /\badvanced\b/i,
+  /\bscalpers?\b/i,
+  /\bday\s+traders?\b/i,
+  /\bswing\s+traders?\b/i,
+  /\bnovice\b/i,
+  // named strategy/setup applicability
+  /\binside\s+bar\b/i,
+  /\borb\b/i,
+  /\bopening\s+range\s+breakout\b/i,
+  /\bb&r\b/i,
+  /\bbreak\s+and\s+retest\b/i,
+  /\bgap\s+fill\b/i,
+  /\b84%?\s*(?:rule|re-?entry)\b/i,
+];
+
+/** True when `text` names an instrument/timeframe/session/trader-profile/strategy restriction — see EXPLICIT_APPLICABILITY_PATTERNS above. */
+export function containsExplicitApplicabilityLanguage(text: string): boolean {
+  return EXPLICIT_APPLICABILITY_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/**
+ * The final correctness gate for VERIFIED_GLOBAL — applied to a rule's own
+ * consolidated description AFTER aggregateScopeBasis has already computed
+ * a basis from citations. Only ever downgrades, only ever to UNVERIFIED
+ * (never SCOPED — we don't know the specific restriction, only that one
+ * exists; fabricating a scope array would be worse than not knowing one),
+ * and never drops the rule:
+ *
+ *   1. The rule's own text names a restriction Phase 3.5A's structured
+ *      extraction missed (containsExplicitApplicabilityLanguage) — the
+ *      exact real-audit failure.
+ *   2. The rule documents a genuine methodological CONFLICT
+ *      (supportLevel "CONFLICTING") — disputed evidence is never a
+ *      settled universal principle safe to power a mandatory checklist,
+ *      regardless of what its citations' structured scope says.
+ */
+export function finalizeScopeBasis(basis: ScopeBasis, description: string, supportLevel?: string): ScopeBasis {
+  if (basis !== "VERIFIED_GLOBAL") return basis;
+  if (supportLevel === "CONFLICTING") return "UNVERIFIED";
+  if (containsExplicitApplicabilityLanguage(description)) return "UNVERIFIED";
+  return basis;
+}
+
 export function unionScope(a: KnowledgeItemScope, b: KnowledgeItemScope): KnowledgeItemScope {
   const uniq = (arr: string[]) => [...new Set(arr)];
   return {
@@ -84,12 +180,20 @@ export function aggregateScopeBasis(
       sawUnverifiedEvidence = true;
       continue;
     }
+    if (isKnowledgeItemScoped(found.item.scope)) {
+      scopeUnion = scopeUnion ? unionScope(scopeUnion, found.item.scope) : found.item.scope;
+    } else if (containsExplicitApplicabilityLanguage(found.item.statement)) {
+      // Real-audit fix (v6) — this citation's STRUCTURED scope is empty, but
+      // its own statement names a restriction Phase 3.5A's extraction
+      // missed (e.g. "In options day trading, scale out 50% to 80%...").
+      // Route it the same way as a scope-blind legacy citation — real
+      // evidence that EXISTS, but never counted toward "verified global".
+      sawUnverifiedEvidence = true;
+      continue;
+    }
     sawKnowledgeEvidence = true;
     numericalValues.push(...found.item.numericalValues);
     for (const exception of found.item.exceptions) exceptionsSet.add(exception);
-    if (isKnowledgeItemScoped(found.item.scope)) {
-      scopeUnion = scopeUnion ? unionScope(scopeUnion, found.item.scope) : found.item.scope;
-    }
   }
 
   let scopeBasis: ScopeBasis;

@@ -5,7 +5,7 @@ import { callGeminiForStage, parseStageJson, validateStageData, type SynthesisSt
 import type { StrategyInstanceRecord } from "./normalize.js";
 import type { KnowledgeItemRecord } from "./knowledgeNormalize.js";
 import { resolveKeys, type CitableFact } from "./sourceRegistry.js";
-import { aggregateScopeBasis } from "./scopeBasis.js";
+import { aggregateScopeBasis, finalizeScopeBasis } from "./scopeBasis.js";
 import {
   RAW_CORE_FRAMEWORK_RESPONSE_JSON_SCHEMA,
   RawCoreFrameworkSchema,
@@ -180,7 +180,27 @@ function buildRuleFromKeys(
     exceptions,
     numericalValues,
     scope,
-    scopeBasis,
+    // Real-audit fix (v6) — the final VERIFIED_GLOBAL eligibility gate: never
+    // promotes, only ever downgrades to UNVERIFIED when the rule's own text
+    // names a restriction the citations' structured scope missed, or when
+    // the rule documents a genuine methodological conflict — see
+    // scopeBasis.ts's finalizeScopeBasis.
+    //
+    // The description-text check is gated on isFullRule: `raw.description`
+    // is Gemini's ONE merged description, shared verbatim across every
+    // partition of a split rule (see enrichAndPartitionRule above) — so for
+    // a split partition it can name a restriction that belongs entirely to
+    // a DIFFERENT partition's evidence (e.g. "Confirm QQQ/SPY alignment and
+    // always define your risk" splitting into a QQQ/SPY-scoped partition
+    // and an independently-global "define your risk" partition). Applying
+    // the merged text to every partition would falsely downgrade the
+    // genuinely-global one — exactly the dilution v5's partitioning fix
+    // exists to prevent. Each partition's OWN citations are still checked
+    // (see aggregateScopeBasis's citation loop), so this only skips the
+    // whole-description re-check when it would attribute someone else's
+    // restriction to this partition; the CONFLICTING check is unaffected
+    // (CONFLICTING rules are never partitioned to begin with).
+    scopeBasis: finalizeScopeBasis(scopeBasis, isFullRule ? raw.description : "", raw.supportLevel),
   };
 }
 

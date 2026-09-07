@@ -1077,14 +1077,16 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
     expect(result.unverifiedUniversalClaims).toEqual([]);
   });
 
-  it("SCOPED policy: absolute-claim language in a sentence that never states the section's own declared scope IS an applicability leak (broadening beyond declared scope)", async () => {
+  it("SCOPED policy: absolute-claim language in a section that NEVER states its own declared scope anywhere IS an applicability leak (broadening beyond declared scope)", async () => {
     const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
     const scope = { strategies: [], marketsOrInstruments: ["options"], timeframes: [], sessions: [], traderProfiles: [] };
     const result = findPlaybookApplicabilityLeaks(
       [
         {
           key: "scoped_execution_checklists",
-          content: "This checklist is for options trades. Always scale out 50% at target 1 on every trade you take.",
+          // The section's own declared scope ("options") is never mentioned anywhere in the
+          // content — genuine broadening, not a same-sentence-co-occurrence false positive.
+          content: "Always scale out 50% at target 1 on every trade you take.",
           scope,
           scopeBasis: "SCOPED",
           applicabilityPolicy: "SCOPED",
@@ -1094,6 +1096,26 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
     );
     expect(result.scopedApplicabilityLeaks).toHaveLength(1);
     expect(result.scopedApplicabilityLeaks[0].sectionKey).toBe("scoped_execution_checklists");
+  });
+
+  it("real-audit fix (v6): a multi-sub-checklist SCOPED section that states each sub-checklist's applicability in a DIFFERENT sentence than its absolute-claim language is NOT flagged (the exact scoped_execution_checklists false positive — matchedNonGlobalRules was [] because this is a pure same-sentence heuristic, not real evidence of broadening)", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const scope = { strategies: [], marketsOrInstruments: ["options", "futures"], timeframes: ["1m"], sessions: ["market-open"], traderProfiles: [] };
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "scoped_execution_checklists",
+          content:
+            "Intraday Options Checklist. This sub-checklist applies to options day trading during the market-open session. Always confirm the setup before entry. Every step below scales out at the first target. " +
+            "Futures Checklist. This sub-checklist applies to futures on the 1-minute chart. Always wait for candle close before entry.",
+          scope,
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "SCOPED",
+        },
+      ],
+      new Set(["options", "futures", "1m", "market-open"]),
+    );
+    expect(result.scopedApplicabilityLeaks).toEqual([]);
   });
 
   it("CONFLICT_DOCUMENTATION policy (conflicts_and_ambiguities): mentioning/quoting conflicting SCOPED rules side by side is NEVER flagged", async () => {
@@ -1207,6 +1229,62 @@ describe("Real-audit v5, Blocker 2 — playbookApplicabilityAudit.ts: policy-awa
       new Set(["options"]),
     );
     expect(result.universalApplicabilityLeaks).toEqual([]);
+  });
+
+  it("real-audit fix (v6): DESCRIPTIVE_MIXED strategy_variants is NOT flagged merely for having ownBasis SCOPED when its prose explicitly attributes the scoped mechanics to their named parent strategy, even with absolute-claim language present", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "strategy_variants",
+          content: "For the Inside Bar strategy, always wait for candle close before entry — this mechanic belongs only to the Inside Bar strategy and is not a general rule.",
+          scope: { strategies: ["Inside Bar"], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(), // deliberately empty — proves this section isn't merely surviving via an empty vocabulary set
+    );
+    expect(result.universalApplicabilityLeaks).toEqual([]);
+    expect(result.unverifiedUniversalClaims).toEqual([]);
+  });
+
+  it("real-audit fix (v6), do-not-weaken check: DESCRIPTIVE_MIXED strategy_variants with ownBasis SCOPED that does NOT name its own declared scope anywhere in the prose IS still flagged — the suppression only applies when the section actually discloses its own scope", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "strategy_variants",
+          content: "Always wait for candle close before entry on every trade.",
+          scope: { strategies: ["Inside Bar"], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+    );
+    expect(result.universalApplicabilityLeaks).toHaveLength(1);
+    expect(result.universalApplicabilityLeaks[0].sectionKey).toBe("strategy_variants");
+  });
+
+  it("real-audit fix (v6), do-not-weaken check: a strategy_variants section naming its OWN parent strategy is still flagged when it separately overlaps a DIFFERENT, undisclosed non-global rule's text (matchedScopedRules is untouched by the ownBasis suppression)", async () => {
+    const { findPlaybookApplicabilityLeaks } = await import("../src/synthesis/playbookApplicabilityAudit.js");
+    const nonGlobalRules = [{ description: "Wait for the 84% re-entry confirmation before adding to a runner position.", basis: "SCOPED" as const }];
+    const result = findPlaybookApplicabilityLeaks(
+      [
+        {
+          key: "strategy_variants",
+          content: "For the Inside Bar strategy: always wait for the 84% re-entry confirmation before adding to a runner position on every trade.",
+          scope: { strategies: ["Inside Bar"], marketsOrInstruments: [], timeframes: [], sessions: [], traderProfiles: [] },
+          scopeBasis: "SCOPED",
+          applicabilityPolicy: "DESCRIPTIVE_MIXED",
+        },
+      ],
+      new Set(),
+      nonGlobalRules,
+    );
+    expect(result.universalApplicabilityLeaks).toHaveLength(1);
+    expect(result.universalApplicabilityLeaks[0].matchedNonGlobalRules).toEqual([nonGlobalRules[0].description]);
   });
 });
 
@@ -1393,6 +1471,244 @@ describe("Real-audit v4, Proof 1 — CoreFramework consolidated rules cannot be 
     expect(unverifiedRule!.description).toBe("Confirm QQQ/SPY alignment and always define your risk.");
     expect(globalRule!.scope).toBeNull();
     expect(unverifiedRule!.scope).toBeNull();
+  });
+});
+
+/**
+ * FIFTH real-data audit regression tests (Phase 3.5B v6) — see PR #13's
+ * fifth real 28-lesson dry-run audit. The v3-v5 fixes above correctly track
+ * WHY a rule's scope union came out empty (scope-blind legacy citation vs.
+ * scope-aware KnowledgeItem), but never questioned whether an empty
+ * STRUCTURED scope on a scope-aware KnowledgeItem is itself trustworthy.
+ * The real failure: a CoreFramework rule reading "In options day trading,
+ * scale out 50% to 80% ..." was classified `scope: null, scopeBasis:
+ * VERIFIED_GLOBAL` — "no structured scope was extracted" was being read as
+ * "positively verified universal applicability." scopeBasis.ts's
+ * `finalizeScopeBasis` (applied in both coreFramework.ts and
+ * canonicalStrategy.ts, after aggregateScopeBasis) is the fix: it only ever
+ * downgrades VERIFIED_GLOBAL to UNVERIFIED — never promotes, never drops
+ * the rule — when the rule's own final text names a restriction the
+ * structured scope missed, or when the rule documents a genuine
+ * methodological conflict (supportLevel CONFLICTING).
+ */
+describe("Real-audit v6 — VERIFIED_GLOBAL eligibility: a rule/citation whose structured scope is empty is not automatically 'verified global'", () => {
+  it("exact real-audit failure: a CoreFramework rule consolidated from a citation with empty structured scope, but whose own text says 'In options day trading, scale out 50% to 80%...', is UNVERIFIED — MUST NOT become VERIFIED_GLOBAL", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: [makeKnowledgeItem({ statement: "In options day trading, scale out 50% to 80% of the position at the first target.", scope: emptyScope() })],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "trade_management",
+                  title: "Trade Management",
+                  rules: [
+                    {
+                      description: "In options day trading, scale out 50% to 80% of the position at the first target.",
+                      classification: "explicit",
+                      supportLevel: "SINGLE_SOURCE",
+                      supportCount: 1,
+                      sourceKeys: ["k1"],
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], normalized.globalItems);
+
+    const rule = coreFramework.sections[0].rules[0];
+    // Structured extraction still came out empty (the acknowledged Phase 3.5A gap) —
+    // but the rule's own text names an instrument/session restriction, so it may
+    // never power a universal requirement.
+    expect(rule.scope).toBeNull();
+    expect(rule.scopeBasis).toBe("UNVERIFIED");
+  });
+
+  it("genuine broad claim: 'Whenever you're trading, you always want at least a two R multiple' with sufficiently broad independent (unscoped) evidence MAY remain VERIFIED_GLOBAL", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: [makeKnowledgeItem({ statement: "Whenever you're trading, you always want at least a two R multiple.", scope: emptyScope() })],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+      {
+        analysisId: 2,
+        lessonId: 11,
+        lessonTitle: "Lesson 11",
+        knowledge: {
+          summary: "s",
+          knowledgeItems: [makeKnowledgeItem({ statement: "On all trades, target at least a 2R reward-to-risk ratio before considering an exit.", scope: emptyScope() })],
+          examples: [],
+          conflictsAndAmbiguities: [],
+        },
+      },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "risk_management",
+                  title: "Risk Management",
+                  rules: [
+                    {
+                      description: "Whenever you're trading, you always want at least a two R multiple on every trade.",
+                      classification: "explicit",
+                      supportLevel: "MULTI_SOURCE",
+                      supportCount: 2,
+                      sourceKeys: ["k1", "k2"],
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], normalized.globalItems);
+
+    const rule = coreFramework.sections[0].rules[0];
+    expect(rule.scope).toBeNull();
+    expect(rule.scopeBasis).toBe("VERIFIED_GLOBAL");
+  });
+
+  it("a rule documenting a genuine methodological CONFLICT (supportLevel CONFLICTING) is never VERIFIED_GLOBAL, even with empty structured scope and no restriction language in its text", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: { summary: "s", knowledgeItems: [makeKnowledgeItem({ statement: "Always wait for candle close before entry.", scope: emptyScope() })], examples: [], conflictsAndAmbiguities: [] },
+      },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [
+                {
+                  key: "entry_framework",
+                  title: "Entry Framework",
+                  rules: [
+                    {
+                      description: "Always wait for candle close before entry.",
+                      classification: "explicit",
+                      supportLevel: "CONFLICTING",
+                      supportCount: 1,
+                      sourceKeys: ["k1"],
+                      conflictSourceKeys: [],
+                    },
+                  ],
+                },
+              ],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], normalized.globalItems);
+
+    const rule = coreFramework.sections[0].rules[0];
+    expect(rule.scopeBasis).toBe("UNVERIFIED");
+  });
+
+  it("aggregateScopeBasis (citation level): a scope-aware KnowledgeItem citation whose structured scope is empty but whose OWN statement names a restriction is routed the same as scope-blind evidence — UNVERIFIED, not VERIFIED_GLOBAL", async () => {
+    const { aggregateScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    const restrictedButUnscopedItem = makeKnowledgeItem({ statement: "In options day trading, scale out 50% to 80% of the position.", scope: emptyScope() });
+    const result = aggregateScopeBasis(["k1"], (key) => (key === "k1" ? { item: restrictedButUnscopedItem } : undefined));
+    expect(result.scope).toBeNull();
+    expect(result.scopeBasis).toBe("UNVERIFIED");
+  });
+
+  it("finalizeScopeBasis never promotes SCOPED or UNVERIFIED to VERIFIED_GLOBAL, and never touches a basis it doesn't downgrade", async () => {
+    const { finalizeScopeBasis } = await import("../src/synthesis/scopeBasis.js");
+    expect(finalizeScopeBasis("SCOPED", "In options day trading, scale out.", undefined)).toBe("SCOPED");
+    expect(finalizeScopeBasis("UNVERIFIED", "In options day trading, scale out.", undefined)).toBe("UNVERIFIED");
+    expect(finalizeScopeBasis("VERIFIED_GLOBAL", "Always define your risk before entry.", undefined)).toBe("VERIFIED_GLOBAL");
+  });
+
+  it("UNVERIFIED rules are not dropped — they remain present in CoreFramework output, just ineligible to power the Master Trading Checklist", async () => {
+    const knowledgeSources: LessonKnowledgeSource[] = [
+      {
+        analysisId: 1,
+        lessonId: 10,
+        lessonTitle: "Lesson 10",
+        knowledge: { summary: "s", knowledgeItems: [makeKnowledgeItem({ statement: "In options day trading, scale out 50% to 80% of the position.", scope: emptyScope() })], examples: [], conflictsAndAmbiguities: [] },
+      },
+    ];
+    const { normalizeLessonKnowledge } = await import("../src/synthesis/knowledgeNormalize.js");
+    const normalized = normalizeLessonKnowledge(knowledgeSources);
+    const gemini = makeGemini({
+      generateStructured: vi.fn(async (prompt: string) => {
+        if (prompt.includes("Core Trading Framework")) {
+          return {
+            text: JSON.stringify({
+              sections: [{ key: "trade_management", title: "Trade Management", rules: [{ description: "In options day trading, scale out 50% to 80% of the position.", classification: "explicit", supportLevel: "SINGLE_SOURCE", supportCount: 1, sourceKeys: ["k1"], conflictSourceKeys: [] }] }],
+            }),
+            usage,
+          };
+        }
+        return { text: "{}", usage };
+      }),
+    });
+    const { extractCoreFramework } = await import("../src/synthesis/coreFramework.js");
+    const { coreFramework } = await extractCoreFramework({ gemini, model: "m" }, [], [], normalized.globalItems);
+    const { selectVerifiedGlobalCoreFrameworkRules } = await import("../src/synthesis/runSynthesis.js");
+
+    expect(coreFramework.sections[0].rules).toHaveLength(1);
+    expect(coreFramework.sections[0].rules[0].scopeBasis).toBe("UNVERIFIED");
+    // Master checklist selection naturally excludes it — no redesign needed there.
+    expect(selectVerifiedGlobalCoreFrameworkRules(coreFramework)).toHaveLength(0);
   });
 });
 

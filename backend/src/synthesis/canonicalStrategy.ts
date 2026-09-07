@@ -3,7 +3,7 @@ import type { GeminiThinkingLevel, GeminiUsage } from "../gemini/client.js";
 import { callGeminiForStage, parseStageJson, validateStageData, type SynthesisStageDeps } from "./geminiStage.js";
 import type { StrategyInstanceRecord } from "./normalize.js";
 import type { KnowledgeItemRecord } from "./knowledgeNormalize.js";
-import { aggregateScopeBasis } from "./scopeBasis.js";
+import { aggregateScopeBasis, finalizeScopeBasis } from "./scopeBasis.js";
 import {
   RAW_CANONICAL_STRATEGY_RESPONSE_JSON_SCHEMA,
   RawCanonicalStrategySchema,
@@ -296,7 +296,11 @@ function enrichRule(
     exceptions: meta.exceptions,
     numericalValues: meta.numericalValues,
     scope: meta.scope,
-    scopeBasis: meta.scopeBasis,
+    // Real-audit fix (v6) — see scopeBasis.ts's finalizeScopeBasis: never
+    // promotes, only ever downgrades to UNVERIFIED when the rule's own text
+    // names a restriction the citations' structured scope missed, or when
+    // the rule documents a genuine methodological conflict.
+    scopeBasis: finalizeScopeBasis(meta.scopeBasis, raw.description, raw.supportLevel),
   };
 }
 
