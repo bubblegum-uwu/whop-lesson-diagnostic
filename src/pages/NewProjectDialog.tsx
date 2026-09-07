@@ -34,7 +34,7 @@ export function NewProjectDialog({ onClose }: { onClose: () => void }) {
                 onClick={() => setSelected(type)}
               >
                 <span className="knovera-type-option-name">{PROJECT_TYPE_LABEL[type]}</span>
-                {!operational && <span className="knovera-badge-soon">Coming Soon</span>}
+                {!operational && <span className="kv-badge kv-badge-muted">Coming Soon</span>}
               </button>
             );
           })}
