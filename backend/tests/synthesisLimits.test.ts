@@ -12,9 +12,12 @@ import { SYNTHESIS_MAX_OUTPUT_TOKENS, CANONICAL_STRATEGY_THINKING_LEVEL } from "
  * correctness at 33-40% lower cost, scoped to canonical_strategy only.
  * Also locks in the v6 revision — core_framework RAISED from 16384 to the
  * documented ceiling after a real production dry run confirmed truncation
- * there (see synthesis/limits.ts's changelog). Guards against silently
- * regressing these, and against any stage silently exceeding the model's
- * actual output-token ceiling.
+ * there (see synthesis/limits.ts's changelog). Also locks in the v7
+ * revision — decision_framework RAISED from 16384 to the documented
+ * ceiling after a real production dry run confirmed truncation there too
+ * (output_tokens=4811, thinking_tokens=11557, incomplete). Guards against
+ * silently regressing these, and against any stage silently exceeding the
+ * model's actual output-token ceiling.
  */
 const GEMINI_3_8_FLASH_MAX_OUTPUT_TOKENS = 65536;
 
@@ -36,8 +39,8 @@ describe("SYNTHESIS_MAX_OUTPUT_TOKENS", () => {
     expect(SYNTHESIS_MAX_OUTPUT_TOKENS.core_framework).toBe(GEMINI_3_8_FLASH_MAX_OUTPUT_TOKENS);
   });
 
-  it("keeps decision_framework unchanged — no evidence yet it's undersized", () => {
-    expect(SYNTHESIS_MAX_OUTPUT_TOKENS.decision_framework).toBe(16384);
+  it("raises decision_framework to the documented gemini-3.8-flash ceiling (v7) — a real production dry run confirmed truncation at the old 16384 (output_tokens=4811, thinking_tokens=11557, incomplete, ends_with_brace=false)", () => {
+    expect(SYNTHESIS_MAX_OUTPUT_TOKENS.decision_framework).toBe(GEMINI_3_8_FLASH_MAX_OUTPUT_TOKENS);
   });
 
   it("never configures any stage above the model's documented output-token ceiling", () => {
