@@ -495,7 +495,7 @@ export function CourseIntelligence({ backendUrl, knoveraToken, projectId }: Cour
         <div className="course-actions">
           {status.canSynthesizeNow && !inFlight && (
             <button onClick={() => handleSynthesizeClick(false)} disabled={busy}>
-              {status.latestCompletedRun ? (status.isOutOfDate ? "Synthesize Course (out of date)" : "Synthesize Course") : `Synthesize ${status.counts.analyzed} analyzed lesson(s)`}
+              {status.latestCompletedRun ? (status.isOutOfDate ? "Synthesize Project (out of date)" : "Synthesize Project") : `Synthesize ${status.counts.analyzed} analyzed lesson(s)`}
             </button>
           )}
           {status.latestCompletedRun && !inFlight && (
