@@ -339,7 +339,13 @@ export function CourseTable({
 
   const drawerLesson = drawerLessonId == null ? null : lessons.find((l) => l.id === drawerLessonId) ?? null;
 
-  if (!connected) {
+  // Phase 4D — a disconnected Whop provider must never hide lessons that
+  // are already persisted in Postgres (see SourcesPage's doc comment on
+  // `confirmedNeverHadSource` vs live connection): only bail out to this
+  // sign-in prompt when there is truly nothing to show yet. When lessons
+  // already exist, they stay visible below, with Sync/Disconnect replaced
+  // by a "reconnect to sync" nudge.
+  if (!connected && lessons.length === 0) {
     return (
       <div className="course-section">
         <h2>Scarface Trades Mastermind</h2>
@@ -423,14 +429,25 @@ export function CourseTable({
       <div className="course-header">
         <h2>{courseTitle ?? "Scarface Trades Mastermind"}</h2>
         <div className="course-actions">
-          <button onClick={onSync} disabled={syncing}>
-            {syncing ? "Syncing…" : "Sync Course"}
-          </button>
-          <button onClick={onDisconnect} className="link-button">
-            Disconnect Whop
-          </button>
+          {connected ? (
+            <>
+              <button onClick={onSync} disabled={syncing}>
+                {syncing ? "Syncing…" : "Sync Course"}
+              </button>
+              <button onClick={onDisconnect} className="link-button">
+                Disconnect Whop
+              </button>
+            </>
+          ) : (
+            <button onClick={onSignIn}>Connect Whop to sync</button>
+          )}
         </div>
       </div>
+      {!connected && (
+        <p className="hint">
+          {authRequired ? "Whop authorization expired — reconnect to resume syncing." : "Whop is not connected — these lessons were synced previously and stay visible, but syncing new ones requires reconnecting."}
+        </p>
+      )}
       {lastSyncedAt && <p className="hint">Last synced: {new Date(lastSyncedAt).toLocaleString()}</p>}
 
       {/* Flex row, not an overlay: when the drawer is open it's a real sibling

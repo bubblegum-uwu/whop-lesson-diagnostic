@@ -56,6 +56,18 @@ describe("CourseTable", () => {
     expect(screen.getByText(/authorization expired/i)).toBeInTheDocument();
   });
 
+  it("Phase 4D: still renders already-persisted lessons when Whop is disconnected — a disconnected provider must never hide existing course data", () => {
+    render(<CourseTable {...baseProps} lessons={[makeLesson()]} />);
+    expect(screen.getByRole("table")).toBeInTheDocument();
+    expect(screen.getByText("Support & Resistance")).toBeInTheDocument();
+    // Sync/Disconnect require a live connection; a reconnect entry point
+    // takes their place instead, and neither destructive/mutating action
+    // is offered while disconnected.
+    expect(screen.getByRole("button", { name: /connect whop to sync/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sync Course" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Disconnect Whop" })).not.toBeInTheDocument();
+  });
+
   it("renders one row per lesson with a compact summary-only set of columns, once connected", () => {
     render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
 
