@@ -248,7 +248,9 @@ describe("App — Phase 4D Knovera login/logout", () => {
     renderApp("/projects");
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Sign in" })).not.toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "Log out of Knovera" }));
+    fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    await waitFor(() => expect(screen.getByText("operator@example.com")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Sign in" })).toBeInTheDocument());
     expect(sessionStorage.getItem(KNOVERA_TOKEN_STORAGE_KEY)).toBeNull();

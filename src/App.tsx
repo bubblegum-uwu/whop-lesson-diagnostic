@@ -115,6 +115,11 @@ export default function App() {
   // for why sessionStorage (not localStorage) was chosen.
   const [knoveraToken, setKnoveraToken] = useState<string | null>(() => loadKnoveraToken());
   const [knoveraLoginState, setKnoveraLoginState] = useState<KnoveraLoginState>({ phase: "idle" });
+  // Phase 4D.1 — the authenticated operator's email, surfaced for the
+  // AppShell account menu. Populated from the same /api/knovera-auth/me
+  // check the effect below already performs to validate the held token;
+  // no new backend call.
+  const [knoveraEmail, setKnoveraEmail] = useState<string | null>(null);
 
   // Phase 4D — verifies a held Knovera token (whether just restored from
   // sessionStorage on page load, or freshly issued by handleKnoveraLogin)
@@ -129,11 +134,14 @@ export default function App() {
     let cancelled = false;
     getKnoveraMe(backendUrl, knoveraToken)
       .then((me) => {
-        if (!cancelled && !me) {
+        if (cancelled) return;
+        if (!me) {
           clearKnoveraToken();
           setKnoveraToken(null);
           navigate("/login");
+          return;
         }
+        setKnoveraEmail(me.email);
       })
       .catch(() => undefined);
     return () => {
@@ -470,6 +478,7 @@ export default function App() {
     }
     clearKnoveraToken();
     setKnoveraToken(null);
+    setKnoveraEmail(null);
     setCourseState(INITIAL_COURSE_STATE);
     navigate("/login");
   }
@@ -507,7 +516,9 @@ export default function App() {
           )
         }
       />
-      <Route element={knoveraToken ? <AppShellLayout onLogout={handleKnoveraLogout} /> : <Navigate to="/login" replace />}>
+      <Route
+        element={knoveraToken ? <AppShellLayout onLogout={handleKnoveraLogout} email={knoveraEmail} /> : <Navigate to="/login" replace />}
+      >
         <Route path="/projects" element={<ProjectsPage backendUrl={backendUrl} knoveraToken={knoveraToken} />} />
         <Route path="/usage" element={<UsagePage />} />
         <Route
