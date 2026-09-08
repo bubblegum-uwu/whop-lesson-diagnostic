@@ -1,35 +1,38 @@
 /**
- * Client for the new backend endpoints that give this frontend a
- * persistent, server-side view of the course (§04/§05 of the Phase 3
- * architecture proposal, hardened per the PR #4 security review).
+ * Client for the backend endpoints that give this frontend a persistent,
+ * server-side view of the course (§04/§05 of the Phase 3 architecture
+ * proposal, hardened per the PR #4 security review).
  *
- * Every route except `establishAuthSession` requires the caller's own,
- * currently-held Whop access token as a bearer header — the backend
- * verifies it against Whop and checks it belongs to the one authorized
- * operator. This frontend never persists that token to localStorage; it's
- * held only in React state for the lifetime of the loaded page (see
- * App.tsx), which means these calls only work in the same browser session
- * that just completed a Whop sign-in — a page reload requires signing in
- * again before the Course view can load, by design.
+ * Phase 4D — every call below (except the Whop connection lifecycle three,
+ * which are noted individually) sends the Knovera session token, never a
+ * Whop token: the backend verifies it as "this browser is logged into
+ * Knovera," which by design is now independent of whether Whop is
+ * connected (see KNOVERA_AUTH_VS_PROVIDER_AUTH in the Phase 4D PR
+ * description). The Whop OAuth access/refresh tokens only ever pass through
+ * `establishAuthSession`'s request body, transiently, right after a
+ * Whop OAuth exchange — the frontend never holds onto them afterward.
  */
 
-function authHeaders(accessToken: string): HeadersInit {
-  return { Authorization: `Bearer ${accessToken}` };
+function authHeaders(knoveraToken: string): HeadersInit {
+  return { Authorization: `Bearer ${knoveraToken}` };
 }
 
 export interface EstablishAuthSessionInput {
+  /** The Whop OAuth access token just obtained via the Connect Whop flow — sent in the body, not as this request's Authorization header (that header instead carries knoveraToken, below). */
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
 }
 
+/** Requires an existing Knovera session (you must already be logged into Knovera to connect a Whop account) — see http/app.ts's route classification. */
 export async function establishAuthSession(
   backendUrl: string,
+  knoveraToken: string,
   input: EstablishAuthSessionInput,
 ): Promise<void> {
   const res = await fetch(`${backendUrl}/api/auth/session`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders(knoveraToken) },
     body: JSON.stringify({
       access_token: input.accessToken,
       refresh_token: input.refreshToken,
@@ -48,16 +51,18 @@ export interface AuthStatus {
   whopUserId: string | null;
 }
 
-export async function getAuthStatus(backendUrl: string, accessToken: string): Promise<AuthStatus> {
-  const res = await fetch(`${backendUrl}/api/auth/status`, { headers: authHeaders(accessToken) });
+/** Reports Whop CONNECTION state — requires Knovera auth only, never an active Whop connection itself (that would be circular: this is how you find out whether one exists). */
+export async function getAuthStatus(backendUrl: string, knoveraToken: string): Promise<AuthStatus> {
+  const res = await fetch(`${backendUrl}/api/auth/status`, { headers: authHeaders(knoveraToken) });
   if (!res.ok) throw new Error(`Failed to read auth status (${res.status}).`);
   return (await res.json()) as AuthStatus;
 }
 
-export async function disconnectAuthSession(backendUrl: string, accessToken: string): Promise<void> {
+/** Disconnects Whop. Requires Knovera auth only — works even if the Whop connection is already stale/broken, and never invalidates the Knovera session itself (see App.tsx's handleCourseDisconnect). */
+export async function disconnectAuthSession(backendUrl: string, knoveraToken: string): Promise<void> {
   const res = await fetch(`${backendUrl}/api/auth/disconnect`, {
     method: "POST",
-    headers: authHeaders(accessToken),
+    headers: authHeaders(knoveraToken),
   });
   if (!res.ok) throw new Error(`Failed to disconnect (${res.status}).`);
 }
@@ -73,10 +78,10 @@ export type CourseSyncOutcome =
   | { kind: "auth_required" }
   | { kind: "error"; message: string };
 
-export async function syncCourse(backendUrl: string, accessToken: string): Promise<CourseSyncOutcome> {
+export async function syncCourse(backendUrl: string, knoveraToken: string): Promise<CourseSyncOutcome> {
   const res = await fetch(`${backendUrl}/api/course/sync`, {
     method: "POST",
-    headers: authHeaders(accessToken),
+    headers: authHeaders(knoveraToken),
   });
   const body = await res.json().catch(() => undefined);
   if (res.ok) return { kind: "success", result: body as CourseSyncResult };
@@ -263,9 +268,9 @@ export interface CourseLessonsResponse {
 
 export async function getCourseLessons(
   backendUrl: string,
-  accessToken: string,
+  knoveraToken: string,
 ): Promise<CourseLessonsResponse> {
-  const res = await fetch(`${backendUrl}/api/course/lessons`, { headers: authHeaders(accessToken) });
+  const res = await fetch(`${backendUrl}/api/course/lessons`, { headers: authHeaders(knoveraToken) });
   if (!res.ok) throw new Error(`Failed to load course lessons (${res.status}).`);
   return (await res.json()) as CourseLessonsResponse;
 }
@@ -273,10 +278,10 @@ export async function getCourseLessons(
 /** Full validated JSON for one lesson's latest analysis — used by [ View Analysis ] / Download JSON. */
 export async function getLessonAnalysisJson(
   backendUrl: string,
-  accessToken: string,
+  knoveraToken: string,
   lessonId: number,
 ): Promise<unknown | null> {
-  const res = await fetch(`${backendUrl}/api/course/lessons/${lessonId}/analysis`, { headers: authHeaders(accessToken) });
+  const res = await fetch(`${backendUrl}/api/course/lessons/${lessonId}/analysis`, { headers: authHeaders(knoveraToken) });
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`Failed to load lesson analysis (${res.status}).`);
   const body = (await res.json()) as { validatedJson: unknown };
@@ -298,8 +303,8 @@ export interface AnalysisSummary {
   averageProcessingSeconds: number | null;
 }
 
-export async function getAnalysisSummary(backendUrl: string, accessToken: string): Promise<AnalysisSummary | null> {
-  const res = await fetch(`${backendUrl}/api/analysis/summary`, { headers: authHeaders(accessToken) });
+export async function getAnalysisSummary(backendUrl: string, knoveraToken: string): Promise<AnalysisSummary | null> {
+  const res = await fetch(`${backendUrl}/api/analysis/summary`, { headers: authHeaders(knoveraToken) });
   if (!res.ok) throw new Error(`Failed to load analysis summary (${res.status}).`);
   const body = (await res.json()) as { summary: AnalysisSummary | null };
   return body.summary;
@@ -313,13 +318,13 @@ export interface EnqueueResult {
 /** Queues batch analysis for the given lessons. Never waits on lesson processing — returns as soon as the jobs are durably queued. */
 export async function enqueueAnalysisJobs(
   backendUrl: string,
-  accessToken: string,
+  knoveraToken: string,
   lessonIds: number[],
   force = false,
 ): Promise<EnqueueResult> {
   const res = await fetch(`${backendUrl}/api/analysis/jobs`, {
     method: "POST",
-    headers: { ...authHeaders(accessToken), "Content-Type": "application/json" },
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
     body: JSON.stringify({ lessonIds, force }),
   });
   if (!res.ok) {
@@ -329,10 +334,10 @@ export async function enqueueAnalysisJobs(
   return (await res.json()) as EnqueueResult;
 }
 
-export async function retryAnalysisJob(backendUrl: string, accessToken: string, jobId: string): Promise<void> {
+export async function retryAnalysisJob(backendUrl: string, knoveraToken: string, jobId: string): Promise<void> {
   const res = await fetch(`${backendUrl}/api/analysis/jobs/${encodeURIComponent(jobId)}/retry`, {
     method: "POST",
-    headers: authHeaders(accessToken),
+    headers: authHeaders(knoveraToken),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => undefined);
@@ -341,10 +346,10 @@ export async function retryAnalysisJob(backendUrl: string, accessToken: string, 
 }
 
 /** Only ever succeeds while the job is still QUEUED — in-flight processing cannot be reliably cancelled (documented limitation). */
-export async function cancelAnalysisJob(backendUrl: string, accessToken: string, jobId: string): Promise<boolean> {
+export async function cancelAnalysisJob(backendUrl: string, knoveraToken: string, jobId: string): Promise<boolean> {
   const res = await fetch(`${backendUrl}/api/analysis/jobs/${encodeURIComponent(jobId)}/cancel`, {
     method: "POST",
-    headers: authHeaders(accessToken),
+    headers: authHeaders(knoveraToken),
   });
   return res.ok;
 }
@@ -359,7 +364,7 @@ export async function cancelAnalysisJob(backendUrl: string, accessToken: string,
  */
 export function subscribeAnalysisEvents(
   backendUrl: string,
-  accessToken: string,
+  knoveraToken: string,
   onEvents: () => void,
 ): () => void {
   const controller = new AbortController();
@@ -368,7 +373,7 @@ export function subscribeAnalysisEvents(
     while (!controller.signal.aborted) {
       try {
         const res = await fetch(`${backendUrl}/api/analysis/events`, {
-          headers: authHeaders(accessToken),
+          headers: authHeaders(knoveraToken),
           signal: controller.signal,
         });
         if (!res.ok || !res.body) return;

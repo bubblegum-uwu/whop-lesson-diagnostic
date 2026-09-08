@@ -170,22 +170,28 @@ function stubFetch(status: SynthesisStatus | null, data: CourseSynthesisData | n
 }
 
 describe("CourseIntelligence", () => {
-  it("renders nothing when not connected", () => {
+  it("renders nothing without a Knovera session", () => {
     stubFetch(baseStatus());
-    const { container } = render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={null} connected={false} />);
+    const { container } = render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={null} connected={false} />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("Phase 4D: reads and renders existing synthesis via the Knovera session alone, even when Whop is not live-connected — disconnecting Whop must never hide an already-completed synthesis", async () => {
+    stubFetch(baseStatus());
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected={false} />);
+    expect(await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i })).toBeInTheDocument();
   });
 
   it("shows a 'Synthesize N analyzed lesson(s)' button when no synthesis exists yet", async () => {
     stubFetch(baseStatus());
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     expect(await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i })).toBeInTheDocument();
   });
 
   it("warns before synthesizing while lessons are still processing/queued, and proceeds only after confirmation", async () => {
     const status = baseStatus({ counts: { totalLessons: 28, analyzed: 21, processing: 3, queued: 4, failed: 0 } });
     stubFetch(status);
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     const button = await screen.findByRole("button", { name: /synthesize 21 analyzed lesson/i });
     fireEvent.click(button);
@@ -219,7 +225,7 @@ describe("CourseIntelligence", () => {
     const data = baseSynthesisData();
     stubFetch(status, data);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     expect(await screen.findByRole("button", { name: "Canonical Strategies" })).toBeInTheDocument();
     expect(screen.getByText(/Canonical Strategy Coverage:/)).toBeInTheDocument();
@@ -250,7 +256,7 @@ describe("CourseIntelligence", () => {
     const status = baseStatus({ latestCompletedRun: dataWithGap.run, latestRun: dataWithGap.run });
     stubFetch(status, dataWithGap);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     expect(await screen.findByText("Partial")).toBeInTheDocument();
     expect(screen.getByText(/8 lessons contain no standalone setup/)).toBeInTheDocument();
@@ -283,7 +289,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     expect(await screen.findByText(/schema validation/)).toBeInTheDocument();
     expect(screen.getByText("Synthesis failed")).toBeInTheDocument();
     expect(screen.getByText(/Building Canonical Strategies/)).toBeInTheDocument();
@@ -311,7 +317,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
     expect(screen.getByText("Stage 3 of 7")).toBeInTheDocument();
@@ -329,7 +335,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     await screen.findByText("Synthesizing Course");
 
     const items = screen.getAllByRole("listitem").filter((li) => li.className.startsWith("synthesis-stage-"));
@@ -358,7 +364,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     expect(await screen.findByText("Gemini is working…")).toBeInTheDocument();
     expect(screen.queryByText(/of .* complete/)).not.toBeInTheDocument();
   });
@@ -381,7 +387,7 @@ describe("CourseIntelligence", () => {
       }),
     );
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
     expect(synthesizeCalls).toHaveLength(0); // reloaded purely from GET /synthesis-status — no POST /synthesize fired
   });
@@ -397,7 +403,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     await screen.findByText("Synthesizing Course");
 
     if (expectedText === null) {
@@ -414,7 +420,7 @@ describe("CourseIntelligence", () => {
     const status = baseStatus({ latestRun: data.run, latestCompletedRun: data.run });
     stubFetch(status, data);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     expect(await screen.findByText("Completed")).toBeInTheDocument();
     expect(screen.getByText("Duration: 5 min")).toBeInTheDocument();
@@ -430,7 +436,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     await screen.findByText("42%");
 
     // Real time passes (several of the component's 1s ticks) with no new
@@ -463,7 +469,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     expect(await screen.findByText("Synthesis failed")).toBeInTheDocument();
     expect(screen.getByText("Progress within stage: 1 of 2")).toBeInTheDocument();
@@ -482,7 +488,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
     expect(screen.getByText("Cost so far: $0.07")).toBeInTheDocument();
@@ -494,7 +500,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     await screen.findByText("Synthesizing Course");
     expect(screen.queryByText(/Cost so far/)).not.toBeInTheDocument();
@@ -506,7 +512,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
 
     expect(await screen.findByText("Cost so far: $0.00")).toBeInTheDocument();
   });
@@ -517,7 +523,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     expect(await screen.findByText("Cost so far: $0.05")).toBeInTheDocument();
 
     // Real time passes (several of the component's 1s elapsed-clock ticks) with no new
@@ -545,7 +551,7 @@ describe("CourseIntelligence", () => {
       }),
     );
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
     expect(await screen.findByText("Cost so far: $0.05")).toBeInTheDocument();
 
     // The component polls /synthesis-status every 4s while RUNNING (see CourseIntelligence's
@@ -564,7 +570,7 @@ describe("CourseIntelligence", () => {
 
     it("does not appear before any synthesis has completed", async () => {
       stubFetch(baseStatus());
-      render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
       await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i });
       expect(screen.queryByRole("button", { name: /download full synthesis json/i })).not.toBeInTheDocument();
     });
@@ -582,7 +588,7 @@ describe("CourseIntelligence", () => {
       URL.revokeObjectURL = revokeObjectURL;
       const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
 
-      render(<CourseIntelligence backendUrl={BACKEND_URL} accessToken={TOKEN} connected />);
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
       const button = await screen.findByRole("button", { name: /download full synthesis json/i });
       fireEvent.click(button);
 

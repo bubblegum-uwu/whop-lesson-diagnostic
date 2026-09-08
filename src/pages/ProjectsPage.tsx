@@ -6,8 +6,8 @@ import { NewProjectDialog } from "./NewProjectDialog";
 
 export interface ProjectsPageProps {
   backendUrl: string | null;
-  /** In-memory Whop access token from App.tsx's OAuth state — null until the operator signs in (see App.tsx). GET /api/projects requires it, same as every other course/analysis route. */
-  accessToken: string | null;
+  /** The Knovera session token (Phase 4D) — null until logged in (see App.tsx). Never a Whop token: GET /api/projects works with no Whop connection at all. */
+  knoveraToken: string | null;
 }
 
 type LoadState =
@@ -17,12 +17,12 @@ type LoadState =
   | { phase: "error"; message: string };
 
 /**
- * Phase 4B — "/projects". Reads the real `GET /api/projects` list (no more
- * hardcoded PROJECTS array). Requires the operator's Whop access token, same
- * as every other protected route in this app; while signed out, the page
- * shows a sign-in prompt rather than fetching or fabricating data.
+ * "/projects". Reads the real `GET /api/projects` list. Requires a Knovera
+ * session (Phase 4D) — never Whop; while signed out of Knovera, the page
+ * shows a sign-in prompt rather than fetching or fabricating data. Visible
+ * with Whop fully disconnected.
  */
-export function ProjectsPage({ backendUrl, accessToken }: ProjectsPageProps) {
+export function ProjectsPage({ backendUrl, knoveraToken }: ProjectsPageProps) {
   const navigate = useNavigate();
   const [showNewProject, setShowNewProject] = useState(false);
   const [state, setState] = useState<LoadState>({ phase: "signed_out" });
@@ -40,17 +40,17 @@ export function ProjectsPage({ backendUrl, accessToken }: ProjectsPageProps) {
   }
 
   useEffect(() => {
-    if (!backendUrl || !accessToken) {
+    if (!backendUrl || !knoveraToken) {
       setState({ phase: "signed_out" });
       return;
     }
     const cancelledRef = { current: false };
-    void load(backendUrl, accessToken, cancelledRef);
+    void load(backendUrl, knoveraToken, cancelledRef);
     return () => {
       cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, accessToken]);
+  }, [backendUrl, knoveraToken]);
 
   return (
     <div className="knovera-page">
@@ -60,13 +60,11 @@ export function ProjectsPage({ backendUrl, accessToken }: ProjectsPageProps) {
 
       {state.phase === "signed_out" && (
         <div className="kv-card knovera-empty-state">
-          {/* Phase 4C: today, viewing this list genuinely requires a Whop-issued
-              token — this app has no independent Knovera session yet (see the
-              "Knovera Auth vs Provider Auth" section of the Phase 4C PR
-              description). But projects themselves are not conceptually a
-              Whop concept, so this stays worded as app access, not a source
-              connection — "Connect Whop" belongs on the Sources page, where a
-              provider is actually being connected to a project. */}
+          {/* Phase 4D: this now genuinely means "not logged into Knovera" —
+              nothing about Whop. Projects are a Knovera-level concept, not a
+              Whop one, so the copy stays worded as app access, never a
+              source connection — "Connect Whop" belongs on the Sources page,
+              where a provider is actually being connected to a project. */}
           <p>Sign in to view your projects.</p>
           <button type="button" className="link-button" onClick={() => navigate(`/projects/${MASTERMIND_ROUTE_SLUG}/sources`)}>
             Go to Sources →

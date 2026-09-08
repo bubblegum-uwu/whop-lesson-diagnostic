@@ -13,6 +13,21 @@ export interface ScarfaceCourseConfig {
   slug: string;
 }
 
+/**
+ * Phase 4D — the single-operator Knovera application login, entirely
+ * separate from Whop OAuth (which becomes provider-connection-only; see
+ * config.whopOperatorUserId / whopClientId, unchanged). Never logged, never
+ * echoed in an error message, never sent to the frontend.
+ */
+export interface KnoveraAuthConfig {
+  /** Compared case-insensitively against the submitted login email. */
+  loginEmail: string;
+  /** scrypt-hashed, `scrypt:<saltHex>:<hashHex>` — see lib/passwordHash.ts. Never a plaintext password. */
+  passwordHash: string;
+  /** HMAC-SHA256 signing secret for the Knovera session token — see lib/knoveraToken.ts. */
+  authSecret: string;
+}
+
 export interface DbConfig {
   /** Unix socket directory (Cloud SQL, e.g. "/cloudsql/PROJECT:REGION:INSTANCE") or a TCP host. */
   host: string;
@@ -63,6 +78,13 @@ export interface AppConfig {
   schedulerServiceAccountEmail: string | undefined;
   /** This service's own public URL — the expected `aud` claim on the Scheduler's OIDC token. */
   publicApiBaseUrl: string | undefined;
+  /**
+   * Phase 4D — undefined unless all three KNOVERA_* env vars are set.
+   * Required only for serviceRole "api" (the worker mounts no HTTP routes
+   * and never checks a login) — validated by requireKnoveraAuthEnv, called
+   * from http/app.ts, mirroring requireApiRoleEnv's existing pattern below.
+   */
+  knoveraAuth: KnoveraAuthConfig | undefined;
 }
 
 function requireEnv(name: string): string {
@@ -137,6 +159,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     cloudRunJobName: env.CLOUD_RUN_JOB_NAME,
     schedulerServiceAccountEmail: env.SCHEDULER_SERVICE_ACCOUNT_EMAIL,
     publicApiBaseUrl: env.PUBLIC_API_BASE_URL,
+    knoveraAuth:
+      env.KNOVERA_LOGIN_EMAIL && env.KNOVERA_PASSWORD_HASH && env.KNOVERA_AUTH_SECRET
+        ? {
+            loginEmail: env.KNOVERA_LOGIN_EMAIL,
+            passwordHash: env.KNOVERA_PASSWORD_HASH,
+            authSecret: env.KNOVERA_AUTH_SECRET,
+          }
+        : undefined,
   };
 }
 
@@ -159,4 +189,20 @@ export function requireApiRoleEnv(config: AppConfig): {
     schedulerServiceAccountEmail: config.schedulerServiceAccountEmail,
     publicApiBaseUrl: config.publicApiBaseUrl,
   };
+}
+
+/**
+ * Only the "api" role needs these — called from http/app.ts before wiring
+ * the Knovera auth routes. Fails startup loudly (never a silent fallback to
+ * "no login required") if any of KNOVERA_LOGIN_EMAIL / KNOVERA_PASSWORD_HASH
+ * / KNOVERA_AUTH_SECRET is missing. Never echoes a configured value.
+ */
+export function requireKnoveraAuthEnv(config: AppConfig): KnoveraAuthConfig {
+  if (!config.knoveraAuth) {
+    throw new Error(
+      "Missing required Knovera auth configuration: KNOVERA_LOGIN_EMAIL, KNOVERA_PASSWORD_HASH, and " +
+        "KNOVERA_AUTH_SECRET must all be set — see backend/README.md for how to generate them.",
+    );
+  }
+  return config.knoveraAuth;
 }

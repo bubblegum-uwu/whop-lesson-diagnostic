@@ -60,7 +60,7 @@ function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps 
     identifyState: { phase: "idle" },
     onFindUserId: () => {},
     backendUrl: "https://backend.example.com",
-    accessToken: "token",
+    knoveraToken: "token",
     diagnosticState: { phase: "config", errorMessage: null, submitting: false },
     redirectUri: "https://example.com/",
     onDiagnosticSubmit: () => {},
@@ -140,7 +140,7 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
 
   it("E/C: a valid project with no sources shows the empty-source state with accurate copy, not fabricated data or a promise about YouTube/Discord being connectable now", async () => {
     stubFetch([]);
-    renderSources("/projects/7/sources");
+    renderSources("/projects/7/sources", { connected: false });
 
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
@@ -148,10 +148,10 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     expect(screen.queryByText(/Connect Whop, YouTube, or Discord/)).not.toBeInTheDocument();
   });
 
-  it("F/G/H: YouTube and Discord show Coming Soon; Whop shows Operational before its source is resolved", () => {
-    renderSources("/projects/mastermind/sources", { backendUrl: null, accessToken: null });
+  it("F/G/H: YouTube and Discord show Coming Soon; Whop shows Not Connected (signed out, no live Whop connection) before its source is resolved", () => {
+    renderSources("/projects/mastermind/sources", { backendUrl: null, knoveraToken: null, connected: false });
     expect(screen.getAllByText("Coming Soon")).toHaveLength(2);
-    expect(screen.getByText("Operational")).toBeInTheDocument();
+    expect(screen.getByText("Not Connected")).toBeInTheDocument();
   });
 
   it("I: a real numeric project id route (from the mocked API) works end to end", async () => {
@@ -196,7 +196,7 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
   });
 
   it("Diagnostic Tools stays visible pre-auth (it's still how a signed-out visitor can sign in / use the standalone diagnostic), not hidden by an unresolvable sources check", () => {
-    renderSources("/projects/mastermind/sources", { backendUrl: "https://backend.example.com", accessToken: null });
+    renderSources("/projects/mastermind/sources", { backendUrl: "https://backend.example.com", knoveraToken: null });
     expect(screen.getByText("Diagnostic Tools")).toBeInTheDocument();
   });
 
@@ -222,7 +222,10 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
   });
 
   it("preserves the pre-auth 'Connect Whop' entry point when signed out (CourseTable is the primary sign-in surface, not gated on an unresolvable sources check)", () => {
-    renderSources("/projects/mastermind/sources", { backendUrl: "https://backend.example.com", accessToken: null, connected: false });
-    expect(screen.getByText("Connect Whop")).toBeInTheDocument();
+    renderSources("/projects/mastermind/sources", { backendUrl: "https://backend.example.com", knoveraToken: null, connected: false });
+    // Two "Connect Whop" entry points now legitimately coexist while signed
+    // out: the Phase 4D provider-card button (shown whenever Whop isn't
+    // live-connected) and CourseTable's own pre-existing sign-in button.
+    expect(screen.getAllByText("Connect Whop").length).toBeGreaterThanOrEqual(1);
   });
 });

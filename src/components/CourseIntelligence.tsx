@@ -14,7 +14,7 @@ import {
 
 export interface CourseIntelligenceProps {
   backendUrl: string | null;
-  accessToken: string | null;
+  knoveraToken: string | null;
   connected: boolean;
 }
 
@@ -309,7 +309,7 @@ interface ConfirmDialogState {
   total: number;
 }
 
-export function CourseIntelligence({ backendUrl, accessToken, connected }: CourseIntelligenceProps) {
+export function CourseIntelligence({ backendUrl, knoveraToken }: CourseIntelligenceProps) {
   const [status, setStatus] = useState<SynthesisStatus | null>(null);
   const [data, setData] = useState<CourseSynthesisData | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
@@ -318,12 +318,12 @@ export function CourseIntelligence({ backendUrl, accessToken, connected }: Cours
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   async function refresh() {
-    if (!backendUrl || !accessToken) return;
+    if (!backendUrl || !knoveraToken) return;
     try {
-      const nextStatus = await getSynthesisStatus(backendUrl, accessToken);
+      const nextStatus = await getSynthesisStatus(backendUrl, knoveraToken);
       setStatus(nextStatus);
       if (nextStatus?.latestCompletedRun) {
-        const nextData = await getCourseSynthesis(backendUrl, accessToken);
+        const nextData = await getCourseSynthesis(backendUrl, knoveraToken);
         setData(nextData);
       }
     } catch (err) {
@@ -331,11 +331,17 @@ export function CourseIntelligence({ backendUrl, accessToken, connected }: Cours
     }
   }
 
+  // Phase 4D — reading existing synthesis (getSynthesisStatus/
+  // getCourseSynthesis) and launching a new run (doSynthesize below) both
+  // require only a Knovera session: they never call Whop, only Postgres
+  // (see backend http/app.ts's route classification). `connected` (LIVE
+  // Whop provider-connection state) must never gate this — Whop being
+  // disconnected must not hide an already-completed synthesis.
   useEffect(() => {
-    if (!connected || !backendUrl || !accessToken) return;
+    if (!backendUrl || !knoveraToken) return;
     void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connected, backendUrl, accessToken]);
+  }, [backendUrl, knoveraToken]);
 
   // Poll while a run is in flight — synthesis takes minutes, and the frontend
   // never holds an HTTP request open for it (see backend worker/synthesisLoop.ts).
@@ -347,14 +353,14 @@ export function CourseIntelligence({ backendUrl, accessToken, connected }: Cours
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status?.latestRun?.status, status?.latestRun?.runId]);
 
-  if (!connected || !backendUrl || !accessToken || !status) return null;
+  if (!backendUrl || !knoveraToken || !status) return null;
 
   async function doSynthesize(force: boolean) {
-    if (!backendUrl || !accessToken) return;
+    if (!backendUrl || !knoveraToken) return;
     setBusy(true);
     setErrorMessage(null);
     try {
-      await synthesizeCourse(backendUrl, accessToken, force);
+      await synthesizeCourse(backendUrl, knoveraToken, force);
       await refresh();
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Failed to start synthesis.");

@@ -19,9 +19,10 @@ function jsonResponse(status: number, body: unknown): Response {
 }
 
 describe("establishAuthSession", () => {
-  it("POSTs the tokens under snake_case keys the backend expects, with no id_token field", async () => {
+  it("POSTs the Whop tokens under snake_case keys the backend expects (with no id_token field), while sending the Knovera token as the Authorization bearer", async () => {
     const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
       expect(url).toBe(`${BACKEND_URL}/api/auth/session`);
+      expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${TOKEN}`);
       const body = JSON.parse(init.body as string);
       expect(body).toEqual({ access_token: "a", refresh_token: "r", expires_in: 3600 });
       expect(body.id_token).toBeUndefined();
@@ -29,7 +30,7 @@ describe("establishAuthSession", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await establishAuthSession(BACKEND_URL, { accessToken: "a", refreshToken: "r", expiresIn: 3600 });
+    await establishAuthSession(BACKEND_URL, TOKEN, { accessToken: "a", refreshToken: "r", expiresIn: 3600 });
   });
 
   it("throws when the backend rejects the session (e.g. a different operator, or a bad token)", async () => {
@@ -38,7 +39,7 @@ describe("establishAuthSession", () => {
       vi.fn(async () => jsonResponse(403, { error: { message: "A different Whop account already owns this deployment's operator session." } })),
     );
     await expect(
-      establishAuthSession(BACKEND_URL, { accessToken: "a", refreshToken: "r", expiresIn: 3600 }),
+      establishAuthSession(BACKEND_URL, TOKEN, { accessToken: "a", refreshToken: "r", expiresIn: 3600 }),
     ).rejects.toThrow(/different Whop account/);
   });
 });

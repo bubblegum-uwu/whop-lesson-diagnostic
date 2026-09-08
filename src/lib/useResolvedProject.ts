@@ -18,7 +18,7 @@ export type ResolvedProjectState =
  * ProjectHeader's redirect logic for why `"idle"`/`"loading"` must never be
  * treated as `"not_found"`.
  */
-export function useResolvedProject(backendUrl: string | null, accessToken: string | null): { state: ResolvedProjectState; routeParam: string | undefined } {
+export function useResolvedProject(backendUrl: string | null, knoveraToken: string | null): { state: ResolvedProjectState; routeParam: string | undefined } {
   const { projectId: routeParam } = useParams<{ projectId: string }>();
   const [state, setState] = useState<ResolvedProjectState>({ phase: "idle" });
 
@@ -35,17 +35,17 @@ export function useResolvedProject(backendUrl: string | null, accessToken: strin
   }
 
   useEffect(() => {
-    if (!backendUrl || !accessToken) {
+    if (!backendUrl || !knoveraToken) {
       setState({ phase: "idle" });
       return;
     }
     const cancelledRef = { current: false };
-    void resolve(backendUrl, accessToken, routeParam, cancelledRef);
+    void resolve(backendUrl, knoveraToken, routeParam, cancelledRef);
     return () => {
       cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, accessToken, routeParam]);
+  }, [backendUrl, knoveraToken, routeParam]);
 
   return { state, routeParam };
 }
