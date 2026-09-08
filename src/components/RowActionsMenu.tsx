@@ -4,6 +4,8 @@ export interface RowMenuItem {
   label: string;
   onClick: () => void;
   disabled?: boolean;
+  /** Shown as a native tooltip — mainly for explaining why a disabled item is disabled. */
+  title?: string;
 }
 
 /** The compact "•••" overflow menu for less-used row actions. */
@@ -41,6 +43,7 @@ export function RowActionsMenu({ items }: { items: RowMenuItem[] }) {
               role="menuitem"
               className="row-menu-item"
               disabled={item.disabled}
+              title={item.title}
               onClick={() => {
                 setOpen(false);
                 item.onClick();

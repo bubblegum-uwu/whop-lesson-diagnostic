@@ -449,8 +449,20 @@ button:disabled {
   font-weight: 600;
 }
 
-.link-button:hover {
+.link-button:hover:not(:disabled) {
   text-decoration: underline;
+}
+
+/* Phase 4D correction — a disabled row action (Analyze/Retry while Whop
+   isn't connected) must read as genuinely off, not a slightly-faded
+   version of the same gold "go" color: no accent color, no underline
+   affordance, just the same muted neutral every other disabled control in
+   this design system uses (see .knovera-open-link:disabled). */
+.link-button:disabled {
+  background: none;
+  color: var(--kv-text-muted, #6b6b74);
+  opacity: 1;
+  cursor: not-allowed;
 }
 
 .setup-disclosure {
@@ -590,6 +602,21 @@ button:disabled {
   flex-wrap: wrap;
   gap: 0.6rem;
   align-items: center;
+}
+
+/* Phase 4D correction — Analyze Selected / Analyze All Unanalyzed / Retry
+   Failed while Whop is disconnected: the base button's gold background at
+   reduced opacity still reads as "a slightly dimmer version of the active
+   CTA," not "off." Disabled here means a flat neutral chip — same muted
+   surface/border/text every other disabled control in this design system
+   uses (see .knovera-cta-secondary:disabled) — with a plain not-allowed
+   cursor and no hover response. */
+.toolbar-primary-actions button:disabled {
+  background: var(--kv-surface-2, #1a1a1f);
+  border: 1px solid var(--kv-border, #26262b);
+  color: var(--kv-text-muted, #6b6b74);
+  opacity: 1;
+  cursor: not-allowed;
 }
 
 .toolbar-primary-actions button {

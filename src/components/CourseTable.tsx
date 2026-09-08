@@ -205,11 +205,11 @@ interface RowActionsProps {
 
 function RowActions({ lesson, job, connected, onView, onAnalyze, onRetry, onCancel, onReanalyze, onDownload }: RowActionsProps) {
   const hasAnalysis = job.status === "COMPLETED" || job.status === "NO_STRATEGY";
-  const disconnectedTitle = "Connect Whop to analyze — this fetches the lesson's video from Whop.";
+  const disconnectedTitle = "Connect Whop to analyze lessons.";
   const menuItems = [
     { label: "Open Source", onClick: () => window.open(lesson.sourceUrl, "_blank", "noreferrer") },
     { label: "Download JSON", onClick: onDownload, disabled: !hasAnalysis },
-    { label: "Re-analyze", onClick: onReanalyze, disabled: !hasAnalysis || !connected },
+    { label: "Re-analyze", onClick: onReanalyze, disabled: !hasAnalysis || !connected, title: !hasAnalysis || connected ? undefined : disconnectedTitle },
   ];
 
   return (
@@ -509,21 +509,21 @@ export function CourseTable({
               <button
                 onClick={() => requestBatch(Array.from(selected), true, `${selected.size} selected lesson(s)`)}
                 disabled={selected.size === 0 || !connected}
-                title={!connected ? "Connect Whop to analyze new lessons — this fetches each lesson's video from Whop." : undefined}
+                title={!connected ? "Connect Whop to analyze lessons." : undefined}
               >
                 Analyze Selected{selected.size > 0 ? ` (${selected.size} selected)` : ""}
               </button>
               <button
                 onClick={() => requestBatch(unanalyzedIds, false, `${unanalyzedIds.length} unanalyzed lesson(s)`)}
                 disabled={unanalyzedIds.length === 0 || !connected}
-                title={!connected ? "Connect Whop to analyze new lessons — this fetches each lesson's video from Whop." : undefined}
+                title={!connected ? "Connect Whop to analyze lessons." : undefined}
               >
                 Analyze All Unanalyzed
               </button>
               <button
                 onClick={retryAllFailed}
                 disabled={failedIds.length === 0 || !connected}
-                title={!connected ? "Connect Whop to retry — this re-fetches each lesson's video from Whop." : undefined}
+                title={!connected ? "Connect Whop to analyze lessons." : undefined}
               >
                 Retry Failed
               </button>
@@ -536,7 +536,7 @@ export function CourseTable({
               above). Only shown when there's actually something these
               buttons would otherwise let the operator attempt. */}
           {!connected && (unanalyzedIds.length > 0 || failedIds.length > 0 || selected.size > 0) && (
-            <p className="hint">Connect Whop to analyze new lessons or retry failed ones — already-analyzed results stay visible either way.</p>
+            <p className="hint">Connect Whop to analyze lessons. Already-analyzed results stay visible either way.</p>
           )}
 
           {pendingBatch && (

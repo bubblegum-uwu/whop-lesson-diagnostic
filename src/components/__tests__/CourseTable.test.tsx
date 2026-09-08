@@ -70,15 +70,27 @@ describe("CourseTable", () => {
 
   it("Phase 4D correction: disables the row Analyze action for a NOT_ANALYZED lesson while Whop is disconnected — analyzing always fetches the video from Whop", () => {
     render(<CourseTable {...baseProps} lessons={[makeLesson({ job: { jobId: null, status: "NOT_ANALYZED" } })]} />);
-    expect(screen.getByRole("button", { name: /^analyze$/i })).toBeDisabled();
+    const analyzeButton = screen.getByRole("button", { name: /^analyze$/i });
+    expect(analyzeButton).toBeDisabled();
+    expect(analyzeButton).toHaveAttribute("title", "Connect Whop to analyze lessons.");
   });
 
   it("Phase 4D correction: disables the row Retry action for a FAILED lesson while Whop is disconnected", () => {
     render(<CourseTable {...baseProps} lessons={[makeLesson({ job: { jobId: "job_1", status: "FAILED", sanitizedError: "boom" } })]} />);
-    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+    expect(retryButton).toBeDisabled();
+    expect(retryButton).toHaveAttribute("title", "Connect Whop to analyze lessons.");
   });
 
-  it("Phase 4D correction: disables Analyze Selected / Analyze All Unanalyzed / Retry Failed while Whop is disconnected, and shows a hint", () => {
+  it("Phase 4D correction: disables the row Re-analyze menu item for an already-analyzed lesson while Whop is disconnected", () => {
+    render(<CourseTable {...baseProps} lessons={[makeLesson({ job: { jobId: "job_1", status: "COMPLETED" } })]} />);
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    const reanalyzeItem = screen.getByRole("menuitem", { name: "Re-analyze" });
+    expect(reanalyzeItem).toBeDisabled();
+    expect(reanalyzeItem).toHaveAttribute("title", "Connect Whop to analyze lessons.");
+  });
+
+  it("Phase 4D correction: disables Analyze Selected / Analyze All Unanalyzed / Retry Failed while Whop is disconnected, with a matching tooltip and hint", () => {
     render(
       <CourseTable
         {...baseProps}
@@ -90,10 +102,17 @@ describe("CourseTable", () => {
     );
     fireEvent.click(screen.getByLabelText("Select A"));
 
-    expect(screen.getByRole("button", { name: /analyze selected/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /analyze all unanalyzed/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /retry failed/i })).toBeDisabled();
-    expect(screen.getByText(/connect whop to analyze new lessons or retry failed ones/i)).toBeInTheDocument();
+    const analyzeSelected = screen.getByRole("button", { name: /analyze selected/i });
+    const analyzeAllUnanalyzed = screen.getByRole("button", { name: /analyze all unanalyzed/i });
+    const retryFailed = screen.getByRole("button", { name: /retry failed/i });
+
+    expect(analyzeSelected).toBeDisabled();
+    expect(analyzeAllUnanalyzed).toBeDisabled();
+    expect(retryFailed).toBeDisabled();
+    expect(analyzeSelected).toHaveAttribute("title", "Connect Whop to analyze lessons.");
+    expect(analyzeAllUnanalyzed).toHaveAttribute("title", "Connect Whop to analyze lessons.");
+    expect(retryFailed).toHaveAttribute("title", "Connect Whop to analyze lessons.");
+    expect(screen.getByText(/connect whop to analyze lessons\. already-analyzed results stay visible either way\./i)).toBeInTheDocument();
   });
 
   it("Phase 4D correction: reconnecting Whop re-enables Analyze/Retry actions for the same lessons", () => {
