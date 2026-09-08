@@ -290,3 +290,71 @@ describe("Phase 4B hotfix — Open no longer bounces back to Projects", () => {
     await waitFor(() => expect(screen.getByText("PROJECTS_PAGE_MARKER")).toBeInTheDocument());
   });
 });
+
+/**
+ * Phase 4C, section 21 — a full round trip through the real routed app
+ * shell (Projects → Open → Sources → Synthesis → Sources → Projects),
+ * using the real numeric-style id GET /api/projects returns. Regression
+ * coverage against the Phase 4B navigation bug recurring anywhere along
+ * this specific path: the flow must never bounce unexpectedly to Projects,
+ * lose the resolved project's identity, or fall back to the legacy
+ * "mastermind" slug once a real id is known.
+ */
+describe("Phase 4C — full Projects → Sources → Synthesis → Sources → Projects round trip", () => {
+  it("navigates the whole loop without ever bouncing to Projects or losing the real project id", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
+        if (url === "https://backend.example.com/api/projects/7/sources") {
+          return jsonResponse(200, { projectId: 7, sources: [{ provider: "WHOP", sourceType: "COURSE", courseId: 3, externalId: "cors_x", name: "The Trading Accelerator", lessonCount: 28, analyzedLessonCount: 28, queuedCount: 0, processingCount: 0, failedCount: 0, remainingCount: 0, lastSyncedAt: null, totalCost: null }] });
+        }
+        return jsonResponse(404, {});
+      }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/projects"]}>
+        <Routes>
+          <Route path="/projects" element={<ProjectsPage backendUrl="https://backend.example.com" accessToken="token" />} />
+          <Route
+            path="/projects/:projectId/sources"
+            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" accessToken="token" />}
+          />
+          <Route
+            path="/projects/:projectId/synthesis"
+            element={<SynthesisPage backendUrl="https://backend.example.com" accessToken="token" connected={false} />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    // Projects -> Open MasterMind
+    await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: /Open/ }));
+
+    // -> Sources, real numeric id, never bounces back
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Whop" })).toBeInTheDocument());
+    expect(screen.queryByText("Loading projects…")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("link", { name: "Sources" })).toHaveAttribute("href", "/projects/7/sources"));
+
+    // -> Synthesis, identity preserved (still MasterMind, still id 7) — a
+    // fresh page mount re-fetches (its own ProjectHeader instance), so this
+    // briefly shows "Loading…" before settling; wait for the settled state
+    // rather than asserting synchronously right after the click.
+    fireEvent.click(screen.getByRole("link", { name: "Synthesis" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
+    expect(screen.getByRole("link", { name: "Synthesis" })).toHaveAttribute("href", "/projects/7/synthesis");
+
+    // -> back to Sources
+    fireEvent.click(screen.getByRole("link", { name: "Sources" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Whop" })).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument();
+
+    // -> back to Projects via the header's back link
+    fireEvent.click(screen.getByRole("link", { name: "← Projects" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
+    // Confirms we're back on the real Projects page (Open button present), not a stray fallback.
+    expect(screen.getByRole("button", { name: /Open/ })).toBeInTheDocument();
+  });
+});

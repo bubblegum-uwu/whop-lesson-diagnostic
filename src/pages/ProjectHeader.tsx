@@ -1,18 +1,11 @@
-import { useEffect, useState } from "react";
-import { Navigate, NavLink, useParams } from "react-router-dom";
-import { PROJECT_TYPE_LABEL, MASTERMIND_ROUTE_SLUG, resolveProjectRoute, ProjectType } from "../lib/projects";
-import { listProjects, type ProjectSummary } from "../lib/projectsApi";
+import { Navigate, NavLink } from "react-router-dom";
+import { PROJECT_TYPE_LABEL, MASTERMIND_ROUTE_SLUG, ProjectType } from "../lib/projects";
+import { useResolvedProject } from "../lib/useResolvedProject";
 
 export interface ProjectHeaderProps {
   backendUrl: string | null;
   accessToken: string | null;
 }
-
-type ResolveState =
-  | { phase: "idle" }
-  | { phase: "loading" }
-  | { phase: "resolved"; project: ProjectSummary }
-  | { phase: "not_found" };
 
 /** A route param that could never resolve to any project — not the legacy slug, not even a syntactically valid (non-negative integer) database id. Used to redirect immediately on garbage without waiting on a network round trip; a real numeric id always waits for the lookup below instead (see the hotfix note on the redirect condition). */
 function isPlausibleProjectRouteParam(routeParam: string | undefined): boolean {
@@ -24,42 +17,18 @@ function isPlausibleProjectRouteParam(routeParam: string | undefined): boolean {
  * Shared header for both the Sources and Synthesis project pages: "←
  * Projects", the project's name/type, and the Sources/Synthesis tab nav.
  *
- * Resolves the route against the real `GET /api/projects` list instead of a
- * hardcoded lookup. That call requires the operator's Whop access token
- * (same as every other course/analysis route), so while signed out — or
- * before the fetch resolves — this falls back to the known legacy
- * "mastermind" slug's real name/type rather than showing nothing; it only
- * redirects to /projects once a completed fetch definitively finds no
- * matching project, or the route param could never be valid at all.
+ * Resolves the route against the real `GET /api/projects` list (via
+ * `useResolvedProject`, shared with SourcesPage's own source lookup)
+ * instead of a hardcoded lookup. That call requires the operator's Whop
+ * access token (same as every other course/analysis route), so while
+ * signed out — or before the fetch resolves — this falls back to the
+ * known legacy "mastermind" slug's real name/type rather than showing
+ * nothing; it only redirects to /projects once a completed fetch
+ * definitively finds no matching project, or the route param could never
+ * be valid at all.
  */
 export function ProjectHeader({ backendUrl, accessToken }: ProjectHeaderProps) {
-  const { projectId: routeParam } = useParams<{ projectId: string }>();
-  const [state, setState] = useState<ResolveState>({ phase: "idle" });
-
-  async function resolve(url: string, token: string, param: string | undefined, cancelledRef: { current: boolean }) {
-    setState({ phase: "loading" });
-    try {
-      const projects = await listProjects(url, token);
-      if (cancelledRef.current) return;
-      const resolved = resolveProjectRoute(projects, param);
-      setState(resolved ? { phase: "resolved", project: resolved } : { phase: "not_found" });
-    } catch {
-      if (!cancelledRef.current) setState({ phase: "idle" });
-    }
-  }
-
-  useEffect(() => {
-    if (!backendUrl || !accessToken) {
-      setState({ phase: "idle" });
-      return;
-    }
-    const cancelledRef = { current: false };
-    void resolve(backendUrl, accessToken, routeParam, cancelledRef);
-    return () => {
-      cancelledRef.current = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, accessToken, routeParam]);
+  const { state, routeParam } = useResolvedProject(backendUrl, accessToken);
 
   const isLegacySlug = routeParam === MASTERMIND_ROUTE_SLUG;
 
