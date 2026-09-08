@@ -4,7 +4,7 @@ import { useResolvedProject } from "../lib/useResolvedProject";
 
 export interface ProjectHeaderProps {
   backendUrl: string | null;
-  accessToken: string | null;
+  knoveraToken: string | null;
 }
 
 /** A route param that could never resolve to any project — not the legacy slug, not even a syntactically valid (non-negative integer) database id. Used to redirect immediately on garbage without waiting on a network round trip; a real numeric id always waits for the lookup below instead (see the hotfix note on the redirect condition). */
@@ -19,16 +19,16 @@ function isPlausibleProjectRouteParam(routeParam: string | undefined): boolean {
  *
  * Resolves the route against the real `GET /api/projects` list (via
  * `useResolvedProject`, shared with SourcesPage's own source lookup)
- * instead of a hardcoded lookup. That call requires the operator's Whop
- * access token (same as every other course/analysis route), so while
- * signed out — or before the fetch resolves — this falls back to the
+ * instead of a hardcoded lookup. That call requires the Knovera session
+ * token (never Whop, since Phase 4D — see lib/useResolvedProject.ts), so
+ * while signed out — or before the fetch resolves — this falls back to the
  * known legacy "mastermind" slug's real name/type rather than showing
  * nothing; it only redirects to /projects once a completed fetch
  * definitively finds no matching project, or the route param could never
  * be valid at all.
  */
-export function ProjectHeader({ backendUrl, accessToken }: ProjectHeaderProps) {
-  const { state, routeParam } = useResolvedProject(backendUrl, accessToken);
+export function ProjectHeader({ backendUrl, knoveraToken }: ProjectHeaderProps) {
+  const { state, routeParam } = useResolvedProject(backendUrl, knoveraToken);
 
   const isLegacySlug = routeParam === MASTERMIND_ROUTE_SLUG;
 

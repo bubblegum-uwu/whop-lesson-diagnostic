@@ -31,6 +31,7 @@ export type DiagnosticFlowState =
 export interface SourcesPageProps {
   courseTitle: string | null;
   lessons: CourseTableProps["lessons"];
+  /** LIVE Whop provider-connection state (GET /api/auth/status) — distinct from whether this project has ever had a persisted source, see sourcesState below. Drives the provider card's Connected/Not Connected badge. */
   connected: boolean;
   syncing: boolean;
   authRequired: boolean;
@@ -49,7 +50,8 @@ export interface SourcesPageProps {
   onFindUserId: () => void;
 
   backendUrl: string | null;
-  accessToken: string | null;
+  /** The Knovera session token (Phase 4D) — never a Whop token. Everything on this page except the standalone diagnostic tool below (which keeps its own separately-obtained Whop token, see diagnosticState) reads/writes using this. */
+  knoveraToken: string | null;
   diagnosticState: DiagnosticFlowState;
   redirectUri: string;
   onDiagnosticSubmit: (lessonUrl: string) => void;
@@ -63,26 +65,28 @@ type SourcesLoadState =
   | { phase: "error"; message: string };
 
 /**
- * Phase 4A — "/projects/:projectId/sources". Provider cards (Whop
- * operational, YouTube/Discord "Coming Soon") plus the existing Whop
- * sign-in/sync/lesson-analysis UI and the two standalone Whop utility
- * tools (single-lesson diagnostic, find-my-user-id), all reusing the
- * SAME components/handlers App.tsx already wires up — no analysis
- * behavior changed, only where it's rendered.
+ * "/projects/:projectId/sources". Provider cards (Whop operational,
+ * YouTube/Discord "Coming Soon") plus the existing Whop sync/lesson-analysis
+ * UI and the two standalone Whop utility tools (single-lesson diagnostic,
+ * find-my-user-id), all reusing the SAME components/handlers App.tsx
+ * already wires up — no analysis behavior changed, only where it's
+ * rendered.
  *
- * Phase 4C — additionally loads this project's real connected sources from
- * `GET /api/projects/:projectId/sources` (via the same `useResolvedProject`
- * hook ProjectHeader uses) to: (1) show the Whop provider card's real
- * connection state instead of always assuming a course is connected, and
- * (2) keep the legacy course table/mutation UI below from ever rendering
- * for a project that doesn't actually own a Whop course — see the "no
- * sources confirmed" branch. The legacy `courseState` props (still globally
- * scoped to the one configured Whop course, via App.tsx) are otherwise
- * untouched: this only decides WHETHER to show them for the current
- * project, never what they contain.
+ * Loads this project's real connected sources from `GET
+ * /api/projects/:projectId/sources` (via the same `useResolvedProject` hook
+ * ProjectHeader uses) to keep the legacy course table/mutation UI below
+ * from ever rendering for a project that has never owned a Whop course —
+ * see `confirmedNeverHadSource` below.
+ *
+ * Phase 4D — critically, that "has a source ever been persisted" signal is
+ * kept SEPARATE from `props.connected` (the LIVE Whop provider-connection
+ * state, from GET /api/auth/status): a course row and its lessons/analyses
+ * persist in Postgres independent of whether Whop is currently connected,
+ * so disconnecting Whop must never hide MasterMind's existing lessons —
+ * only flip the provider card to "Not Connected" and offer Connect Whop.
  */
 export function SourcesPage(props: SourcesPageProps) {
-  const { state: projectState } = useResolvedProject(props.backendUrl, props.accessToken);
+  const { state: projectState } = useResolvedProject(props.backendUrl, props.knoveraToken);
   const [sourcesState, setSourcesState] = useState<SourcesLoadState>({ phase: "idle" });
 
   async function loadSources(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
@@ -98,53 +102,58 @@ export function SourcesPage(props: SourcesPageProps) {
   }
 
   useEffect(() => {
-    if (projectState.phase !== "resolved" || !props.backendUrl || !props.accessToken) {
+    if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
       setSourcesState({ phase: "idle" });
       return;
     }
     const cancelledRef = { current: false };
-    void loadSources(props.backendUrl, props.accessToken, projectState.project.id, cancelledRef);
+    void loadSources(props.backendUrl, props.knoveraToken, projectState.project.id, cancelledRef);
     return () => {
       cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectState, props.backendUrl, props.accessToken]);
+  }, [projectState, props.backendUrl, props.knoveraToken]);
 
   const whopSource = sourcesState.phase === "loaded" ? sourcesState.sources.find((s) => s.provider === "WHOP") : undefined;
   // Only a completed, successful lookup that found zero Whop sources counts
-  // as "confirmed empty" — idle (signed out / not yet resolved), loading,
-  // and error all fall back to the pre-Phase-4C behavior below (which
-  // includes CourseTable's own "Connect Whop" prompt — the app's primary
-  // sign-in entry point — so those states must never hide it).
-  const confirmedNoWhopSource = sourcesState.phase === "loaded" && !whopSource;
+  // as "confirmed never had a source" — idle (signed out / not yet
+  // resolved), loading, and error all fall back to the pre-Phase-4C
+  // behavior below (which includes CourseTable's own "Connect Whop"
+  // prompt), so those states must never hide it. This is independent of
+  // live Whop connection — see the component doc comment above.
+  const confirmedNeverHadSource = sourcesState.phase === "loaded" && !whopSource;
+  const whopLiveConnected = props.connected;
 
   return (
     <div className="knovera-page">
-      <ProjectHeader backendUrl={props.backendUrl} accessToken={props.accessToken} />
+      <ProjectHeader backendUrl={props.backendUrl} knoveraToken={props.knoveraToken} />
 
       <h2 className="knovera-section-title">Source Providers</h2>
       <div className="knovera-provider-grid">
-        <div className={confirmedNoWhopSource ? "kv-card knovera-provider-card" : "kv-card knovera-provider-card operational"}>
+        <div className={whopLiveConnected ? "kv-card knovera-provider-card operational" : "kv-card knovera-provider-card"}>
           <div className="knovera-provider-card-top">
             <div className="knovera-provider-card-icon-row">
               <WhopIcon className="knovera-provider-icon" />
               <h3>Whop</h3>
             </div>
-            {confirmedNoWhopSource ? (
-              <span className="kv-badge kv-badge-muted">Not Connected</span>
-            ) : whopSource ? (
+            {whopLiveConnected ? (
               <span className="kv-badge kv-badge-accent">Connected</span>
             ) : (
-              <span className="kv-badge kv-badge-accent">Operational</span>
+              <span className="kv-badge kv-badge-muted">Not Connected</span>
             )}
           </div>
           <p className="knovera-provider-desc">
-            {confirmedNoWhopSource
-              ? "No Whop course connected to this project yet."
-              : whopSource
-                ? `${whopSource.name} — course lessons, synced and analyzed via Whop.`
-                : `${props.courseTitle ?? "The Trading Accelerator"} — course lessons, synced and analyzed via Whop.`}
+            {whopSource
+              ? `${whopSource.name} — course lessons, synced and analyzed via Whop.`
+              : sourcesState.phase !== "loaded" && whopLiveConnected
+                ? `${props.courseTitle ?? "The Trading Accelerator"} — course lessons, synced and analyzed via Whop.`
+                : "Connect a Whop course to sync and analyze its lessons."}
           </p>
+          {!whopLiveConnected && (
+            <button type="button" className="knovera-provider-connect-button" onClick={props.onSignIn}>
+              Connect Whop
+            </button>
+          )}
         </div>
         <div className="kv-card knovera-provider-card">
           <div className="knovera-provider-card-top">
@@ -176,14 +185,14 @@ export function SourcesPage(props: SourcesPageProps) {
         </div>
       )}
 
-      {confirmedNoWhopSource && (
+      {confirmedNeverHadSource && (
         <div className="kv-card knovera-empty-state">
           <p>No sources connected yet.</p>
           <p>Connect Whop to add content. YouTube and Discord support are coming soon.</p>
         </div>
       )}
 
-      {props.backendUrl && !confirmedNoWhopSource && (
+      {props.backendUrl && !confirmedNeverHadSource && (
         <>
           <DashboardSummary summary={props.summary} />
           <CourseTable
@@ -212,7 +221,7 @@ export function SourcesPage(props: SourcesPageProps) {
           on that definitive signal, same as CourseTable above, so it never
           disappears mid-load or pre-auth (where it's still the way to sign
           in) — and never hidden for MasterMind, which does have a source. */}
-      {!confirmedNoWhopSource && (
+      {!confirmedNeverHadSource && (
         <details className="knovera-diagnostic-tools">
           <summary>Diagnostic Tools</summary>
           <FindWhopUserId state={props.identifyState} onStart={props.onFindUserId} />

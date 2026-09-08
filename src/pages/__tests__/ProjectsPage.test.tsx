@@ -41,7 +41,7 @@ function renderProjects(props: Partial<ProjectsPageProps> = {}) {
   render(
     <MemoryRouter initialEntries={["/projects"]}>
       <Routes>
-        <Route path="/projects" element={<ProjectsPage backendUrl="https://backend.example.com" accessToken="token" {...props} />} />
+        <Route path="/projects" element={<ProjectsPage backendUrl="https://backend.example.com" knoveraToken="token" {...props} />} />
         <Route path="/projects/:projectId/sources" element={<div>SOURCES_PAGE_MARKER</div>} />
       </Routes>
     </MemoryRouter>,
@@ -50,7 +50,7 @@ function renderProjects(props: Partial<ProjectsPageProps> = {}) {
 
 describe("ProjectsPage", () => {
   it("prompts sign-in when there is no access token yet, rather than fetching or fabricating data", () => {
-    renderProjects({ accessToken: null });
+    renderProjects({ knoveraToken: null });
     expect(screen.getByText("Sign in to view your projects.")).toBeInTheDocument();
   });
 

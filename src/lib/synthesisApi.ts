@@ -1,12 +1,15 @@
 /**
  * Client for Phase 3.4's course-strategy-synthesis endpoints. Same
- * conventions as courseApi.ts: every call requires the operator's current
- * Whop access token as a bearer header.
+ * conventions as courseApi.ts: every call requires the Knovera session
+ * token (Phase 4D) — never a Whop token. Reading or launching synthesis
+ * never requires an active Whop connection; see http/app.ts's route
+ * classification (courseSynthesis.ts only uses whopCourseId as a stable
+ * string identifier, never a live Whop API call).
  */
 import type { KnowledgeItemScope, NumericalValue } from "./courseApi";
 
-function authHeaders(accessToken: string): HeadersInit {
-  return { Authorization: `Bearer ${accessToken}` };
+function authHeaders(knoveraToken: string): HeadersInit {
+  return { Authorization: `Bearer ${knoveraToken}` };
 }
 
 export type SynthesisRunStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
@@ -92,8 +95,8 @@ export interface SynthesisStatus {
   preflight: SynthesisPreflight;
 }
 
-export async function getSynthesisStatus(backendUrl: string, accessToken: string): Promise<SynthesisStatus | null> {
-  const res = await fetch(`${backendUrl}/api/course/synthesis-status`, { headers: authHeaders(accessToken) });
+export async function getSynthesisStatus(backendUrl: string, knoveraToken: string): Promise<SynthesisStatus | null> {
+  const res = await fetch(`${backendUrl}/api/course/synthesis-status`, { headers: authHeaders(knoveraToken) });
   if (!res.ok) throw new Error(`Failed to load synthesis status (${res.status}).`);
   const body = (await res.json()) as SynthesisStatus & { course: { title: string } | null };
   return body.course ? body : null;
@@ -104,10 +107,10 @@ export interface SynthesizeResult {
   run: SynthesisRunSummary;
 }
 
-export async function synthesizeCourse(backendUrl: string, accessToken: string, force = false): Promise<SynthesizeResult> {
+export async function synthesizeCourse(backendUrl: string, knoveraToken: string, force = false): Promise<SynthesizeResult> {
   const res = await fetch(`${backendUrl}/api/course/synthesize`, {
     method: "POST",
-    headers: { ...authHeaders(accessToken), "Content-Type": "application/json" },
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
     body: JSON.stringify({ force }),
   });
   const body = await res.json().catch(() => undefined);
@@ -324,8 +327,8 @@ export interface CourseSynthesisData {
   decisionFramework: DecisionFramework | null;
 }
 
-export async function getCourseSynthesis(backendUrl: string, accessToken: string): Promise<CourseSynthesisData | null> {
-  const res = await fetch(`${backendUrl}/api/course/synthesis`, { headers: authHeaders(accessToken) });
+export async function getCourseSynthesis(backendUrl: string, knoveraToken: string): Promise<CourseSynthesisData | null> {
+  const res = await fetch(`${backendUrl}/api/course/synthesis`, { headers: authHeaders(knoveraToken) });
   if (!res.ok) throw new Error(`Failed to load course synthesis (${res.status}).`);
   const body = (await res.json()) as CourseSynthesisData & { run: SynthesisRunSummary | null };
   return body.run ? (body as CourseSynthesisData) : null;

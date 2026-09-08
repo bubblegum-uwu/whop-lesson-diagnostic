@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { AppShellLayout } from "./components/AppShell";
 import { LandingPage } from "./pages/LandingPage";
+import { LoginPage } from "./pages/LoginPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { SourcesPage } from "./pages/SourcesPage";
 import { SynthesisPage } from "./pages/SynthesisPage";
@@ -20,6 +21,8 @@ import { saveConfig, loadConfig, clearConfig } from "./lib/sessionConfig";
 import { getBackendUrl } from "./lib/backendConfig";
 import { getWhopClientId } from "./lib/scarfaceCourseConfig";
 import { fetchWhopUserInfo } from "./lib/whopIdentify";
+import { knoveraLogin, knoveraLogout, getKnoveraMe, InvalidKnoveraCredentialsError } from "./lib/knoveraAuthApi";
+import { loadKnoveraToken, saveKnoveraToken, clearKnoveraToken } from "./lib/knoveraSession";
 import {
   establishAuthSession,
   getAuthStatus,
@@ -40,25 +43,29 @@ type AppState =
   | { phase: "config"; errorMessage: string | null; submitting: boolean }
   | { phase: "exchanging" }
   | { phase: "fetching" }
-  // `accessToken` is kept ONLY in this in-memory React state (per PoC spec:
-  // no localStorage/sessionStorage/cookies for the Whop access token). It's
-  // used solely to let the user optionally trigger the Phase 2 backend
-  // analysis, sent as an Authorization header and never rendered or logged.
+  // This one remains a genuinely separate, short-lived Whop access token —
+  // obtained by the standalone single-lesson diagnostic mini-flow, never
+  // the Knovera session and never the persistent Whop provider connection.
+  // Kept only in memory (no localStorage/sessionStorage), exactly as before.
   | { phase: "result"; payload: DiagnosticDisplayPayload; lessonUrl: string; accessToken: string }
   | { phase: "api_error"; outcome: Exclude<LessonFetchOutcome, { kind: "success" }> }
   | { phase: "fatal_error"; message: string };
 
+type KnoveraLoginState = { phase: "idle" } | { phase: "submitting" } | { phase: "error"; message: string };
+
 interface CourseViewState {
-  // Held only in memory, for the lifetime of this loaded page — never
-  // localStorage/sessionStorage/cookies. Every protected course/auth call
-  // needs it as a bearer header (the backend verifies it against Whop and
-  // checks it's the authorized operator); a page reload clears it, so the
-  // Course view requires signing in again before it can load. That's the
-  // correct cost of not relying on CORS/Origin as a security boundary.
-  accessToken: string | null;
+  // Phase 4D: no longer holds a Whop access token at all (see the
+  // top-level `knoveraToken` state below, and courseApi.ts's functions,
+  // which now all take that instead). The only place a Whop OAuth
+  // access/refresh token is ever held is transiently inside
+  // runCourseCallbackFlow, right after exchange, purely to hand it to
+  // establishAuthSession — never stored in ongoing state afterward.
   connecting: boolean;
   syncing: boolean;
   authRequired: boolean;
+  // LIVE Whop provider-connection state (GET /api/auth/status) — see
+  // SourcesPage.tsx's doc comment on why this is kept separate from
+  // whether a course/lessons/analyses have ever been persisted.
   connected: boolean;
   courseTitle: string | null;
   lastSyncedAt: string | null;
@@ -68,7 +75,6 @@ interface CourseViewState {
 }
 
 const INITIAL_COURSE_STATE: CourseViewState = {
-  accessToken: null,
   connecting: false,
   syncing: false,
   authRequired: false,
@@ -100,13 +106,49 @@ export default function App() {
   const [courseState, setCourseState] = useState<CourseViewState>(INITIAL_COURSE_STATE);
   const [identifyState, setIdentifyState] = useState<FindWhopUserIdState>({ phase: "idle" });
 
-  async function refreshCourseState(accessToken: string) {
+  // Phase 4D — the Knovera application session, entirely separate from Whop
+  // (see KNOVERA_AUTH_VS_PROVIDER_AUTH in the Phase 4D PR description).
+  // Hydrated synchronously from sessionStorage so it survives the full-page
+  // redirect round trip to Whop's authorize page and back (e.g. mid-way
+  // through Connect Whop), and so a same-tab reload doesn't force a fresh
+  // login within the token's 12h server-side expiry — see knoveraSession.ts
+  // for why sessionStorage (not localStorage) was chosen.
+  const [knoveraToken, setKnoveraToken] = useState<string | null>(() => loadKnoveraToken());
+  const [knoveraLoginState, setKnoveraLoginState] = useState<KnoveraLoginState>({ phase: "idle" });
+
+  // Phase 4D — verifies a held Knovera token (whether just restored from
+  // sessionStorage on page load, or freshly issued by handleKnoveraLogin)
+  // is still accepted by the backend. An expired/invalid token clears
+  // itself and sends the operator back to /login, rather than leaving a
+  // stale token in sessionStorage that would otherwise only surface as a
+  // confusing 401 the next time some API call happened to run. A network
+  // failure while checking is NOT treated as invalid — it fails safe by
+  // leaving the existing token in place.
+  useEffect(() => {
+    if (!backendUrl || !knoveraToken) return;
+    let cancelled = false;
+    getKnoveraMe(backendUrl, knoveraToken)
+      .then((me) => {
+        if (!cancelled && !me) {
+          clearKnoveraToken();
+          setKnoveraToken(null);
+          navigate("/login");
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendUrl, knoveraToken]);
+
+  async function refreshCourseState(token: string) {
     if (!backendUrl) return;
     try {
       const [authStatus, courseLessons, summary] = await Promise.all([
-        getAuthStatus(backendUrl, accessToken),
-        getCourseLessons(backendUrl, accessToken),
-        getAnalysisSummary(backendUrl, accessToken).catch(() => null),
+        getAuthStatus(backendUrl, token),
+        getCourseLessons(backendUrl, token),
+        getAnalysisSummary(backendUrl, token).catch(() => null),
       ]);
       setCourseState((prev) => ({
         ...prev,
@@ -125,28 +167,40 @@ export default function App() {
     }
   }
 
+  // Once logged into Knovera, load the persisted course/lesson/analysis
+  // state immediately — this is what makes Projects/Sources/Synthesis work
+  // with Whop fully disconnected (see Phase 4D's core requirement): nothing
+  // here depends on courseState.connected being true first.
+  useEffect(() => {
+    if (!backendUrl || !knoveraToken) return;
+    void refreshCourseState(knoveraToken);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendUrl, knoveraToken]);
+
   // Live-notification layer only (PR2): on any event, reload full state from
   // Postgres via refreshCourseState — the SSE stream never carries the
-  // record of what happened on its own. Reconnects safely on drop.
+  // record of what happened on its own. Reconnects safely on drop. Uses the
+  // Knovera token (Phase 4D) — this stream is a Knovera-authed read, not a
+  // Whop-gated one.
   useEffect(() => {
-    if (!backendUrl || !courseState.accessToken || !courseState.connected) return undefined;
-    const accessToken = courseState.accessToken;
-    const unsubscribe = subscribeAnalysisEvents(backendUrl, accessToken, () => {
-      void refreshCourseState(accessToken);
+    if (!backendUrl || !knoveraToken) return undefined;
+    const token = knoveraToken;
+    const unsubscribe = subscribeAnalysisEvents(backendUrl, token, () => {
+      void refreshCourseState(token);
     });
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, courseState.accessToken, courseState.connected]);
+  }, [backendUrl, knoveraToken]);
 
   useEffect(() => {
     const search = window.location.search;
     const params = new URLSearchParams(search);
     const isCallback = params.has("code") || params.has("error");
 
-    // No prior sign-in from this page load means no access token in hand —
-    // nothing to present to the protected course/auth endpoints yet, so the
-    // Course view simply starts in its "not connected" state (see
-    // INITIAL_COURSE_STATE) until the operator signs in again.
+    // No prior sign-in from this page load means nothing to present to the
+    // protected course/auth endpoints yet, so the Course view simply starts
+    // in its "not connected" state (see INITIAL_COURSE_STATE) until the
+    // operator connects Whop again.
     if (!isCallback) return;
 
     const config = loadConfig();
@@ -198,6 +252,10 @@ export default function App() {
       // establishment are all untouched). Sends the user to the page that now
       // displays this flow's result (see SourcesPage's "Diagnostic Tools"),
       // since window.history.replaceState above clears the hash back to "/".
+      // Note (Phase 4D): the Sources route now requires a Knovera session —
+      // if this standalone tool is used while signed out of Knovera, this
+      // navigation lands on /login instead, a known, accepted limitation of
+      // this secondary tool (see the Phase 4D PR description).
       navigate("/projects/mastermind/sources");
     }
   }
@@ -208,19 +266,23 @@ export default function App() {
       const callback = parseCallbackParams(search);
       const tokens = await exchangeCodeForTokens(clientId!, redirectUri, callback);
 
-      if (backendUrl) {
+      if (backendUrl && knoveraToken) {
         if (!tokens.refresh_token) {
           throw new Error(
             "Whop did not return a refresh_token — check that this OAuth app is configured to issue one.",
           );
         }
-        await establishAuthSession(backendUrl, {
+        // The Whop access/refresh tokens live only in this local `tokens`
+        // variable — handed to establishAuthSession's request body (which
+        // persists them server-side, encrypted) and never stored in React
+        // state afterward. Authorization for this call itself is the
+        // Knovera token, not these Whop tokens (see courseApi.ts).
+        await establishAuthSession(backendUrl, knoveraToken, {
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
           expiresIn: tokens.expires_in,
         });
-        setCourseState((prev) => ({ ...prev, accessToken: tokens.access_token }));
-        await refreshCourseState(tokens.access_token);
+        await refreshCourseState(knoveraToken);
       }
     } catch (err) {
       setCourseState((prev) => ({
@@ -305,11 +367,14 @@ export default function App() {
   }
 
   async function handleCourseSync() {
-    if (!backendUrl || !courseState.accessToken) return;
-    const accessToken = courseState.accessToken;
+    if (!backendUrl || !knoveraToken) return;
     setCourseState((prev) => ({ ...prev, syncing: true, errorMessage: null }));
-    const outcome = await syncCourse(backendUrl, accessToken);
+    const outcome = await syncCourse(backendUrl, knoveraToken);
     if (outcome.kind === "auth_required") {
+      // Phase 4D: this 401 means the WHOP provider connection is stale
+      // (courseSync.ts's own getValidAccessToken/AuthRequiredError path,
+      // behind requireWhopConnected's fast pre-check) — never the Knovera
+      // session, which is a separate, unaffected credential.
       setCourseState((prev) => ({ ...prev, syncing: false, authRequired: true, connected: false }));
       return;
     }
@@ -317,22 +382,28 @@ export default function App() {
       setCourseState((prev) => ({ ...prev, syncing: false, errorMessage: outcome.message }));
       return;
     }
-    await refreshCourseState(accessToken);
+    await refreshCourseState(knoveraToken);
     setCourseState((prev) => ({ ...prev, syncing: false }));
   }
 
+  /**
+   * Disconnects the Whop provider connection only. Phase 4D requirement:
+   * this must NEVER touch the Knovera session — no navigation to /login, no
+   * clearing knoveraToken. Projects/MasterMind/existing lessons/analyses/
+   * synthesis all remain visible immediately after, driven by the same
+   * refreshCourseState() call every other mutation already uses.
+   */
   async function handleCourseDisconnect() {
-    if (!backendUrl || !courseState.accessToken) return;
-    await disconnectAuthSession(backendUrl, courseState.accessToken);
-    setCourseState(INITIAL_COURSE_STATE);
+    if (!backendUrl || !knoveraToken) return;
+    await disconnectAuthSession(backendUrl, knoveraToken);
+    await refreshCourseState(knoveraToken);
   }
 
   async function handleEnqueue(lessonIds: number[], force = false) {
-    if (!backendUrl || !courseState.accessToken) return;
-    const accessToken = courseState.accessToken;
+    if (!backendUrl || !knoveraToken) return;
     try {
-      await enqueueAnalysisJobs(backendUrl, accessToken, lessonIds, force);
-      await refreshCourseState(accessToken);
+      await enqueueAnalysisJobs(backendUrl, knoveraToken, lessonIds, force);
+      await refreshCourseState(knoveraToken);
     } catch (err) {
       setCourseState((prev) => ({
         ...prev,
@@ -342,11 +413,10 @@ export default function App() {
   }
 
   async function handleRetry(jobId: string) {
-    if (!backendUrl || !courseState.accessToken) return;
-    const accessToken = courseState.accessToken;
+    if (!backendUrl || !knoveraToken) return;
     try {
-      await retryAnalysisJob(backendUrl, accessToken, jobId);
-      await refreshCourseState(accessToken);
+      await retryAnalysisJob(backendUrl, knoveraToken, jobId);
+      await refreshCourseState(knoveraToken);
     } catch (err) {
       setCourseState((prev) => ({
         ...prev,
@@ -356,20 +426,52 @@ export default function App() {
   }
 
   async function handleCancel(jobId: string) {
-    if (!backendUrl || !courseState.accessToken) return;
-    const accessToken = courseState.accessToken;
-    await cancelAnalysisJob(backendUrl, accessToken, jobId);
-    await refreshCourseState(accessToken);
+    if (!backendUrl || !knoveraToken) return;
+    await cancelAnalysisJob(backendUrl, knoveraToken, jobId);
+    await refreshCourseState(knoveraToken);
   }
 
   async function handleLoadAnalysis(lessonId: number): Promise<unknown | null> {
-    if (!backendUrl || !courseState.accessToken) return null;
-    return getLessonAnalysisJson(backendUrl, courseState.accessToken, lessonId);
+    if (!backendUrl || !knoveraToken) return null;
+    return getLessonAnalysisJson(backendUrl, knoveraToken, lessonId);
   }
 
   function handleReset() {
     clearConfig();
     setState({ phase: "config", errorMessage: null, submitting: false });
+  }
+
+  async function handleKnoveraLogin(email: string, password: string) {
+    if (!backendUrl) return;
+    setKnoveraLoginState({ phase: "submitting" });
+    try {
+      const { token } = await knoveraLogin(backendUrl, email, password);
+      saveKnoveraToken(token);
+      setKnoveraToken(token);
+      setKnoveraLoginState({ phase: "idle" });
+      navigate("/projects");
+    } catch (err) {
+      setKnoveraLoginState({
+        phase: "error",
+        message: err instanceof InvalidKnoveraCredentialsError ? err.message : "Login failed. Please try again.",
+      });
+    }
+  }
+
+  /**
+   * Ends the Knovera session. Best-effort server call (see
+   * lib/knoveraAuthApi.ts's knoveraLogout — this is a stateless token, so
+   * nothing is actually revoked server-side); the local token discard below
+   * is what actually ends the session for this browser.
+   */
+  async function handleKnoveraLogout() {
+    if (backendUrl && knoveraToken) {
+      await knoveraLogout(backendUrl, knoveraToken);
+    }
+    clearKnoveraToken();
+    setKnoveraToken(null);
+    setCourseState(INITIAL_COURSE_STATE);
+    navigate("/login");
   }
 
   if (!clientId) {
@@ -382,15 +484,31 @@ export default function App() {
     );
   }
 
-  // Phase 4A — routing/shell only. Every handler/effect above is unchanged
-  // from the pre-Phase-4 App.tsx; this return just decides WHERE the same
-  // state/handlers get rendered. See src/pages/ for the new page components
-  // and src/components/AppShell.tsx for the top nav wrapper.
+  // Phase 4D — /login and everything under AppShellLayout (Projects/Sources/
+  // Synthesis/Usage) now requires a Knovera session; Whop is no longer
+  // involved in reaching any of them. Every handler/effect above otherwise
+  // keeps the same Whop OAuth mechanics untouched (PKCE, callback parsing,
+  // token exchange) — this return only decides WHERE state renders and
+  // which routes require being logged into Knovera first.
   return (
     <Routes>
       <Route path="/" element={<LandingPage />} />
-      <Route element={<AppShellLayout />}>
-        <Route path="/projects" element={<ProjectsPage backendUrl={backendUrl} accessToken={courseState.accessToken} />} />
+      <Route
+        path="/login"
+        element={
+          knoveraToken ? (
+            <Navigate to="/projects" replace />
+          ) : (
+            <LoginPage
+              onSubmit={handleKnoveraLogin}
+              submitting={knoveraLoginState.phase === "submitting"}
+              errorMessage={knoveraLoginState.phase === "error" ? knoveraLoginState.message : null}
+            />
+          )
+        }
+      />
+      <Route element={knoveraToken ? <AppShellLayout onLogout={handleKnoveraLogout} /> : <Navigate to="/login" replace />}>
+        <Route path="/projects" element={<ProjectsPage backendUrl={backendUrl} knoveraToken={knoveraToken} />} />
         <Route path="/usage" element={<UsagePage />} />
         <Route
           path="/projects/:projectId/sources"
@@ -414,7 +532,7 @@ export default function App() {
               identifyState={identifyState}
               onFindUserId={handleFindUserId}
               backendUrl={backendUrl}
-              accessToken={courseState.accessToken}
+              knoveraToken={knoveraToken}
               diagnosticState={state}
               redirectUri={redirectUri}
               onDiagnosticSubmit={handleSubmit}
@@ -424,7 +542,7 @@ export default function App() {
         />
         <Route
           path="/projects/:projectId/synthesis"
-          element={<SynthesisPage backendUrl={backendUrl} accessToken={courseState.accessToken} connected={courseState.connected} />}
+          element={<SynthesisPage backendUrl={backendUrl} knoveraToken={knoveraToken} connected={courseState.connected} />}
         />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

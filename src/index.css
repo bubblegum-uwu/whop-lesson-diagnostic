@@ -449,8 +449,20 @@ button:disabled {
   font-weight: 600;
 }
 
-.link-button:hover {
+.link-button:hover:not(:disabled) {
   text-decoration: underline;
+}
+
+/* Phase 4D correction — a disabled row action (Analyze/Retry while Whop
+   isn't connected) must read as genuinely off, not a slightly-faded
+   version of the same gold "go" color: no accent color, no underline
+   affordance, just the same muted neutral every other disabled control in
+   this design system uses (see .knovera-open-link:disabled). */
+.link-button:disabled {
+  background: none;
+  color: var(--kv-text-muted, #6b6b74);
+  opacity: 1;
+  cursor: not-allowed;
 }
 
 .setup-disclosure {
@@ -590,6 +602,21 @@ button:disabled {
   flex-wrap: wrap;
   gap: 0.6rem;
   align-items: center;
+}
+
+/* Phase 4D correction — Analyze Selected / Analyze All Unanalyzed / Retry
+   Failed while Whop is disconnected: the base button's gold background at
+   reduced opacity still reads as "a slightly dimmer version of the active
+   CTA," not "off." Disabled here means a flat neutral chip — same muted
+   surface/border/text every other disabled control in this design system
+   uses (see .knovera-cta-secondary:disabled) — with a plain not-allowed
+   cursor and no hover response. */
+.toolbar-primary-actions button:disabled {
+  background: var(--kv-surface-2, #1a1a1f);
+  border: 1px solid var(--kv-border, #26262b);
+  color: var(--kv-text-muted, #6b6b74);
+  opacity: 1;
+  cursor: not-allowed;
 }
 
 .toolbar-primary-actions button {
@@ -1458,6 +1485,8 @@ button:disabled {
 .kv-topnav-avatar {
   width: 30px;
   height: 30px;
+  margin: 0;
+  padding: 0;
   border-radius: 50%;
   background: var(--kv-surface-2);
   border: 1px solid var(--kv-border);
@@ -1467,6 +1496,15 @@ button:disabled {
   font-size: 0.78rem;
   font-weight: 600;
   color: var(--kv-text-secondary);
+}
+
+button.kv-topnav-avatar {
+  cursor: pointer;
+}
+
+button.kv-topnav-avatar:hover {
+  border-color: var(--kv-accent);
+  color: var(--kv-accent);
 }
 
 .knovera-main {
@@ -1889,6 +1927,63 @@ button:disabled {
   justify-content: flex-end;
 }
 
+.knovera-login-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: var(--kv-space-6);
+  box-sizing: border-box;
+}
+
+.knovera-login-card {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 380px;
+  padding: var(--kv-space-6);
+}
+
+.knovera-login-title {
+  margin: 0 0 0.25rem;
+  font-size: 1.3rem;
+  font-weight: 620;
+  color: var(--kv-text);
+}
+
+.knovera-login-subtitle {
+  margin: 0 0 var(--kv-space-5);
+  color: var(--kv-text-secondary);
+  font-size: 0.92rem;
+}
+
+.knovera-login-card label {
+  margin-top: var(--kv-space-4);
+  margin-bottom: var(--kv-space-2);
+  font-size: 0.85rem;
+  color: var(--kv-text-secondary);
+}
+
+.knovera-login-card input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.knovera-login-error {
+  margin: var(--kv-space-4) 0 0;
+  padding: var(--kv-space-3);
+  border-radius: var(--kv-radius);
+  background: var(--kv-error-soft);
+  color: var(--kv-error);
+  font-size: 0.85rem;
+}
+
+.knovera-login-submit {
+  width: 100%;
+  margin-top: var(--kv-space-5);
+}
+
 /* ---- Project workspace header (Sources/Synthesis) -------------------------- */
 
 .knovera-project-header {
@@ -2031,6 +2126,24 @@ button:disabled {
   color: var(--kv-text-muted);
   font-size: 0.84rem;
   line-height: 1.5;
+}
+
+.knovera-provider-connect-button {
+  align-self: flex-start;
+  margin-top: var(--kv-space-2);
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--kv-radius);
+  border: 1px solid var(--kv-border);
+  background: var(--kv-surface-2);
+  color: var(--kv-text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.knovera-provider-connect-button:hover {
+  border-color: var(--kv-accent);
+  color: var(--kv-accent);
 }
 
 .knovera-diagnostic-tools {

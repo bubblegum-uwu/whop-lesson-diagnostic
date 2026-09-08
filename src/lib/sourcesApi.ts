@@ -1,10 +1,10 @@
 /**
- * Client for GET /api/projects/:projectId/sources (Phase 4C). Same shape as
- * courseApi.ts/projectsApi.ts: requires the operator's Whop access token,
- * same as every other course/analysis/project route.
+ * Client for GET /api/projects/:projectId/sources. Requires the caller's
+ * Knovera session token (Phase 4D) — never a Whop token; a project's
+ * sources are readable regardless of whether Whop is currently connected.
  */
-function authHeaders(accessToken: string): HeadersInit {
-  return { Authorization: `Bearer ${accessToken}` };
+function authHeaders(knoveraToken: string): HeadersInit {
+  return { Authorization: `Bearer ${knoveraToken}` };
 }
 
 /** Only WHOP is ever returned by the backend today — see lib/providers.ts for the full conceptual provider set (including YouTube/Discord, which have no connected data yet). */
@@ -37,8 +37,8 @@ async function readErrorMessage(res: Response, fallback: string): Promise<string
   return body?.error?.message ?? fallback;
 }
 
-export async function getProjectSources(backendUrl: string, accessToken: string, projectId: number): Promise<ProjectSourcesResult> {
-  const res = await fetch(`${backendUrl}/api/projects/${projectId}/sources`, { headers: authHeaders(accessToken) });
+export async function getProjectSources(backendUrl: string, knoveraToken: string, projectId: number): Promise<ProjectSourcesResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/sources`, { headers: authHeaders(knoveraToken) });
   if (!res.ok) {
     throw new Error(await readErrorMessage(res, `Failed to load sources (${res.status}).`));
   }

@@ -33,7 +33,7 @@ function baseSourcesProps(): SourcesPageProps {
     identifyState: { phase: "idle" },
     onFindUserId: () => {},
     backendUrl: null,
-    accessToken: null,
+    knoveraToken: null,
     diagnosticState: { phase: "config", errorMessage: null, submitting: false },
     redirectUri: "https://example.com/",
     onDiagnosticSubmit: () => {},
@@ -46,7 +46,7 @@ function renderProjectWorkspace(initialPath: string) {
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/projects/:projectId/sources" element={<SourcesPage {...baseSourcesProps()} />} />
-        <Route path="/projects/:projectId/synthesis" element={<SynthesisPage backendUrl={null} accessToken={null} connected={false} />} />
+        <Route path="/projects/:projectId/synthesis" element={<SynthesisPage backendUrl={null} knoveraToken={null} connected={false} />} />
         <Route path="/projects" element={<div>PROJECTS_PAGE_MARKER</div>} />
       </Routes>
     </MemoryRouter>,
@@ -63,10 +63,10 @@ describe("Project workspace navigation", () => {
     expect(screen.getByRole("link", { name: "← Projects" })).toBeInTheDocument();
   });
 
-  it("lists Whop (operational), YouTube (Coming Soon), and Discord (Coming Soon) as source providers", () => {
+  it("lists Whop (Not Connected, since this workspace has no live Whop connection), YouTube (Coming Soon), and Discord (Coming Soon) as source providers", () => {
     renderProjectWorkspace("/projects/mastermind/sources");
     expect(screen.getByRole("heading", { name: "Whop" })).toBeInTheDocument();
-    expect(screen.getByText("Operational")).toBeInTheDocument();
+    expect(screen.getByText("Not Connected")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "YouTube" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Discord" })).toBeInTheDocument();
     expect(screen.getAllByText("Coming Soon")).toHaveLength(2);
@@ -132,7 +132,7 @@ describe("Project workspace navigation — backed by GET /api/projects", () => {
         <Routes>
           <Route
             path="/projects/:projectId/sources"
-            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" accessToken="token" />}
+            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" knoveraToken="token" />}
           />
         </Routes>
       </MemoryRouter>,
@@ -183,10 +183,10 @@ describe("Phase 4B hotfix — Open no longer bounces back to Projects", () => {
     render(
       <MemoryRouter initialEntries={["/projects"]}>
         <Routes>
-          <Route path="/projects" element={<ProjectsPage backendUrl="https://backend.example.com" accessToken="token" />} />
+          <Route path="/projects" element={<ProjectsPage backendUrl="https://backend.example.com" knoveraToken="token" />} />
           <Route
             path="/projects/:projectId/sources"
-            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" accessToken="token" />}
+            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" knoveraToken="token" />}
           />
         </Routes>
       </MemoryRouter>,
@@ -213,7 +213,7 @@ describe("Phase 4B hotfix — Open no longer bounces back to Projects", () => {
         <Routes>
           <Route
             path="/projects/:projectId/sources"
-            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" accessToken="token" />}
+            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" knoveraToken="token" />}
           />
           <Route path="/projects" element={<div>PROJECTS_PAGE_MARKER</div>} />
         </Routes>
@@ -235,7 +235,7 @@ describe("Phase 4B hotfix — Open no longer bounces back to Projects", () => {
         <Routes>
           <Route
             path="/projects/:projectId/synthesis"
-            element={<SynthesisPage backendUrl="https://backend.example.com" accessToken="token" connected={false} />}
+            element={<SynthesisPage backendUrl="https://backend.example.com" knoveraToken="token" connected={false} />}
           />
           <Route path="/projects" element={<div>PROJECTS_PAGE_MARKER</div>} />
         </Routes>
@@ -256,7 +256,7 @@ describe("Phase 4B hotfix — Open no longer bounces back to Projects", () => {
         <Routes>
           <Route
             path="/projects/:projectId/sources"
-            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" accessToken="token" />}
+            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" knoveraToken="token" />}
           />
           <Route path="/projects" element={<div>PROJECTS_PAGE_MARKER</div>} />
         </Routes>
@@ -277,7 +277,7 @@ describe("Phase 4B hotfix — Open no longer bounces back to Projects", () => {
         <Routes>
           <Route
             path="/projects/:projectId/sources"
-            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" accessToken="token" />}
+            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" knoveraToken="token" />}
           />
           <Route path="/projects" element={<div>PROJECTS_PAGE_MARKER</div>} />
         </Routes>
@@ -316,14 +316,14 @@ describe("Phase 4C — full Projects → Sources → Synthesis → Sources → P
     render(
       <MemoryRouter initialEntries={["/projects"]}>
         <Routes>
-          <Route path="/projects" element={<ProjectsPage backendUrl="https://backend.example.com" accessToken="token" />} />
+          <Route path="/projects" element={<ProjectsPage backendUrl="https://backend.example.com" knoveraToken="token" />} />
           <Route
             path="/projects/:projectId/sources"
-            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" accessToken="token" />}
+            element={<SourcesPage {...baseSourcesProps()} backendUrl="https://backend.example.com" knoveraToken="token" />}
           />
           <Route
             path="/projects/:projectId/synthesis"
-            element={<SynthesisPage backendUrl="https://backend.example.com" accessToken="token" connected={false} />}
+            element={<SynthesisPage backendUrl="https://backend.example.com" knoveraToken="token" connected={false} />}
           />
         </Routes>
       </MemoryRouter>,

@@ -409,6 +409,32 @@ Dockerfile                 Node 22 + ffmpeg, multi-stage build
 | `CLOUD_RUN_JOB_NAME` | Yes for `api` role | — | `whop-lesson-gemini-worker`. |
 | `SCHEDULER_SERVICE_ACCOUNT_EMAIL` | Yes for `api` role | — | The **only** identity `POST /internal/ensure-worker-running` trusts — verified via a real Google-signed OIDC token, never CORS/Origin/a shared secret. |
 | `PUBLIC_API_BASE_URL` | Yes for `api` role | — | This service's own Cloud Run URL — the expected `aud` claim on the Scheduler's OIDC token. |
+| `KNOVERA_LOGIN_EMAIL` | Yes | — | Not a secret by itself, but treat it as sensitive config. The one configured Knovera operator's login email (Phase 4D) — entirely separate from Whop; see "Knovera application login" below. |
+| `KNOVERA_PASSWORD_HASH` | Yes | — | **Secret.** The scrypt hash of the operator's Knovera login password — never the plaintext. Generate it with `scripts/generateKnoveraPasswordHash.ts` (see below); never hand-write one. |
+| `KNOVERA_AUTH_SECRET` | Yes | — | **Secret.** HMAC signing key for Knovera session tokens, e.g. `openssl rand -base64 48`. Rotating it invalidates every outstanding Knovera session. |
+
+## Knovera application login (Phase 4D)
+
+Knovera's own login (Projects/MasterMind/Sources/Synthesis) is entirely
+separate from Whop OAuth — a single, fixed operator identity (email +
+password), not a user table. See `src/lib/knoveraToken.ts` and
+`src/http/routes/knoveraAuth.ts` for the implementation; this section is
+just the one-time owner setup.
+
+1. Generate the password hash **in a real terminal** (never over a piped/
+   redirected command, and never by hand-typing the hash yourself):
+   ```
+   cd backend
+   npx tsx scripts/generateKnoveraPasswordHash.ts
+   ```
+   This prompts for the password twice (hidden — nothing is echoed to the
+   terminal when run interactively) and prints only the resulting hash.
+   Copy that hash — never the password itself — into `KNOVERA_PASSWORD_HASH`.
+2. Generate the auth secret: `openssl rand -base64 48`.
+3. Set `KNOVERA_LOGIN_EMAIL`, `KNOVERA_PASSWORD_HASH`, and
+   `KNOVERA_AUTH_SECRET` via Secret Manager / Cloud Run env config, the same
+   way `GEMINI_API_KEY`/`DB_PASSWORD` are set below — never in the
+   Dockerfile, never in a committed `.env` file.
 
 ## Running locally
 

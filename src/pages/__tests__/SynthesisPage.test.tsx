@@ -56,7 +56,7 @@ describe("SynthesisPage — relocates the existing CourseIntelligence component 
         <Routes>
           <Route
             path="/projects/:projectId/synthesis"
-            element={<SynthesisPage backendUrl="https://backend.example.com" accessToken="token" connected={true} />}
+            element={<SynthesisPage backendUrl="https://backend.example.com" knoveraToken="token" connected={true} />}
           />
         </Routes>
       </MemoryRouter>,
@@ -72,7 +72,7 @@ describe("SynthesisPage — relocates the existing CourseIntelligence component 
         <Routes>
           <Route
             path="/projects/:projectId/synthesis"
-            element={<SynthesisPage backendUrl="https://backend.example.com" accessToken={null} connected={false} />}
+            element={<SynthesisPage backendUrl="https://backend.example.com" knoveraToken={null} connected={false} />}
           />
         </Routes>
       </MemoryRouter>,
