@@ -138,12 +138,14 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     await waitFor(() => expect(screen.getByText("Sources unavailable.")).toBeInTheDocument());
   });
 
-  it("E: a valid project with no sources shows the empty-source state, not fabricated data", async () => {
+  it("E/C: a valid project with no sources shows the empty-source state with accurate copy, not fabricated data or a promise about YouTube/Discord being connectable now", async () => {
     stubFetch([]);
     renderSources("/projects/7/sources");
 
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
+    expect(screen.getByText("Connect Whop to add content. YouTube and Discord support are coming soon.")).toBeInTheDocument();
+    expect(screen.queryByText(/Connect Whop, YouTube, or Discord/)).not.toBeInTheDocument();
   });
 
   it("F/G/H: YouTube and Discord show Coming Soon; Whop shows Operational before its source is resolved", () => {
@@ -175,13 +177,27 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     expect(screen.queryByText("Analyze All Unanalyzed")).not.toBeInTheDocument();
   });
 
-  it("M: existing lesson-management controls remain functional for MasterMind (a project that does own a source)", async () => {
+  it("M/G: existing lesson-management AND Diagnostic Tools remain functional/visible for MasterMind (a project that does own a source)", async () => {
     stubFetch([WHOP_SOURCE]);
     renderSources("/projects/7/sources", { connected: true });
 
     await waitFor(() => expect(screen.getByText("Connected")).toBeInTheDocument());
     expect(screen.getByText("Sync Course")).toBeInTheDocument();
     expect(screen.getByText("Disconnect Whop")).toBeInTheDocument();
+    expect(screen.getByText("Diagnostic Tools")).toBeInTheDocument();
+  });
+
+  it("D: a confirmed-empty project hides Diagnostic Tools (legacy Whop-only utilities with nothing to operate on)", async () => {
+    stubFetch([]);
+    renderSources("/projects/7/sources");
+
+    await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
+    expect(screen.queryByText("Diagnostic Tools")).not.toBeInTheDocument();
+  });
+
+  it("Diagnostic Tools stays visible pre-auth (it's still how a signed-out visitor can sign in / use the standalone diagnostic), not hidden by an unresolvable sources check", () => {
+    renderSources("/projects/mastermind/sources", { backendUrl: "https://backend.example.com", accessToken: null });
+    expect(screen.getByText("Diagnostic Tools")).toBeInTheDocument();
   });
 
   it("N: a project route does not leak another project's course into the Sources workspace", async () => {

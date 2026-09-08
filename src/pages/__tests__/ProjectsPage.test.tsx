@@ -72,7 +72,7 @@ describe("ProjectsPage", () => {
     await waitFor(() => expect(screen.getByText(/Database unavailable/)).toBeInTheDocument());
   });
 
-  it("renders the real MasterMind project from GET /api/projects, with its type, source, and live stats", async () => {
+  it("A: renders the real MasterMind project from GET /api/projects — its real courseCount > 0 is what lets the card say Whop, with type/source/live stats", async () => {
     stubFetch([MASTERMIND]);
     renderProjects();
     await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
@@ -81,6 +81,26 @@ describe("ProjectsPage", () => {
     expect(screen.getByText("28")).toBeInTheDocument();
     expect(screen.getByText("Lessons")).toBeInTheDocument();
     expect(screen.getByText("COMPLETED")).toBeInTheDocument();
+  });
+
+  it("B: a project with zero sources (courseCount 0) never displays Whop as its project source — shows a neutral label instead", async () => {
+    const emptyProject: ProjectSummary = {
+      id: 8,
+      name: "SecondProject",
+      projectType: "GENERAL_KNOWLEDGE",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      courseCount: 0,
+      lessonCount: 0,
+      analyzedLessonCount: 0,
+      latestSynthesisStatus: null,
+      latestSynthesisCompletedAt: null,
+    };
+    stubFetch([emptyProject]);
+    renderProjects();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "SecondProject" })).toBeInTheDocument());
+    expect(screen.getByText("No sources yet")).toBeInTheDocument();
+    expect(screen.queryByText("Whop")).not.toBeInTheDocument();
   });
 
   it("clicking Open on MasterMind navigates into the project workspace using its real numeric id", async () => {

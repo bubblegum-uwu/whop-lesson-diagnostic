@@ -179,7 +179,7 @@ export function SourcesPage(props: SourcesPageProps) {
       {confirmedNoWhopSource && (
         <div className="kv-card knovera-empty-state">
           <p>No sources connected yet.</p>
-          <p>Connect Whop, YouTube, or Discord above to bring content into this project.</p>
+          <p>Connect Whop to add content. YouTube and Discord support are coming soon.</p>
         </div>
       )}
 
@@ -206,45 +206,53 @@ export function SourcesPage(props: SourcesPageProps) {
       )}
       {props.courseErrorMessage && <div className="error-box">{props.courseErrorMessage}</div>}
 
-      <details className="knovera-diagnostic-tools">
-        <summary>Diagnostic Tools</summary>
-        <FindWhopUserId state={props.identifyState} onStart={props.onFindUserId} />
+      {/* Phase 4C correction: these are Whop-specific utilities (single-lesson
+          diagnostic, find-my-user-id) — legacy implementation UI that has no
+          purpose on a project confirmed to have no Whop course. Hidden only
+          on that definitive signal, same as CourseTable above, so it never
+          disappears mid-load or pre-auth (where it's still the way to sign
+          in) — and never hidden for MasterMind, which does have a source. */}
+      {!confirmedNoWhopSource && (
+        <details className="knovera-diagnostic-tools">
+          <summary>Diagnostic Tools</summary>
+          <FindWhopUserId state={props.identifyState} onStart={props.onFindUserId} />
 
-        {props.diagnosticState.phase === "config" && (
-          <ConfigForm
-            redirectUri={props.redirectUri}
-            onSubmit={props.onDiagnosticSubmit}
-            submitting={props.diagnosticState.submitting}
-            errorMessage={props.diagnosticState.errorMessage}
-          />
-        )}
-        {props.diagnosticState.phase === "exchanging" && <p className="status-line">Exchanging authorization code for tokens…</p>}
-        {props.diagnosticState.phase === "fetching" && <p className="status-line">Fetching lesson from Whop…</p>}
-        {props.diagnosticState.phase === "result" && (
-          <>
-            <DiagnosticResult payload={props.diagnosticState.payload} />
-            {props.backendUrl && (
-              <AnalyzeLesson backendUrl={props.backendUrl} lessonUrl={props.diagnosticState.lessonUrl} accessToken={props.diagnosticState.accessToken} />
-            )}
-            <button onClick={props.onDiagnosticReset}>Start over</button>
-          </>
-        )}
-        {props.diagnosticState.phase === "api_error" && (
-          <>
-            <ErrorResult outcome={props.diagnosticState.outcome} />
-            <button onClick={props.onDiagnosticReset}>Start over</button>
-          </>
-        )}
-        {props.diagnosticState.phase === "fatal_error" && (
-          <>
-            <div className="error-panel" role="alert">
-              <h2>ERROR</h2>
-              <p>{props.diagnosticState.message}</p>
-            </div>
-            <button onClick={props.onDiagnosticReset}>Start over</button>
-          </>
-        )}
-      </details>
+          {props.diagnosticState.phase === "config" && (
+            <ConfigForm
+              redirectUri={props.redirectUri}
+              onSubmit={props.onDiagnosticSubmit}
+              submitting={props.diagnosticState.submitting}
+              errorMessage={props.diagnosticState.errorMessage}
+            />
+          )}
+          {props.diagnosticState.phase === "exchanging" && <p className="status-line">Exchanging authorization code for tokens…</p>}
+          {props.diagnosticState.phase === "fetching" && <p className="status-line">Fetching lesson from Whop…</p>}
+          {props.diagnosticState.phase === "result" && (
+            <>
+              <DiagnosticResult payload={props.diagnosticState.payload} />
+              {props.backendUrl && (
+                <AnalyzeLesson backendUrl={props.backendUrl} lessonUrl={props.diagnosticState.lessonUrl} accessToken={props.diagnosticState.accessToken} />
+              )}
+              <button onClick={props.onDiagnosticReset}>Start over</button>
+            </>
+          )}
+          {props.diagnosticState.phase === "api_error" && (
+            <>
+              <ErrorResult outcome={props.diagnosticState.outcome} />
+              <button onClick={props.onDiagnosticReset}>Start over</button>
+            </>
+          )}
+          {props.diagnosticState.phase === "fatal_error" && (
+            <>
+              <div className="error-panel" role="alert">
+                <h2>ERROR</h2>
+                <p>{props.diagnosticState.message}</p>
+              </div>
+              <button onClick={props.onDiagnosticReset}>Start over</button>
+            </>
+          )}
+        </details>
+      )}
     </div>
   );
 }

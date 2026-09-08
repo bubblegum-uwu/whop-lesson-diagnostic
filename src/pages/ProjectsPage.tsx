@@ -105,7 +105,15 @@ export function ProjectsPage({ backendUrl, accessToken }: ProjectsPageProps) {
                   <div className="knovera-project-card-top">
                     <div>
                       <h2>{project.name}</h2>
-                      <p className="knovera-project-card-source">Whop</p>
+                      {/* Phase 4C correction: derived from this project's real courseCount
+                          (from GET /api/projects, the same courses.project_id ownership
+                          GET /api/projects/:projectId/sources itself enforces) — never a
+                          hardcoded "Whop" label. Whop is the only provider that produces a
+                          `courses` row today, so courseCount > 0 reliably means a Whop
+                          source is connected without a second per-card fetch; this stops
+                          being a safe inference the moment a second provider can persist
+                          data of its own. */}
+                      <p className="knovera-project-card-source">{project.courseCount > 0 ? "Whop" : "No sources yet"}</p>
                     </div>
                     {operational ? (
                       <span className="kv-badge kv-badge-accent">{PROJECT_TYPE_LABEL[projectType]}</span>
