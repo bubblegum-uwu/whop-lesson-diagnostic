@@ -553,10 +553,10 @@ describe("CourseTable", () => {
     });
   });
 
-  it("keeps Lesson/Status/Progress/Result/Actions columns unmarked for narrow-screen hiding", () => {
+  it("Phase 4D.1: keeps Lesson/Status/Result/Actions columns unmarked for narrow-screen hiding", () => {
     render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
     const table = screen.getByRole("table");
-    const alwaysVisible = ["Lesson", "Status", "Progress", "Result"];
+    const alwaysVisible = ["Lesson", "Status", "Result", "Actions"];
     for (const label of alwaysVisible) {
       const th = within(table)
         .getAllByRole("columnheader")
@@ -566,16 +566,60 @@ describe("CourseTable", () => {
     }
   });
 
-  it("marks Chapter/Duration/Cost as secondary (hidden on narrow screens)", () => {
+  it("Phase 4D.1: removes the standalone Progress column — there is no 'Progress' table header at all", () => {
     render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
     const table = screen.getByRole("table");
-    for (const label of ["Chapter", "Duration", "Cost"]) {
+    const progressHeader = within(table)
+      .getAllByRole("columnheader")
+      .find((h) => h.textContent === "Progress");
+    expect(progressHeader).toBeUndefined();
+  });
+
+  it("Phase 4D.1: marks Duration/Cost as tier-1 secondary — the first columns to fold away as the table narrows", () => {
+    render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
+    const table = screen.getByRole("table");
+    for (const label of ["Duration", "Cost"]) {
       const th = within(table)
         .getAllByRole("columnheader")
         .find((h) => h.textContent === label);
       expect(th, `expected a "${label}" header`).toBeDefined();
-      expect(th?.className).toContain("hide-narrow");
+      expect(th?.className).toContain("hide-narrow-tier1");
     }
+  });
+
+  it("Phase 4D.1: marks #/Chapter/Analyzed as tier-2 secondary — folded away only once tier-1 columns are already gone", () => {
+    render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
+    const table = screen.getByRole("table");
+    for (const label of ["#", "Chapter", "Analyzed"]) {
+      const th = within(table)
+        .getAllByRole("columnheader")
+        .find((h) => h.textContent?.trim().startsWith(label));
+      expect(th, `expected a "${label}" header`).toBeDefined();
+      expect(th?.className).toContain("hide-narrow-tier2");
+      expect(th?.className).not.toContain("hide-narrow-tier1");
+    }
+  });
+
+  it("Phase 4D.1 (A): shows progress inline under the Status badge for an actively-processing lesson, now that there's no standalone Progress column", () => {
+    const processing = makeLesson({
+      durationSeconds: 600,
+      job: { jobId: "job_1", status: "UPLOADING", currentStage: "uploading_to_gemini", stageProgress: 50 },
+    });
+    render(<CourseTable {...baseProps} connected lessons={[processing]} />);
+    const table = screen.getByRole("table");
+    const row = within(table).getAllByRole("row")[1];
+    // 50% of a 600s lesson elapsed = 5:00 of 10:00 — see formatClock/useProgressText.
+    expect(within(row).getByText("5:00 / 10:00")).toBeInTheDocument();
+  });
+
+  it("Phase 4D.1 (B): renders no leftover progress text for a static (not currently processing) lesson", () => {
+    const notAnalyzed = makeLesson({ id: 1, job: { jobId: null, status: "NOT_ANALYZED" } });
+    const completed = makeLesson({ id: 2, title: "Completed lesson", job: { jobId: "job_2", status: "COMPLETED" } });
+    render(<CourseTable {...baseProps} connected lessons={[notAnalyzed, completed]} />);
+    const table = screen.getByRole("table");
+    // No dangling "—" or stray progress readout anywhere for non-processing rows.
+    expect(within(table).queryByText(/elapsed/i)).not.toBeInTheDocument();
+    expect(within(table).queryByText(/\d+:\d+ \/ \d+:\d+/)).not.toBeInTheDocument();
   });
 
   describe("responsive layout", () => {

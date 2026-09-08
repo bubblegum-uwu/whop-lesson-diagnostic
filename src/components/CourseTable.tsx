@@ -456,7 +456,7 @@ export function CourseTable({
       {/* Flex row, not an overlay: when the drawer is open it's a real sibling
           with its own fixed width, so .course-main (flex: 1 1 auto, min-width: 0)
           shrinks to make room instead of the drawer floating on top of columns
-          the reader still needs (see .col-result/.hide-narrow container-query
+          the reader still needs (see the hide-narrow-tier1/2 container-query
           rules in index.css, which react to this shrunken width). */}
       <div className="course-layout">
         <div className="course-main">
@@ -608,9 +608,30 @@ export function CourseTable({
               ) : (
                 <div className="table-scroll-area">
                   <table className="course-table">
+                    {/* Phase 4D.1 — table-layout: fixed (see .course-table in
+                        index.css) makes these <col> widths authoritative, so
+                        the table's rendered width is always exactly its
+                        container's — never wider, never a horizontal
+                        scrollbar. hide-narrow-tier1/2 progressively fold
+                        away Duration/Cost, then #/Chapter/Analyzed, as
+                        .course-main itself narrows (a docked detail drawer,
+                        or a laptop-width viewport) — see the matching
+                        @container rules in index.css. */}
+                    <colgroup>
+                      <col className="col-checkbox" />
+                      <col className="col-index hide-narrow-tier2" />
+                      <col className="col-lesson" />
+                      <col className="col-chapter hide-narrow-tier2" />
+                      <col className="col-duration hide-narrow-tier1" />
+                      <col className="col-status" />
+                      <col className="col-result" />
+                      <col className="col-analyzed hide-narrow-tier2" />
+                      <col className="col-cost hide-narrow-tier1" />
+                      <col className="col-actions" />
+                    </colgroup>
                     <thead>
                       <tr>
-                        <th>
+                        <th className="col-checkbox">
                           <input
                             type="checkbox"
                             aria-label="Select all filtered lessons"
@@ -618,20 +639,19 @@ export function CourseTable({
                             onChange={(e) => (e.target.checked ? selectAll() : clearSelection())}
                           />
                         </th>
-                        <th className="hide-narrow">#</th>
+                        <th className="col-index hide-narrow-tier2">#</th>
                         <th className="col-lesson">Lesson</th>
-                        <th className="hide-narrow">Chapter</th>
-                        <th className="hide-narrow">Duration</th>
-                        <th>Status</th>
-                        <th>Progress</th>
-                        <th>Result</th>
-                        <th className="hide-narrow col-analyzed">
+                        <th className="col-chapter hide-narrow-tier2">Chapter</th>
+                        <th className="col-duration hide-narrow-tier1">Duration</th>
+                        <th className="col-status">Status</th>
+                        <th className="col-result">Result</th>
+                        <th className="col-analyzed hide-narrow-tier2">
                           <button type="button" className="col-sort-button" onClick={toggleAnalyzedSort} aria-label="Sort by analyzed date">
                             Analyzed{analyzedSort === "asc" ? " ▲" : analyzedSort === "desc" ? " ▼" : ""}
                           </button>
                         </th>
-                        <th className="hide-narrow">Cost</th>
-                        <th>Actions</th>
+                        <th className="col-cost hide-narrow-tier1">Cost</th>
+                        <th className="col-actions">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -640,13 +660,21 @@ export function CourseTable({
                         const analysis = lesson.analysis ?? null;
                         const heartbeat = heartbeatState(job);
                         const progress = progressText(lesson, job);
-                        const [progressLabel, progressDetail] = progress.split("\n");
+                        // Phase 4D.1 — a permanent Progress column was
+                        // low-value for the vast majority of rows (which
+                        // aren't actively processing and rendered only
+                        // "—"). progressDetail is only ever set here when
+                        // the lesson IS actively processing AND there's a
+                        // meaningful elapsed/total or elapsed-only readout
+                        // (see useProgressText above) — shown inline under
+                        // the status badge instead of its own column.
+                        const [, progressDetail] = progress.split("\n");
                         const result = resultLabel(analysis);
                         const resultTitle = (analysis?.strategyFound ? analysis.extractedStrategiesLabel : null) ?? result;
 
                         return (
                           <tr key={lesson.id}>
-                            <td>
+                            <td className="col-checkbox">
                               <input
                                 type="checkbox"
                                 checked={selected.has(lesson.id)}
@@ -654,36 +682,31 @@ export function CourseTable({
                                 aria-label={`Select ${lesson.title}`}
                               />
                             </td>
-                            <td className="hide-narrow">{(currentPage - 1) * pageSize + i + 1}</td>
+                            <td className="col-index hide-narrow-tier2">{(currentPage - 1) * pageSize + i + 1}</td>
                             <td className="col-lesson" title={lesson.title}>
                               <span className="clamp-2-lines">{lesson.title}</span>
                             </td>
-                            <td className="hide-narrow col-chapter">
+                            <td className="col-chapter hide-narrow-tier2" title={lesson.chapterTitle ?? undefined}>
                               <span className="clamp-2-lines">{lesson.chapterTitle ?? "—"}</span>
                             </td>
-                            <td className="hide-narrow">{formatDuration(lesson.durationSeconds)}</td>
-                            <td>
-                              <StatusBadge status={job.status} />
-                              {heartbeat.label && <span className={`heartbeat-hint heartbeat-${heartbeat.level}`}> {heartbeat.label}</span>}
-                            </td>
-                            <td>
-                              {progressDetail ? (
-                                <span className="progress-cell">
-                                  <span className="progress-stage">{progressLabel}</span>
-                                  <span className="progress-detail">{progressDetail}</span>
-                                </span>
-                              ) : (
-                                progressLabel
-                              )}
+                            <td className="col-duration hide-narrow-tier1">{formatDuration(lesson.durationSeconds)}</td>
+                            <td className="col-status">
+                              <div className="status-cell">
+                                <div className="status-cell-top">
+                                  <StatusBadge status={job.status} />
+                                  {heartbeat.label && <span className={`heartbeat-hint heartbeat-${heartbeat.level}`}>{heartbeat.label}</span>}
+                                </div>
+                                {progressDetail && <span className="progress-detail">{progressDetail}</span>}
+                              </div>
                             </td>
                             <td className="col-result" title={resultTitle}>
                               <span className="clamp-2-lines">{result}</span>
                             </td>
-                            <td className="hide-narrow col-analyzed" title={formatAnalyzedFull(analysis?.completedAt)}>
+                            <td className="col-analyzed hide-narrow-tier2" title={formatAnalyzedFull(analysis?.completedAt)}>
                               {formatAnalyzedCompact(analysis?.completedAt)}
                             </td>
-                            <td className="hide-narrow">{formatCost(analysis?.estimatedCost)}</td>
-                            <td>
+                            <td className="col-cost hide-narrow-tier1">{formatCost(analysis?.estimatedCost)}</td>
+                            <td className="col-actions">
                               <RowActions
                                 lesson={lesson}
                                 job={job}

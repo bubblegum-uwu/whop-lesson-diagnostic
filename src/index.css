@@ -759,42 +759,99 @@ button:disabled {
   background: #262a33;
 }
 
-/* Lesson/Result/Chapter columns: bounded width, up to two lines before
-   ellipsizing. The line-clamp lives on an INNER <span> (`.clamp-2-lines`),
-   never on the <td> itself — a <td> needs to stay `display: table-cell` to
-   take part in the table's column grid at all; overriding that to
-   `display: -webkit-box` (required for -webkit-line-clamp) knocks it out of
-   table layout entirely, and adjacent cells like this end up stacking
-   vertically instead of sitting side by side as columns.
+/* Lesson/Result/Chapter columns wrap up to two lines before ellipsizing —
+   width itself comes from the col.col-* rules below (table-layout: fixed),
+   these just allow wrapping instead of the base th/td nowrap. The
+   line-clamp lives on an INNER <span> (`.clamp-2-lines`), never on the
+   <td> itself — a <td> needs to stay `display: table-cell` to take part in
+   the table's column grid at all; overriding that to `display: -webkit-box`
+   (required for -webkit-line-clamp) knocks it out of table layout
+   entirely, and adjacent cells like this end up stacking vertically
+   instead of sitting side by side as columns.
    Also scoped as `.course-table td.col-*` (not a bare `.col-*` class)
    because `.course-table td` below sets `white-space: nowrap` at
    equal-or-higher specificity — a bare class here would silently lose that
    fight and force the inner span onto one unwrapped, clipped line. */
-.course-table td.col-lesson {
-  min-width: 220px;
-  max-width: 420px;
-  white-space: normal;
-}
-
-.course-table td.col-result {
-  min-width: 180px;
-  max-width: 300px;
-  white-space: normal;
-}
-
-/* Chapter may wrap to a couple of lines but must never grow to consume
-   excessive width — it's a secondary column. */
+.course-table td.col-lesson,
+.course-table td.col-result,
 .course-table td.col-chapter {
-  max-width: 160px;
   white-space: normal;
 }
 
-.course-table .col-analyzed {
-  min-width: 130px;
-  white-space: nowrap;
+/* Phase 4D.1 — fixed compact/flexible column widths, applied to <col>
+   (what actually governs width under table-layout: fixed — see
+   .course-table below). Percentages so every column's share is
+   deterministic regardless of content, which is what removes the
+   horizontal scrollbar: the table's rendered width is always exactly its
+   container's, never wider. Sums to 100%. */
+col.col-checkbox {
+  width: 2.5%;
+}
+
+col.col-index {
+  width: 2.5%;
+}
+
+col.col-lesson {
+  width: 22%;
+}
+
+col.col-chapter {
+  width: 10%;
+}
+
+col.col-duration {
+  width: 9%;
+}
+
+col.col-status {
+  width: 15%;
+}
+
+col.col-result {
+  width: 12%;
+}
+
+col.col-analyzed {
+  width: 9%;
+}
+
+col.col-cost {
+  width: 6%;
+}
+
+col.col-actions {
+  width: 12%;
+}
+
+.status-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.status-cell-top {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+/* Safety net for the table's tighter Status column (col.col-status above):
+   the longest status labels ("No standalone setup", "Processing on
+   Gemini") stay single-line and fit at normal desktop widths, but wrap
+   rather than silently clip if the column narrows further (e.g. the
+   hide-narrow-tier2 breakpoint) — losing a couple of words to a hard
+   clip would be worse than a two-line pill. */
+.course-table .status-badge {
+  white-space: normal;
 }
 
 .col-sort-button {
+  /* Overrides the global button rule's margin-top: 1.25rem (see button{}
+     above) — without this, the "Analyzed" header visibly sits lower than
+     every plain-text header next to it. */
+  margin-top: 0;
   background: none;
   border: none;
   padding: 0;
@@ -814,28 +871,55 @@ button:disabled {
   overflow: hidden;
 }
 
-/* Table = summary only. Scrolls its own body; the sticky header/toolbar
-   above stay in place instead of requiring a scroll to the page bottom. */
+/* Table = summary only. Scrolls its own body VERTICALLY; the sticky
+   header/toolbar above stay in place instead of requiring a scroll to the
+   page bottom. Phase 4D.1 — horizontal overflow is deliberately hidden,
+   not scrolled: table-layout: fixed below guarantees the table itself
+   never exceeds 100% of this container, so any residual horizontal
+   overflow would only ever come from something actually wrong (e.g. an
+   unexpectedly long unbreakable string) — better to clip it via each
+   cell's own text-overflow: ellipsis (see below) than to reintroduce a
+   scrollbar that masks the underlying issue. */
 .table-scroll-area {
   max-height: 68vh;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   border: 1px solid #262a33;
   border-radius: 8px;
   margin-top: 0.5rem;
 }
 
+/* Phase 4D.1 — table-layout: fixed makes every column's width authoritative
+   (see the col.col-* width rules above) instead of letting the browser
+   expand the table to fit each column's natural content width, which was
+   the root cause of the horizontal scrollbar at normal desktop widths:
+   col-lesson/col-result/col-analyzed each carried a generous min-width
+   (220px/180px/130px), every OTHER column's default `white-space: nowrap`
+   forced its header/content onto one unbroken line, and — with a
+   completely empty "Progress" column also in the mix — the sum
+   comfortably exceeded the ~1216-1256px the Knovera content area (.knovera-main,
+   capped at 1320px total including padding) actually provides at
+   1280-1440px viewports, so .table-scroll-area's `overflow: auto` turned
+   that into a horizontal scrollbar rather than visibly failing. Fixed
+   layout instead wraps or truncates content within each column's defined
+   width, so the table's rendered width is always exactly 100% of its
+   container. */
 .course-table {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 0.85rem;
 }
 
 .course-table th,
 .course-table td {
-  padding: 0.5rem 0.7rem;
+  box-sizing: border-box;
+  padding: 0.5rem 0.6rem;
   text-align: left;
   border-bottom: 1px solid #262a33;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   vertical-align: top;
 }
 
@@ -955,12 +1039,21 @@ button:disabled {
   container-name: course-main;
 }
 
-/* Keep these columns visible until .course-main itself gets this narrow —
-   whether that's the viewport shrinking or a docked drawer eating the
-   width. Secondary columns (#, chapter, duration, cost) move into the
-   detail drawer instead. */
+/* Keep secondary columns visible until .course-main itself gets this
+   narrow — whether that's the viewport shrinking or a docked drawer
+   eating the width. Two-tier priority (Phase 4D.1): Duration/Cost fold
+   away first (least essential at a glance), then #/Chapter/Analyzed once
+   the table is genuinely tight. Lesson/Status/Result/Actions never
+   collapse via this mechanism — only the switch to the card list below
+   NARROW_BREAKPOINT (see useIsNarrow in CourseTable.tsx) removes them. */
 @container course-main (max-width: 1000px) {
-  .hide-narrow {
+  .hide-narrow-tier1 {
+    display: none;
+  }
+}
+
+@container course-main (max-width: 820px) {
+  .hide-narrow-tier2 {
     display: none;
   }
 }
