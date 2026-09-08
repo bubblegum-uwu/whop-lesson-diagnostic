@@ -4,8 +4,31 @@ import { getLessonsByIds } from "../../db/lessonsRepo.js";
 import { computeAnalysisFingerprint } from "../../pipeline/fingerprint.js";
 import { findLatestByFingerprint } from "../../db/lessonAnalysesRepo.js";
 import { createJob, getJob, cancelIfQueued, resetForManualRetry } from "../../db/analysisJobsRepo.js";
+import { getAuthSessionStatus } from "../../db/authSessionRepo.js";
 import type { JobTrigger } from "../../jobs/runJobTrigger.js";
 import { logger } from "../../lib/logger.js";
+
+const WHOP_NOT_CONNECTED_RESPONSE = {
+  error: {
+    message: "Whop is not connected. Connect Whop from the project's Sources page to analyze new lessons.",
+    type: "WHOP_NOT_CONNECTED",
+  },
+} as const;
+
+/**
+ * A worker's `processOneJob` (see worker/mainLoop.ts) fetches the lesson's
+ * video directly from Whop via `getValidAccessToken`/`analyzeLesson` for
+ * every job it actually processes — there is no path that produces a NEW
+ * analysis without Whop. So any route that can create a QUEUED job the
+ * worker would need to act on requires an active Whop connection, checked
+ * here (not via requireWhopConnected middleware) so the enqueue route below
+ * can still allow through a request that turns out to enqueue nothing (see
+ * its own comment).
+ */
+async function isWhopConnected(pool: Pool): Promise<boolean> {
+  const status = await getAuthSessionStatus(pool);
+  return status?.status === "active";
+}
 
 export interface AnalysisJobsRouteDeps {
   pool: Pool;
@@ -19,11 +42,20 @@ interface EnqueueBody {
 }
 
 /**
- * POST /api/analysis/jobs — enqueues batch analysis for the given lessons.
- * Deduplicates via the analysis fingerprint (unless `force`), creates one
- * analysis_jobs row per lesson actually queued, then triggers a Cloud Run
- * Job execution asynchronously — this handler never waits on lesson
- * processing itself.
+ * POST /api/analysis/jobs — enqueues batch analysis for the given lessons
+ * (backs both "Analyze Selected" and "Analyze All Unanalyzed"). Deduplicates
+ * via the analysis fingerprint (unless `force`), creates one analysis_jobs
+ * row per lesson actually queued, then triggers a Cloud Run Job execution
+ * asynchronously — this handler never waits on lesson processing itself.
+ *
+ * Provider gating: every lesson that would actually be enqueued here is
+ * fetched fresh from Whop once the worker picks up its job (see this file's
+ * `isWhopConnected` doc comment) — so a request that would enqueue at least
+ * one job requires an active Whop connection, checked BEFORE creating any
+ * jobs (atomic: never enqueue some and reject the rest). A request whose
+ * every lesson is already analyzed (the fingerprint-match "skip" case)
+ * never touches Whop at all and stays available with Knovera auth alone,
+ * even while disconnected — it doesn't queue anything new to process.
  */
 export function createEnqueueJobsHandler(deps: AnalysisJobsRouteDeps) {
   return async function enqueueJobsHandler(req: Request, res: Response): Promise<void> {
@@ -36,17 +68,35 @@ export function createEnqueueJobsHandler(deps: AnalysisJobsRouteDeps) {
     const force = body.force === true;
 
     const lessons = await getLessonsByIds(deps.pool, lessonIds);
-    const queued: { lessonId: number; jobId: string }[] = [];
-    const skipped: { lessonId: number; reason: string }[] = [];
 
+    // Pass 1 — decide skip-vs-enqueue for every lesson without creating
+    // anything yet, so we know in advance whether this request needs Whop.
+    const plan: { lesson: (typeof lessons)[number]; fingerprint: string; skipReason: string | null }[] = [];
     for (const lesson of lessons) {
       const fingerprint = computeAnalysisFingerprint({ whopLessonId: lesson.whopLessonId, geminiModel: deps.geminiModel });
+      let skipReason: string | null = null;
       if (!force) {
         const existing = await findLatestByFingerprint(deps.pool, fingerprint);
         if (existing && (existing.status === "completed" || existing.status === "no_strategy")) {
-          skipped.push({ lessonId: lesson.id, reason: "already_analyzed" });
-          continue;
+          skipReason = "already_analyzed";
         }
+      }
+      plan.push({ lesson, fingerprint, skipReason });
+    }
+
+    const willEnqueueAny = plan.some((p) => p.skipReason === null);
+    if (willEnqueueAny && !(await isWhopConnected(deps.pool))) {
+      res.status(409).json(WHOP_NOT_CONNECTED_RESPONSE);
+      return;
+    }
+
+    // Pass 2 — actually create jobs, now that we know it's safe to.
+    const queued: { lessonId: number; jobId: string }[] = [];
+    const skipped: { lessonId: number; reason: string }[] = [];
+    for (const { lesson, fingerprint, skipReason } of plan) {
+      if (skipReason) {
+        skipped.push({ lessonId: lesson.id, reason: skipReason });
+        continue;
       }
       const job = await createJob(deps.pool, lesson.id, fingerprint);
       queued.push({ lessonId: lesson.id, jobId: job.jobId });
@@ -68,9 +118,21 @@ export function createEnqueueJobsHandler(deps: AnalysisJobsRouteDeps) {
   };
 }
 
-/** POST /api/analysis/jobs/:jobId/retry — only for FAILED/AUTH_REQUIRED, per the approved retry model. */
+/**
+ * POST /api/analysis/jobs/:jobId/retry — only for FAILED/AUTH_REQUIRED, per
+ * the approved retry model. Always requires an active Whop connection: a
+ * retry unconditionally re-queues the job for the worker to fetch the
+ * lesson's video from Whop again (see this file's `isWhopConnected` doc
+ * comment) — unlike the enqueue route above, there is no "already analyzed"
+ * skip path here, since a job only reaches FAILED/AUTH_REQUIRED after
+ * failing to produce a completed analysis.
+ */
 export function createRetryJobHandler(deps: AnalysisJobsRouteDeps) {
   return async function retryJobHandler(req: Request, res: Response): Promise<void> {
+    if (!(await isWhopConnected(deps.pool))) {
+      res.status(409).json(WHOP_NOT_CONNECTED_RESPONSE);
+      return;
+    }
     const jobId = String(req.params.jobId);
     const job = await resetForManualRetry(deps.pool, jobId);
     if (!job) {

@@ -193,6 +193,8 @@ interface PendingBatch {
 interface RowActionsProps {
   lesson: CourseLessonSummary;
   job: LessonJobSummary;
+  /** Live Whop connection — Analyze/Retry/Re-analyze all fetch the lesson's video from Whop (see worker/mainLoop.ts), so they're disabled without it; View/Download/Cancel/Open Source are unaffected. */
+  connected: boolean;
   onView: () => void;
   onAnalyze: () => void;
   onRetry: () => void;
@@ -201,18 +203,19 @@ interface RowActionsProps {
   onDownload: () => void;
 }
 
-function RowActions({ lesson, job, onView, onAnalyze, onRetry, onCancel, onReanalyze, onDownload }: RowActionsProps) {
+function RowActions({ lesson, job, connected, onView, onAnalyze, onRetry, onCancel, onReanalyze, onDownload }: RowActionsProps) {
   const hasAnalysis = job.status === "COMPLETED" || job.status === "NO_STRATEGY";
+  const disconnectedTitle = "Connect Whop to analyze — this fetches the lesson's video from Whop.";
   const menuItems = [
     { label: "Open Source", onClick: () => window.open(lesson.sourceUrl, "_blank", "noreferrer") },
     { label: "Download JSON", onClick: onDownload, disabled: !hasAnalysis },
-    { label: "Re-analyze", onClick: onReanalyze, disabled: !hasAnalysis },
+    { label: "Re-analyze", onClick: onReanalyze, disabled: !hasAnalysis || !connected },
   ];
 
   return (
     <div className="row-actions">
       {job.status === "NOT_ANALYZED" && (
-        <button className="link-button" onClick={onAnalyze}>
+        <button className="link-button" onClick={onAnalyze} disabled={!connected} title={connected ? undefined : disconnectedTitle}>
           Analyze
         </button>
       )}
@@ -222,7 +225,7 @@ function RowActions({ lesson, job, onView, onAnalyze, onRetry, onCancel, onReana
         </button>
       )}
       {(job.status === "FAILED" || job.status === "AUTH_REQUIRED") && (
-        <button className="link-button" onClick={onRetry}>
+        <button className="link-button" onClick={onRetry} disabled={!connected} title={connected ? undefined : disconnectedTitle}>
           Retry
         </button>
       )}
@@ -505,21 +508,36 @@ export function CourseTable({
             <div className="toolbar-primary-actions">
               <button
                 onClick={() => requestBatch(Array.from(selected), true, `${selected.size} selected lesson(s)`)}
-                disabled={selected.size === 0}
+                disabled={selected.size === 0 || !connected}
+                title={!connected ? "Connect Whop to analyze new lessons — this fetches each lesson's video from Whop." : undefined}
               >
                 Analyze Selected{selected.size > 0 ? ` (${selected.size} selected)` : ""}
               </button>
               <button
                 onClick={() => requestBatch(unanalyzedIds, false, `${unanalyzedIds.length} unanalyzed lesson(s)`)}
-                disabled={unanalyzedIds.length === 0}
+                disabled={unanalyzedIds.length === 0 || !connected}
+                title={!connected ? "Connect Whop to analyze new lessons — this fetches each lesson's video from Whop." : undefined}
               >
                 Analyze All Unanalyzed
               </button>
-              <button onClick={retryAllFailed} disabled={failedIds.length === 0}>
+              <button
+                onClick={retryAllFailed}
+                disabled={failedIds.length === 0 || !connected}
+                title={!connected ? "Connect Whop to retry — this re-fetches each lesson's video from Whop." : undefined}
+              >
                 Retry Failed
               </button>
             </div>
           </div>
+          {/* Phase 4D correction — analyzing/retrying always fetches the
+              lesson's video from Whop (see worker/mainLoop.ts), so these
+              actions are gated on a live connection even though the lesson
+              list itself is not (see the disconnected-but-visible gate
+              above). Only shown when there's actually something these
+              buttons would otherwise let the operator attempt. */}
+          {!connected && (unanalyzedIds.length > 0 || failedIds.length > 0 || selected.size > 0) && (
+            <p className="hint">Connect Whop to analyze new lessons or retry failed ones — already-analyzed results stay visible either way.</p>
+          )}
 
           {pendingBatch && (
             <div className="batch-confirm" role="alertdialog">
@@ -575,6 +593,7 @@ export function CourseTable({
                         <RowActions
                           lesson={lesson}
                           job={job}
+                          connected={connected}
                           onView={() => setDrawerLessonId(lesson.id)}
                           onAnalyze={() => requestBatch([lesson.id], false, lesson.title)}
                           onRetry={() => job.jobId && onRetry(job.jobId)}
@@ -668,6 +687,7 @@ export function CourseTable({
                               <RowActions
                                 lesson={lesson}
                                 job={job}
+                                connected={connected}
                                 onView={() => setDrawerLessonId(lesson.id)}
                                 onAnalyze={() => requestBatch([lesson.id], false, lesson.title)}
                                 onRetry={() => job.jobId && onRetry(job.jobId)}

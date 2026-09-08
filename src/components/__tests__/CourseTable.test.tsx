@@ -68,6 +68,67 @@ describe("CourseTable", () => {
     expect(screen.queryByRole("button", { name: "Disconnect Whop" })).not.toBeInTheDocument();
   });
 
+  it("Phase 4D correction: disables the row Analyze action for a NOT_ANALYZED lesson while Whop is disconnected — analyzing always fetches the video from Whop", () => {
+    render(<CourseTable {...baseProps} lessons={[makeLesson({ job: { jobId: null, status: "NOT_ANALYZED" } })]} />);
+    expect(screen.getByRole("button", { name: /^analyze$/i })).toBeDisabled();
+  });
+
+  it("Phase 4D correction: disables the row Retry action for a FAILED lesson while Whop is disconnected", () => {
+    render(<CourseTable {...baseProps} lessons={[makeLesson({ job: { jobId: "job_1", status: "FAILED", sanitizedError: "boom" } })]} />);
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+  });
+
+  it("Phase 4D correction: disables Analyze Selected / Analyze All Unanalyzed / Retry Failed while Whop is disconnected, and shows a hint", () => {
+    render(
+      <CourseTable
+        {...baseProps}
+        lessons={[
+          makeLesson({ id: 1, title: "A", job: { jobId: null, status: "NOT_ANALYZED" } }),
+          makeLesson({ id: 2, title: "B", job: { jobId: "job_2", status: "FAILED", sanitizedError: "boom" } }),
+        ]}
+      />,
+    );
+    fireEvent.click(screen.getByLabelText("Select A"));
+
+    expect(screen.getByRole("button", { name: /analyze selected/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /analyze all unanalyzed/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /retry failed/i })).toBeDisabled();
+    expect(screen.getByText(/connect whop to analyze new lessons or retry failed ones/i)).toBeInTheDocument();
+  });
+
+  it("Phase 4D correction: reconnecting Whop re-enables Analyze/Retry actions for the same lessons", () => {
+    const lessons = [
+      makeLesson({ id: 1, title: "A", job: { jobId: null, status: "NOT_ANALYZED" } }),
+      makeLesson({ id: 2, title: "B", job: { jobId: "job_2", status: "FAILED", sanitizedError: "boom" } }),
+    ];
+    const { rerender } = render(<CourseTable {...baseProps} lessons={lessons} />);
+    expect(screen.getByRole("button", { name: /^analyze$/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+
+    rerender(<CourseTable {...baseProps} connected lessons={lessons} />);
+    expect(screen.getByRole("button", { name: /^analyze$/i })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(screen.queryByText(/connect whop to analyze new lessons or retry failed ones/i)).not.toBeInTheDocument();
+  });
+
+  it("Phase 4D correction: View/Cancel/Download/Open-Source stay available while Whop is disconnected — they never fetch from Whop", () => {
+    const onCancel = vi.fn();
+    render(
+      <CourseTable
+        {...baseProps}
+        onCancel={onCancel}
+        lessons={[
+          makeLesson({ id: 1, job: { jobId: "job_1", status: "QUEUED" } }),
+          makeLesson({ id: 2, job: { jobId: "job_2", status: "COMPLETED" } }),
+        ]}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /cancel/i })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /cancel/i }));
+    expect(onCancel).toHaveBeenCalledWith("job_1");
+    expect(screen.getByRole("button", { name: "View" })).toBeEnabled();
+  });
+
   it("renders one row per lesson with a compact summary-only set of columns, once connected", () => {
     render(<CourseTable {...baseProps} connected lessons={[makeLesson()]} />);
 

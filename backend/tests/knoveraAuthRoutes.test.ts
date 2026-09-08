@@ -27,7 +27,7 @@ describe("POST /api/knovera-auth/login", () => {
 
     expect(statusCode()).toBe(200);
     const { token } = body() as { token: string };
-    expect(verifyKnoveraToken(token, SECRET)).not.toBeNull();
+    expect(await verifyKnoveraToken(token, SECRET)).not.toBeNull();
   });
 
   it("A: matches the configured email case-insensitively and with surrounding whitespace trimmed", async () => {
@@ -96,7 +96,7 @@ describe("GET /api/knovera-auth/me", () => {
     const handler = createKnoveraMeHandler({ knoveraAuth: await makeConfig() });
     const { res, statusCode, body } = makeResponse();
 
-    handler(req(), res);
+    await handler(req(), res);
 
     expect(statusCode()).toBe(200);
     expect(body()).toEqual({ authenticated: true, email: EMAIL });
@@ -106,7 +106,7 @@ describe("GET /api/knovera-auth/me", () => {
     const handler = createKnoveraMeHandler({ knoveraAuth: await makeConfig() });
     const { res, body } = makeResponse();
 
-    handler(req(), res);
+    await handler(req(), res);
 
     const raw = JSON.stringify(body());
     expect(raw).not.toContain("scrypt:");
@@ -118,10 +118,10 @@ describe("POST /api/knovera-auth/logout", () => {
   it("succeeds for a currently-valid token", async () => {
     const config = await makeConfig();
     const handler = createKnoveraLogoutHandler({ knoveraAuth: config });
-    const token = issueKnoveraToken(config.authSecret);
+    const token = await issueKnoveraToken(config.authSecret);
     const { res, statusCode, body } = makeResponse();
 
-    handler(req({}, { authorization: `Bearer ${token}` }), res);
+    await handler(req({}, { authorization: `Bearer ${token}` }), res);
 
     expect(statusCode()).toBe(200);
     expect(body()).toEqual({ ok: true });
@@ -131,7 +131,7 @@ describe("POST /api/knovera-auth/logout", () => {
     const handler = createKnoveraLogoutHandler({ knoveraAuth: await makeConfig() });
     const { res, statusCode } = makeResponse();
 
-    handler(req({}, {}), res);
+    await handler(req({}, {}), res);
 
     expect(statusCode()).toBe(401);
   });
@@ -139,10 +139,10 @@ describe("POST /api/knovera-auth/logout", () => {
   it("returns 401 for an already-expired token", async () => {
     const config = await makeConfig();
     const handler = createKnoveraLogoutHandler({ knoveraAuth: config });
-    const expiredToken = issueKnoveraToken(config.authSecret, -1);
+    const expiredToken = await issueKnoveraToken(config.authSecret, -1);
     const { res, statusCode } = makeResponse();
 
-    handler(req({}, { authorization: `Bearer ${expiredToken}` }), res);
+    await handler(req({}, { authorization: `Bearer ${expiredToken}` }), res);
 
     expect(statusCode()).toBe(401);
   });

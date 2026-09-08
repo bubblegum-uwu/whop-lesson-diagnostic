@@ -12,59 +12,71 @@ describe("requireKnoveraAuth middleware", () => {
     const { res, statusCode, body } = makeResponse();
     const next = vi.fn() as NextFunction;
 
-    middleware({ headers: {} } as Request, res, next);
+    await middleware({ headers: {} } as Request, res, next);
 
     expect(statusCode()).toBe(401);
     expect(body()).toMatchObject({ error: { type: "missing_authorization" } });
     expect(next).not.toHaveBeenCalled();
   });
 
-  it("E: a valid token calls next() and attaches the operator subject, never calling Whop", () => {
+  it("E: a valid token calls next() and attaches the operator subject, never calling Whop", async () => {
     const middleware = requireKnoveraAuth({ authSecret: SECRET });
-    const token = issueKnoveraToken(SECRET);
+    const token = await issueKnoveraToken(SECRET);
     const { res } = makeResponse();
     const next = vi.fn() as NextFunction;
     const req = { headers: { authorization: `Bearer ${token}` } } as Request;
 
-    middleware(req, res, next);
+    await middleware(req, res, next);
 
     expect(next).toHaveBeenCalledOnce();
     expect((req as KnoveraAuthedRequest).knoveraOperator).toBe("knovera-operator");
   });
 
-  it("F: an expired token is rejected with 401 knovera_unauthenticated, never a generic 500", () => {
+  it("F: an expired token is rejected with 401 knovera_unauthenticated, never a generic 500", async () => {
     const middleware = requireKnoveraAuth({ authSecret: SECRET });
-    const expiredToken = issueKnoveraToken(SECRET, -1);
+    const expiredToken = await issueKnoveraToken(SECRET, -1);
     const { res, statusCode, body } = makeResponse();
     const next = vi.fn() as NextFunction;
 
-    middleware({ headers: { authorization: `Bearer ${expiredToken}` } } as Request, res, next);
+    await middleware({ headers: { authorization: `Bearer ${expiredToken}` } } as Request, res, next);
 
     expect(statusCode()).toBe(401);
     expect(body()).toMatchObject({ error: { type: "knovera_unauthenticated" } });
     expect(next).not.toHaveBeenCalled();
   });
 
-  it("G: a tampered/wrong-secret token is rejected", () => {
+  it("G: a tampered/wrong-secret token is rejected", async () => {
     const middleware = requireKnoveraAuth({ authSecret: SECRET });
-    const tokenFromWrongSecret = issueKnoveraToken("a-different-secret");
+    const tokenFromWrongSecret = await issueKnoveraToken("a-different-secret");
     const { res, statusCode } = makeResponse();
     const next = vi.fn() as NextFunction;
 
-    middleware({ headers: { authorization: `Bearer ${tokenFromWrongSecret}` } } as Request, res, next);
+    await middleware({ headers: { authorization: `Bearer ${tokenFromWrongSecret}` } } as Request, res, next);
 
     expect(statusCode()).toBe(401);
     expect(next).not.toHaveBeenCalled();
   });
 
-  it("rejects a malformed Authorization header (not the Bearer scheme)", () => {
+  it("rejects a malformed Authorization header (not the Bearer scheme)", async () => {
     const middleware = requireKnoveraAuth({ authSecret: SECRET });
     const { res, statusCode } = makeResponse();
     const next = vi.fn() as NextFunction;
 
-    middleware({ headers: { authorization: "Basic dXNlcjpwYXNz" } } as Request, res, next);
+    await middleware({ headers: { authorization: "Basic dXNlcjpwYXNz" } } as Request, res, next);
 
     expect(statusCode()).toBe(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it("E: a Whop-shaped opaque bearer token cannot act as a Knovera token", async () => {
+    const middleware = requireKnoveraAuth({ authSecret: SECRET });
+    const { res, statusCode, body } = makeResponse();
+    const next = vi.fn() as NextFunction;
+
+    await middleware({ headers: { authorization: "Bearer whop_opaque_access_token_abc123" } } as Request, res, next);
+
+    expect(statusCode()).toBe(401);
+    expect(body()).toMatchObject({ error: { type: "knovera_unauthenticated" } });
     expect(next).not.toHaveBeenCalled();
   });
 });

@@ -21,7 +21,7 @@ export interface KnoveraAuthedRequest extends Request {
  * are deliberately independent checks, never merged into one.
  */
 export function requireKnoveraAuth(deps: KnoveraAuthDeps) {
-  return function knoveraAuthMiddleware(req: Request, res: Response, next: NextFunction): void {
+  return async function knoveraAuthMiddleware(req: Request, res: Response, next: NextFunction): Promise<void> {
     let token: string;
     try {
       token = requireBearerToken(req.headers.authorization);
@@ -33,7 +33,7 @@ export function requireKnoveraAuth(deps: KnoveraAuthDeps) {
       throw err;
     }
 
-    const payload = verifyKnoveraToken(token, deps.authSecret);
+    const payload = await verifyKnoveraToken(token, deps.authSecret);
     if (!payload) {
       res.status(401).json({
         error: { message: "Invalid or expired Knovera session — please log in again.", type: "knovera_unauthenticated" },

@@ -46,7 +46,7 @@ export function createKnoveraLoginHandler(deps: KnoveraAuthRoutesDeps) {
       return;
     }
 
-    const token = issueKnoveraToken(deps.knoveraAuth.authSecret);
+    const token = await issueKnoveraToken(deps.knoveraAuth.authSecret);
     res.status(200).json({ token, expiresIn: KNOVERA_TOKEN_TTL_SECONDS });
   };
 }
@@ -69,7 +69,7 @@ export function createKnoveraMeHandler(deps: KnoveraAuthRoutesDeps) {
  * ends the session for that browser.
  */
 export function createKnoveraLogoutHandler(deps: KnoveraAuthRoutesDeps) {
-  return function knoveraLogoutHandler(req: Request, res: Response): void {
+  return async function knoveraLogoutHandler(req: Request, res: Response): Promise<void> {
     let token: string;
     try {
       token = requireBearerToken(req.headers.authorization);
@@ -80,7 +80,7 @@ export function createKnoveraLogoutHandler(deps: KnoveraAuthRoutesDeps) {
       }
       throw err;
     }
-    if (!verifyKnoveraToken(token, deps.knoveraAuth.authSecret)) {
+    if (!(await verifyKnoveraToken(token, deps.knoveraAuth.authSecret))) {
       res.status(401).json({
         error: { message: "Invalid or expired Knovera session — please log in again.", type: "knovera_unauthenticated" },
       });
