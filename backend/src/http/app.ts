@@ -21,6 +21,7 @@ import { createLessonAnalysisDetailHandler } from "./routes/lessonAnalysisDetail
 import { createAnalysisSummaryHandler } from "./routes/analysisSummary.js";
 import { createAnalysisEventsHandler } from "./routes/analysisEvents.js";
 import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "./routes/courseSynthesis.js";
+import { createProjectSynthesisStatusHandler, createProjectSynthesizeHandler, createGetProjectSynthesisHandler } from "./routes/projectSynthesis.js";
 import { createListProjectsHandler, createGetProjectHandler } from "./routes/projects.js";
 import { createGetProjectSourcesHandler } from "./routes/projectSources.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
@@ -177,6 +178,20 @@ export function createApp(config: AppConfig): Express {
   app.get("/api/projects", knoveraAuth, createListProjectsHandler(projectsDeps));
   app.get("/api/projects/:projectId", knoveraAuth, createGetProjectHandler(projectsDeps));
   app.get("/api/projects/:projectId/sources", knoveraAuth, createGetProjectSourcesHandler(projectsDeps));
+
+  // Phase 4E — the project-aware counterpart to /api/course/synthesis*
+  // above: resolves a project's synthesis source via `courses.project_id`
+  // (never the globally configured WHOP_COURSE_ID) and otherwise delegates
+  // to the exact same synthesis logic (see routes/projectSynthesis.ts and
+  // the buildSynthesisStatusPayload/buildFullSynthesisPayload/
+  // handleSynthesizeForCourse helpers it shares with the legacy routes).
+  // Gated by Knovera auth only — reads/writes persisted data, never Whop.
+  // Legacy /api/course/synthesis* routes are left intact for compatibility
+  // during the migration; nothing here removes them.
+  const projectSynthesisDeps = { pool, geminiModel: config.geminiModel, jobTrigger };
+  app.get("/api/projects/:projectId/synthesis/status", knoveraAuth, createProjectSynthesisStatusHandler(projectSynthesisDeps));
+  app.post("/api/projects/:projectId/synthesis", knoveraAuth, createProjectSynthesizeHandler(projectSynthesisDeps));
+  app.get("/api/projects/:projectId/synthesis", knoveraAuth, createGetProjectSynthesisHandler(projectSynthesisDeps));
 
   const oidcVerifier = createGoogleOidcVerifier(publicApiBaseUrl, schedulerServiceAccountEmail);
   app.post("/internal/ensure-worker-running", createEnsureWorkerRunningHandler({ pool, jobTrigger, oidcVerifier }));

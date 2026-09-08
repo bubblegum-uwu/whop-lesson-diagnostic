@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { CourseIntelligence } from "../CourseIntelligence";
-import type { SynthesisStatus, SynthesisRunSummary, CourseSynthesisData } from "../../lib/synthesisApi";
+import type { ProjectSynthesisStatus, ProjectSynthesisData, SynthesisRunSummary, CourseSynthesisData } from "../../lib/synthesisApi";
+
+const PROJECT_ID = 1;
 
 function baseRunSummary(overrides: Partial<SynthesisRunSummary> = {}): SynthesisRunSummary {
   return {
@@ -49,8 +51,16 @@ function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-function baseStatus(overrides: Partial<SynthesisStatus> = {}): SynthesisStatus {
+type ReadyProjectSynthesisStatus = Extract<ProjectSynthesisStatus, { status: "ready" }>;
+
+function baseStatus(overrides: Partial<ReadyProjectSynthesisStatus> = {}): ProjectSynthesisStatus {
   return {
+    status: "ready",
+    projectId: PROJECT_ID,
+    projectType: "TRADING_STRATEGIES",
+    sourceCount: 1,
+    sourceCourseId: 1,
+    sourceName: "Trading Accelerator",
     course: { title: "Trading Accelerator" },
     counts: { totalLessons: 28, analyzed: 28, processing: 0, queued: 0, failed: 0 },
     noStandaloneSetupLessons: [],
@@ -157,13 +167,40 @@ function baseSynthesisData(overrides: Partial<CourseSynthesisData> = {}): Course
   };
 }
 
-function stubFetch(status: SynthesisStatus | null, data: CourseSynthesisData | null = null) {
+/** Wraps a plain CourseSynthesisData (still what CourseIntelligence's internal `data` state is typed as) with the project-context fields the real GET /api/projects/:projectId/synthesis endpoint always includes — see backend/src/http/routes/projectSynthesis.ts. */
+function toProjectSynthesisData(data: CourseSynthesisData | null): ProjectSynthesisData {
+  if (!data) {
+    return { status: "no_run", projectId: PROJECT_ID, projectType: "TRADING_STRATEGIES", sourceCount: 1, sourceCourseId: 1, sourceName: "Trading Accelerator", run: null };
+  }
+  return { status: "ready", projectId: PROJECT_ID, projectType: "TRADING_STRATEGIES", sourceCount: 1, sourceCourseId: 1, sourceName: "Trading Accelerator", ...data };
+}
+
+const UNSUPPORTED_NO_SOURCE_STATUS: ProjectSynthesisStatus = {
+  status: "no_source",
+  projectId: PROJECT_ID,
+  projectType: "TRADING_STRATEGIES",
+  sourceCount: 0,
+  sourceCourseId: null,
+  sourceName: null,
+  course: null,
+  counts: null,
+  noStandaloneSetupLessons: [],
+  latestRun: null,
+  latestCompletedRun: null,
+  isOutOfDate: false,
+  canSynthesizeNow: false,
+  preflight: null,
+};
+
+function stubFetch(status: ProjectSynthesisStatus | null, data: CourseSynthesisData | null = null) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (url: string) => {
-      if (url.includes("/api/course/synthesis-status")) return jsonResponse(200, status ?? { course: null });
-      if (url.includes("/api/course/synthesize")) return jsonResponse(202, { created: true, run: data?.run ?? { status: "QUEUED" } });
-      if (url.includes("/api/course/synthesis")) return jsonResponse(200, data ?? { run: null });
+    vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes(`/api/projects/${PROJECT_ID}/synthesis/status`)) return jsonResponse(200, status ?? UNSUPPORTED_NO_SOURCE_STATUS);
+      if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`) && init?.method === "POST") {
+        return jsonResponse(202, { created: true, run: data?.run ?? { status: "QUEUED" } });
+      }
+      if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`)) return jsonResponse(200, toProjectSynthesisData(data));
       throw new Error(`Unexpected fetch: ${url}`);
     }),
   );
@@ -172,26 +209,26 @@ function stubFetch(status: SynthesisStatus | null, data: CourseSynthesisData | n
 describe("CourseIntelligence", () => {
   it("renders nothing without a Knovera session", () => {
     stubFetch(baseStatus());
-    const { container } = render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={null} connected={false} />);
+    const { container } = render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={null} connected={false} projectId={PROJECT_ID} />);
     expect(container).toBeEmptyDOMElement();
   });
 
   it("Phase 4D: reads and renders existing synthesis via the Knovera session alone, even when Whop is not live-connected — disconnecting Whop must never hide an already-completed synthesis", async () => {
     stubFetch(baseStatus());
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected={false} />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected={false} projectId={PROJECT_ID} />);
     expect(await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i })).toBeInTheDocument();
   });
 
   it("shows a 'Synthesize N analyzed lesson(s)' button when no synthesis exists yet", async () => {
     stubFetch(baseStatus());
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     expect(await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i })).toBeInTheDocument();
   });
 
   it("warns before synthesizing while lessons are still processing/queued, and proceeds only after confirmation", async () => {
     const status = baseStatus({ counts: { totalLessons: 28, analyzed: 21, processing: 3, queued: 4, failed: 0 } });
     stubFetch(status);
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     const button = await screen.findByRole("button", { name: /synthesize 21 analyzed lesson/i });
     fireEvent.click(button);
@@ -203,13 +240,13 @@ describe("CourseIntelligence", () => {
     const synthesizeCalls: string[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => {
-        if (url.includes("/api/course/synthesize")) {
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.includes(`/api/projects/${PROJECT_ID}/synthesis/status`)) return jsonResponse(200, status);
+        if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`) && init?.method === "POST") {
           synthesizeCalls.push(url);
           return jsonResponse(202, { created: true, run: { status: "QUEUED" } });
         }
-        if (url.includes("/api/course/synthesis-status")) return jsonResponse(200, status);
-        return jsonResponse(200, { run: null });
+        return jsonResponse(200, toProjectSynthesisData(null));
       }),
     );
 
@@ -225,7 +262,7 @@ describe("CourseIntelligence", () => {
     const data = baseSynthesisData();
     stubFetch(status, data);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     expect(await screen.findByRole("button", { name: "Canonical Strategies" })).toBeInTheDocument();
     expect(screen.getByText(/Canonical Strategy Coverage:/)).toBeInTheDocument();
@@ -256,7 +293,7 @@ describe("CourseIntelligence", () => {
     const status = baseStatus({ latestCompletedRun: dataWithGap.run, latestRun: dataWithGap.run });
     stubFetch(status, dataWithGap);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     expect(await screen.findByText("Partial")).toBeInTheDocument();
     expect(screen.getByText(/8 lessons contain no standalone setup/)).toBeInTheDocument();
@@ -289,7 +326,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     expect(await screen.findByText(/schema validation/)).toBeInTheDocument();
     expect(screen.getByText("Synthesis failed")).toBeInTheDocument();
     expect(screen.getByText(/Building Canonical Strategies/)).toBeInTheDocument();
@@ -317,7 +354,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
     expect(screen.getByText("Stage 3 of 7")).toBeInTheDocument();
@@ -335,7 +372,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     await screen.findByText("Synthesizing Course");
 
     const items = screen.getAllByRole("listitem").filter((li) => li.className.startsWith("synthesis-stage-"));
@@ -364,7 +401,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     expect(await screen.findByText("Gemini is working…")).toBeInTheDocument();
     expect(screen.queryByText(/of .* complete/)).not.toBeInTheDocument();
   });
@@ -377,17 +414,17 @@ describe("CourseIntelligence", () => {
     const synthesizeCalls: string[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string) => {
-        if (url.includes("/api/course/synthesize")) {
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.includes(`/api/projects/${PROJECT_ID}/synthesis/status`)) return jsonResponse(200, status);
+        if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`) && init?.method === "POST") {
           synthesizeCalls.push(url);
           return jsonResponse(202, { created: true, run: status.latestRun });
         }
-        if (url.includes("/api/course/synthesis-status")) return jsonResponse(200, status);
-        return jsonResponse(200, { run: null });
+        return jsonResponse(200, toProjectSynthesisData(null));
       }),
     );
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
     expect(synthesizeCalls).toHaveLength(0); // reloaded purely from GET /synthesis-status — no POST /synthesize fired
   });
@@ -403,7 +440,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     await screen.findByText("Synthesizing Course");
 
     if (expectedText === null) {
@@ -420,7 +457,7 @@ describe("CourseIntelligence", () => {
     const status = baseStatus({ latestRun: data.run, latestCompletedRun: data.run });
     stubFetch(status, data);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     expect(await screen.findByText("Completed")).toBeInTheDocument();
     expect(screen.getByText("Duration: 5 min")).toBeInTheDocument();
@@ -436,7 +473,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     await screen.findByText("42%");
 
     // Real time passes (several of the component's 1s ticks) with no new
@@ -469,7 +506,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     expect(await screen.findByText("Synthesis failed")).toBeInTheDocument();
     expect(screen.getByText("Progress within stage: 1 of 2")).toBeInTheDocument();
@@ -488,7 +525,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     expect(await screen.findByText("Synthesizing Course")).toBeInTheDocument();
     expect(screen.getByText("Cost so far: $0.07")).toBeInTheDocument();
@@ -500,7 +537,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     await screen.findByText("Synthesizing Course");
     expect(screen.queryByText(/Cost so far/)).not.toBeInTheDocument();
@@ -512,7 +549,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
 
     expect(await screen.findByText("Cost so far: $0.00")).toBeInTheDocument();
   });
@@ -523,7 +560,7 @@ describe("CourseIntelligence", () => {
     });
     stubFetch(status);
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     expect(await screen.findByText("Cost so far: $0.05")).toBeInTheDocument();
 
     // Real time passes (several of the component's 1s elapsed-clock ticks) with no new
@@ -539,7 +576,7 @@ describe("CourseIntelligence", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
-        if (url.includes("/api/course/synthesis-status")) {
+        if (url.includes(`/api/projects/${PROJECT_ID}/synthesis/status`)) {
           pollCount++;
           const estimatedCost = pollCount === 1 ? 0.05 : 0.09;
           return jsonResponse(
@@ -547,11 +584,11 @@ describe("CourseIntelligence", () => {
             baseStatus({ latestRun: baseRunSummary({ status: "RUNNING", currentStage: "CANONICALIZING", completedAt: null, estimatedCost }) }),
           );
         }
-        return jsonResponse(200, { run: null });
+        return jsonResponse(200, toProjectSynthesisData(null));
       }),
     );
 
-    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+    render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
     expect(await screen.findByText("Cost so far: $0.05")).toBeInTheDocument();
 
     // The component polls /synthesis-status every 4s while RUNNING (see CourseIntelligence's
@@ -570,7 +607,7 @@ describe("CourseIntelligence", () => {
 
     it("does not appear before any synthesis has completed", async () => {
       stubFetch(baseStatus());
-      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
       await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i });
       expect(screen.queryByRole("button", { name: /download full synthesis json/i })).not.toBeInTheDocument();
     });
@@ -588,7 +625,7 @@ describe("CourseIntelligence", () => {
       URL.revokeObjectURL = revokeObjectURL;
       const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
 
-      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected />);
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
       const button = await screen.findByRole("button", { name: /download full synthesis json/i });
       fireEvent.click(button);
 
@@ -607,7 +644,200 @@ describe("CourseIntelligence", () => {
       expect(clickSpy).toHaveBeenCalledTimes(1);
       expect(revokeObjectURL).toHaveBeenCalledWith("blob:mock-url");
 
+      // G: the downloaded JSON came from the project-scoped GET endpoint
+      // (stubFetch above only ever serves /api/projects/:projectId/synthesis*)
+      // — never any global-course state.
+      expect(parsed.run.runId).toBe(data.run.runId);
+
       clickSpy.mockRestore();
+    });
+  });
+
+  describe("Phase 4E — project-aware synthesis", () => {
+    function noSourceStatus(projectId: number): ProjectSynthesisStatus {
+      return {
+        status: "no_source",
+        projectId,
+        projectType: "TRADING_STRATEGIES",
+        sourceCount: 0,
+        sourceCourseId: null,
+        sourceName: null,
+        course: null,
+        counts: null,
+        noStandaloneSetupLessons: [],
+        latestRun: null,
+        latestCompletedRun: null,
+        isOutOfDate: false,
+        canSynthesizeNow: false,
+        preflight: null,
+      };
+    }
+
+    it("E: clicking Synthesize calls the project-scoped POST /api/projects/:projectId/synthesis endpoint", async () => {
+      const status = baseStatus({ canSynthesizeNow: true, latestCompletedRun: null, latestRun: null });
+      const calls: { url: string; method?: string }[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: RequestInit) => {
+          calls.push({ url, method: init?.method });
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis/status`)) return jsonResponse(200, status);
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`) && init?.method === "POST") {
+            return jsonResponse(202, { created: true, run: { status: "QUEUED" } });
+          }
+          return jsonResponse(200, { status: "no_run", projectId: PROJECT_ID, projectType: "TRADING_STRATEGIES", sourceCount: 1, sourceCourseId: 1, sourceName: "Trading Accelerator", run: null });
+        }),
+      );
+
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
+      const button = await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i });
+      fireEvent.click(button);
+
+      await waitFor(() =>
+        expect(calls.some((c) => c.method === "POST" && c.url === `${BACKEND_URL}/api/projects/${PROJECT_ID}/synthesis`)).toBe(true),
+      );
+    });
+
+    it("F: clicking Re-synthesize calls the same project-scoped endpoint with force: true", async () => {
+      const data = baseSynthesisData();
+      const status = baseStatus({ latestCompletedRun: data.run, latestRun: data.run });
+      const postBodies: unknown[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: RequestInit) => {
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis/status`)) return jsonResponse(200, status);
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`) && init?.method === "POST") {
+            postBodies.push(init?.body ? JSON.parse(init.body as string) : null);
+            return jsonResponse(202, { created: true, run: data.run });
+          }
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`)) return jsonResponse(200, toProjectSynthesisData(data));
+          throw new Error(`Unexpected fetch: ${url}`);
+        }),
+      );
+
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
+      const reButton = await screen.findByRole("button", { name: "Re-synthesize" });
+      fireEvent.click(reButton);
+
+      await waitFor(() => expect(postBodies).toContainEqual({ force: true }));
+    });
+
+    it("H: a project with zero sources shows a clean empty state and no Synthesize action, never MasterMind's or any fabricated data", async () => {
+      stubFetch(noSourceStatus(PROJECT_ID));
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
+
+      expect(await screen.findByText("No synthesis available yet.")).toBeInTheDocument();
+      expect(screen.getByText("Add a source and analyze its content before synthesizing this project.")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /synthesize/i })).not.toBeInTheDocument();
+    });
+
+    it("I: a General Knowledge project shows a restrained Coming Soon state, never invoking trading-strategies synthesis", async () => {
+      const status: ProjectSynthesisStatus = {
+        status: "unsupported_project_type",
+        projectId: PROJECT_ID,
+        projectType: "GENERAL_KNOWLEDGE",
+        sourceCount: 0,
+        sourceCourseId: null,
+        sourceName: null,
+        course: null,
+        counts: null,
+        noStandaloneSetupLessons: [],
+        latestRun: null,
+        latestCompletedRun: null,
+        isOutOfDate: false,
+        canSynthesizeNow: false,
+        preflight: null,
+      };
+      stubFetch(status);
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
+
+      expect(await screen.findByText("Coming Soon")).toBeInTheDocument();
+      expect(screen.getByText(/General Knowledge synthesis/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /synthesize/i })).not.toBeInTheDocument();
+    });
+
+    it("J: a project with multiple sources shows a clear unsupported state rather than silently choosing one", async () => {
+      const status: ProjectSynthesisStatus = {
+        status: "multiple_sources",
+        projectId: PROJECT_ID,
+        projectType: "TRADING_STRATEGIES",
+        sourceCount: 2,
+        sourceCourseId: null,
+        sourceName: null,
+        course: null,
+        counts: null,
+        noStandaloneSetupLessons: [],
+        latestRun: null,
+        latestCompletedRun: null,
+        isOutOfDate: false,
+        canSynthesizeNow: false,
+        preflight: null,
+      };
+      stubFetch(status);
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
+
+      expect(await screen.findByText("This project has multiple sources.")).toBeInTheDocument();
+      expect(screen.getByText(/Source selection for synthesis isn.t supported yet/)).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /synthesize/i })).not.toBeInTheDocument();
+    });
+
+    it("K: switching to a different project never leaks the previous project's synthesis while the new one loads", async () => {
+      const project1Data = baseSynthesisData();
+      const project1Status = baseStatus({ latestCompletedRun: project1Data.run, latestRun: project1Data.run, sourceName: "Project One Course" });
+      let resolveProject2Fetch: (() => void) | undefined;
+      const project2Gate = new Promise<void>((resolve) => {
+        resolveProject2Fetch = resolve;
+      });
+
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string) => {
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis/status`)) return jsonResponse(200, project1Status);
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`)) return jsonResponse(200, toProjectSynthesisData(project1Data));
+          if (url.includes(`/api/projects/2/synthesis/status`)) {
+            await project2Gate;
+            return jsonResponse(200, noSourceStatus(2));
+          }
+          return jsonResponse(200, { status: "no_run", projectId: 2, projectType: "TRADING_STRATEGIES", sourceCount: 0, sourceCourseId: null, sourceName: null, run: null });
+        }),
+      );
+
+      const { rerender } = render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={PROJECT_ID} />);
+      expect(await screen.findByText(/Synthesized from Project One Course/)).toBeInTheDocument();
+
+      rerender(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected projectId={2} />);
+      // State resets synchronously on the projectId change — the old
+      // project's content must be gone immediately, before project 2's
+      // (deliberately delayed) fetch has even resolved.
+      expect(screen.queryByText(/Synthesized from Project One Course/)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Canonical Strategies" })).not.toBeInTheDocument();
+
+      resolveProject2Fetch?.();
+      await waitFor(() => expect(screen.getByText("No synthesis available yet.")).toBeInTheDocument());
+    });
+
+    it("M: a Whop-disconnected user can still launch synthesis when the backend confirms persisted analyses suffice", async () => {
+      const status = baseStatus({ canSynthesizeNow: true, latestCompletedRun: null, latestRun: null });
+      let posted = false;
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: string, init?: RequestInit) => {
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis/status`)) return jsonResponse(200, status);
+          if (url.includes(`/api/projects/${PROJECT_ID}/synthesis`) && init?.method === "POST") {
+            posted = true;
+            return jsonResponse(202, { created: true, run: { status: "QUEUED" } });
+          }
+          return jsonResponse(200, { status: "no_run", projectId: PROJECT_ID, projectType: "TRADING_STRATEGIES", sourceCount: 1, sourceCourseId: 1, sourceName: "Trading Accelerator", run: null });
+        }),
+      );
+
+      // connected={false} — no live Whop connection at all — yet synthesis still launches,
+      // because it operates entirely on already-persisted lesson analyses (see App.tsx/
+      // backend http/app.ts's route classification: no requireWhopConnected on this route).
+      render(<CourseIntelligence backendUrl={BACKEND_URL} knoveraToken={TOKEN} connected={false} projectId={PROJECT_ID} />);
+      const button = await screen.findByRole("button", { name: /synthesize 28 analyzed lesson/i });
+      fireEvent.click(button);
+
+      await waitFor(() => expect(posted).toBe(true));
     });
   });
 });
