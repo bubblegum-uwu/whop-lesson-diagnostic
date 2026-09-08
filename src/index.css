@@ -1600,6 +1600,60 @@ button.kv-topnav-avatar:hover {
   color: var(--kv-accent);
 }
 
+/* Phase 4D.1 — account menu behind the top-nav avatar (mirrors .row-menu's
+   trigger/positioned-list pattern, restyled with the Knovera surface
+   tokens rather than the table's flat dark palette). */
+.kv-account-menu {
+  position: relative;
+  display: inline-block;
+}
+
+.kv-account-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.5rem);
+  z-index: 40;
+  min-width: 200px;
+  background: var(--kv-surface-2);
+  border: 1px solid var(--kv-border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  padding: 0.4rem;
+  display: flex;
+  flex-direction: column;
+}
+
+.kv-account-menu-email {
+  padding: 0.4rem 0.6rem 0.3rem;
+  font-size: 0.78rem;
+  color: var(--kv-text-secondary);
+  word-break: break-all;
+}
+
+.kv-account-menu-divider {
+  height: 1px;
+  margin: 0.2rem 0.4rem;
+  background: var(--kv-border);
+}
+
+.kv-account-menu-item {
+  margin-top: 0;
+  padding: 0.45rem 0.6rem;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  text-align: left;
+  color: var(--kv-text);
+  font-size: 0.85rem;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.kv-account-menu-item:hover {
+  background: var(--kv-surface-hover);
+  color: var(--kv-accent);
+}
+
 .knovera-main {
   flex: 1;
   width: 100%;
