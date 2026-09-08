@@ -46,6 +46,7 @@ export interface SourcesPageProps {
   onFindUserId: () => void;
 
   backendUrl: string | null;
+  accessToken: string | null;
   diagnosticState: DiagnosticFlowState;
   redirectUri: string;
   onDiagnosticSubmit: (lessonUrl: string) => void;
@@ -63,7 +64,7 @@ export interface SourcesPageProps {
 export function SourcesPage(props: SourcesPageProps) {
   return (
     <div className="knovera-page">
-      <ProjectHeader />
+      <ProjectHeader backendUrl={props.backendUrl} accessToken={props.accessToken} />
 
       <h2 className="knovera-section-title">Source Providers</h2>
       <div className="knovera-provider-grid">

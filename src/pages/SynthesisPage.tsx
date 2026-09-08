@@ -12,7 +12,7 @@ import { CourseIntelligence, type CourseIntelligenceProps } from "../components/
 export function SynthesisPage(props: CourseIntelligenceProps) {
   return (
     <div className="knovera-page">
-      <ProjectHeader />
+      <ProjectHeader backendUrl={props.backendUrl} accessToken={props.accessToken} />
       {props.backendUrl && <CourseIntelligence {...props} />}
     </div>
   );

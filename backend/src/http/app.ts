@@ -20,6 +20,7 @@ import { createLessonAnalysisDetailHandler } from "./routes/lessonAnalysisDetail
 import { createAnalysisSummaryHandler } from "./routes/analysisSummary.js";
 import { createAnalysisEventsHandler } from "./routes/analysisEvents.js";
 import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "./routes/courseSynthesis.js";
+import { createListProjectsHandler, createGetProjectHandler } from "./routes/projects.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
 import { requireOperator } from "./middleware/operatorAuth.js";
 import { createJobTrigger } from "../jobs/runJobTrigger.js";
@@ -118,6 +119,14 @@ export function createApp(config: AppConfig): Express {
   app.get("/api/course/synthesis-status", operatorAuth, createSynthesisStatusHandler(courseSynthesisDeps));
   app.post("/api/course/synthesize", operatorAuth, createSynthesizeHandler(courseSynthesisDeps));
   app.get("/api/course/synthesis", operatorAuth, createGetSynthesisHandler(courseSynthesisDeps));
+
+  // Phase 4B: the Knovera project layer. Wraps/identifies the existing
+  // single-course backend above — it does not reparameterize
+  // /api/course/*, /api/analysis/*, or /api/course/synthesis*, which keep
+  // operating on config.course.courseId exactly as before.
+  const projectsDeps = { pool };
+  app.get("/api/projects", operatorAuth, createListProjectsHandler(projectsDeps));
+  app.get("/api/projects/:projectId", operatorAuth, createGetProjectHandler(projectsDeps));
 
   const oidcVerifier = createGoogleOidcVerifier(publicApiBaseUrl, schedulerServiceAccountEmail);
   app.post("/internal/ensure-worker-running", createEnsureWorkerRunningHandler({ pool, jobTrigger, oidcVerifier }));

@@ -1666,6 +1666,20 @@ button:disabled {
   gap: var(--kv-space-4);
 }
 
+.knovera-empty-state {
+  padding: var(--kv-space-6) var(--kv-space-5);
+  color: var(--kv-text-muted);
+  text-align: center;
+}
+
+.knovera-empty-state p {
+  margin: 0 0 var(--kv-space-3);
+}
+
+.knovera-empty-state p:last-child {
+  margin-bottom: 0;
+}
+
 .knovera-project-card {
   display: flex;
   flex-direction: column;
