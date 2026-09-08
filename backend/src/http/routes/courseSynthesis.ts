@@ -22,8 +22,21 @@ export interface CourseSynthesisRouteDeps {
   jobTrigger: JobTrigger;
 }
 
+/**
+ * Phase 4E — narrowed from the full `CourseSynthesisRouteDeps` to exactly
+ * the two fields this (and the other extracted helpers below) actually
+ * use. This is what lets `http/routes/projectSynthesis.ts` call the same
+ * functions with its own `ProjectSynthesisRouteDeps` (which has no
+ * `whopCourseId` — a project resolves its course via ownership, never a
+ * globally configured id) without restating any synthesis logic.
+ */
+interface SynthesisCoreDeps {
+  pool: Pool;
+  geminiModel: string;
+}
+
 /** Every lesson whose LATEST analysis is a usable synthesis source right now (completed or no_strategy) — computed fresh on every call, never cached, so "out of date" always reflects the current DB state. */
-async function computeCurrentSourceState(deps: CourseSynthesisRouteDeps, courseId: number) {
+export async function computeCurrentSourceState(deps: SynthesisCoreDeps, courseId: number) {
   const lessons = await listLessons(deps.pool, courseId);
   const latestByLesson = await getLatestByLessons(deps.pool, lessons.map((l) => l.id));
 
@@ -68,7 +81,7 @@ async function computeCurrentSourceState(deps: CourseSynthesisRouteDeps, courseI
  * (current_stage, completed_items/total_items, current_item — a short
  * display label only) plus deterministic values computed from them.
  */
-function serializeRun(run: SynthesisRun | null) {
+export function serializeRun(run: SynthesisRun | null) {
   if (!run) return null;
   const progress = computeSynthesisProgress({
     status: run.status,
@@ -119,6 +132,45 @@ function serializeRun(run: SynthesisRun | null) {
 }
 
 /**
+ * Phase 4E — the exact body of the former GET /api/course/synthesis-status
+ * handler, extracted unchanged (same queries, same order, same computed
+ * fields) so it can be called with a course resolved either way: via the
+ * globally configured whopCourseId (legacy handler below) or via a
+ * project's ownership (http/routes/projectSynthesis.ts). No synthesis
+ * semantics were touched — this is a pure extract-function refactor.
+ */
+export async function buildSynthesisStatusPayload(deps: SynthesisCoreDeps, course: { id: number; title: string }) {
+  const lessons = await listLessons(deps.pool, course.id);
+  const lessonIds = lessons.map((l) => l.id);
+  const [counts, currentSource, latestRun, latestCompletedRun] = await Promise.all([
+    getSummaryCounts(deps.pool, lessonIds),
+    computeCurrentSourceState(deps, course.id),
+    getLatestRun(deps.pool, course.id),
+    getLatestCompletedRun(deps.pool, course.id),
+  ]);
+
+  const analyzed = counts.completed + counts.noStrategy;
+  const isOutOfDate = latestCompletedRun != null && latestCompletedRun.sourceAnalysisHash !== currentSource.hash;
+
+  return {
+    course: { title: course.title },
+    counts: {
+      totalLessons: lessons.length,
+      analyzed,
+      processing: counts.processing,
+      queued: counts.queued,
+      failed: counts.failed,
+    },
+    noStandaloneSetupLessons: currentSource.noStandaloneSetupLessons,
+    latestRun: serializeRun(latestRun),
+    latestCompletedRun: serializeRun(latestCompletedRun),
+    isOutOfDate,
+    canSynthesizeNow: analyzed > 0,
+    preflight: currentSource.preflight,
+  };
+}
+
+/**
  * GET /api/course/synthesis-status — everything the "Synthesize Course"
  * button and the Course Intelligence Overview tab need: how much of the
  * course is analyzed, the latest run (any status) and latest COMPLETED run,
@@ -133,39 +185,89 @@ export function createSynthesisStatusHandler(deps: CourseSynthesisRouteDeps) {
       return;
     }
 
-    const lessons = await listLessons(deps.pool, course.id);
-    const lessonIds = lessons.map((l) => l.id);
-    const [counts, currentSource, latestRun, latestCompletedRun] = await Promise.all([
-      getSummaryCounts(deps.pool, lessonIds),
-      computeCurrentSourceState(deps, course.id),
-      getLatestRun(deps.pool, course.id),
-      getLatestCompletedRun(deps.pool, course.id),
-    ]);
-
-    const analyzed = counts.completed + counts.noStrategy;
-    const isOutOfDate = latestCompletedRun != null && latestCompletedRun.sourceAnalysisHash !== currentSource.hash;
-
-    res.status(200).json({
-      course: { title: course.title },
-      counts: {
-        totalLessons: lessons.length,
-        analyzed,
-        processing: counts.processing,
-        queued: counts.queued,
-        failed: counts.failed,
-      },
-      noStandaloneSetupLessons: currentSource.noStandaloneSetupLessons,
-      latestRun: serializeRun(latestRun),
-      latestCompletedRun: serializeRun(latestCompletedRun),
-      isOutOfDate,
-      canSynthesizeNow: analyzed > 0,
-      preflight: currentSource.preflight,
-    });
+    const payload = await buildSynthesisStatusPayload(deps, course);
+    res.status(200).json(payload);
   };
 }
 
 interface SynthesizeBody {
   force?: boolean;
+}
+
+interface SynthesizeCoreDeps extends SynthesisCoreDeps {
+  jobTrigger: JobTrigger;
+}
+
+/**
+ * Phase 4E — the exact body of the former POST /api/course/synthesize
+ * handler that runs once a course is already resolved, extracted unchanged
+ * so it can be invoked with a course resolved either via the globally
+ * configured whopCourseId (legacy handler below) or via a project's
+ * ownership (http/routes/projectSynthesis.ts). Every readiness check
+ * (nothing-to-synthesize, preflight, unchanged-hash short-circuit) and the
+ * run-creation/job-trigger call are identical to before — pure
+ * extract-function refactor, no synthesis semantics touched.
+ */
+export async function handleSynthesizeForCourse(deps: SynthesizeCoreDeps, res: Response, course: { id: number }, force: boolean): Promise<void> {
+  const currentSource = await computeCurrentSourceState(deps, course.id);
+  if (currentSource.analysisIds.length === 0) {
+    res.status(409).json({
+      error: { message: "No lessons have finished analysis yet — nothing to synthesize.", type: "nothing_to_synthesize" },
+    });
+    return;
+  }
+
+  // Final pre-merge safety fix — this is the SAME readiness check the read-only diagnostic
+  // (scripts/synthesisDryRun.ts) already enforces (see synthesis/preflight.ts), now also
+  // enforced here so production synthesis can never run against a course with a missing or
+  // stale (pre-current-extractor-version) lesson analysis. Must run BEFORE any synthesis_run
+  // row is created or worker synthesis is triggered — including when `force` is passed:
+  // `force` only bypasses the unchanged-hash short-circuit below, never data readiness.
+  if (!currentSource.preflight.ready) {
+    res.status(409).json({
+      error: {
+        message: "The course is not ready for synthesis — some lesson analyses are missing or stale. Re-analyze the listed lessons under the current extractor version before synthesizing.",
+        type: "preflight_not_ready",
+        staleAnalysisCount: currentSource.preflight.staleAnalysisCount,
+        missingAnalysisCount: currentSource.preflight.missingAnalysisCount,
+        staleLessonIds: currentSource.preflight.staleLessonIds,
+        staleLessonTitles: currentSource.preflight.staleLessonTitles,
+        missingLessonIds: currentSource.preflight.missingLessonIds,
+        missingLessonTitles: currentSource.preflight.missingLessonTitles,
+      },
+    });
+    return;
+  }
+
+  if (!force) {
+    const latestCompleted = await getLatestCompletedRun(deps.pool, course.id);
+    if (latestCompleted && latestCompleted.sourceAnalysisHash === currentSource.hash) {
+      res.status(200).json({ created: false, run: serializeRun(latestCompleted) });
+      return;
+    }
+  }
+
+  const run = await createSynthesisRun(deps.pool, {
+    courseId: course.id,
+    sourceAnalysisHash: currentSource.hash,
+    sourceAnalysisIds: currentSource.analysisIds,
+    model: deps.geminiModel,
+    synthesisPromptVersion: SYNTHESIS_PROMPT_VERSION,
+    synthesisSchemaVersion: SYNTHESIS_SCHEMA_VERSION,
+    synthesizerVersion: SYNTHESIZER_VERSION,
+  });
+
+  try {
+    await deps.jobTrigger.triggerRun();
+  } catch (err) {
+    // Durably queued in Postgres already — a failed trigger call is
+    // recovered the next time any job trigger fires, not fatal here.
+    logger.error("Failed to trigger worker Job execution after enqueueing a synthesis run", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  res.status(202).json({ created: true, run: serializeRun(run) });
 }
 
 /**
@@ -196,66 +298,37 @@ export function createSynthesizeHandler(deps: CourseSynthesisRouteDeps) {
 
     const body = req.body as SynthesizeBody;
     const force = body?.force === true;
+    await handleSynthesizeForCourse(deps, res, course, force);
+  };
+}
 
-    const currentSource = await computeCurrentSourceState(deps, course.id);
-    if (currentSource.analysisIds.length === 0) {
-      res.status(409).json({
-        error: { message: "No lessons have finished analysis yet — nothing to synthesize.", type: "nothing_to_synthesize" },
-      });
-      return;
-    }
+/**
+ * Phase 4E — the exact body of the former GET /api/course/synthesis
+ * handler (once a course is resolved), extracted unchanged so it can be
+ * called with a course resolved either via the globally configured
+ * whopCourseId (legacy handler below) or via a project's ownership
+ * (http/routes/projectSynthesis.ts). Returns `{ run: null }` if no run has
+ * ever completed for this course — same as before.
+ */
+export async function buildFullSynthesisPayload(deps: { pool: Pool }, course: { id: number }) {
+  const run = await getLatestCompletedRun(deps.pool, course.id);
+  if (!run) {
+    return { run: null };
+  }
 
-    // Final pre-merge safety fix — this is the SAME readiness check the read-only diagnostic
-    // (scripts/synthesisDryRun.ts) already enforces (see synthesis/preflight.ts), now also
-    // enforced here so production synthesis can never run against a course with a missing or
-    // stale (pre-current-extractor-version) lesson analysis. Must run BEFORE any synthesis_run
-    // row is created or worker synthesis is triggered — including when `force` is passed:
-    // `force` only bypasses the unchanged-hash short-circuit below, never data readiness.
-    if (!currentSource.preflight.ready) {
-      res.status(409).json({
-        error: {
-          message: "The course is not ready for synthesis — some lesson analyses are missing or stale. Re-analyze the listed lessons under the current extractor version before synthesizing.",
-          type: "preflight_not_ready",
-          staleAnalysisCount: currentSource.preflight.staleAnalysisCount,
-          missingAnalysisCount: currentSource.preflight.missingAnalysisCount,
-          staleLessonIds: currentSource.preflight.staleLessonIds,
-          staleLessonTitles: currentSource.preflight.staleLessonTitles,
-          missingLessonIds: currentSource.preflight.missingLessonIds,
-          missingLessonTitles: currentSource.preflight.missingLessonTitles,
-        },
-      });
-      return;
-    }
+  const [clusters, canonicalStrategies, playbookRow] = await Promise.all([
+    listStrategyClustersByRun(deps.pool, run.runId),
+    listCanonicalStrategiesByRun(deps.pool, run.runId),
+    getCoursePlaybookByRun(deps.pool, run.runId),
+  ]);
 
-    if (!force) {
-      const latestCompleted = await getLatestCompletedRun(deps.pool, course.id);
-      if (latestCompleted && latestCompleted.sourceAnalysisHash === currentSource.hash) {
-        res.status(200).json({ created: false, run: serializeRun(latestCompleted) });
-        return;
-      }
-    }
-
-    const run = await createSynthesisRun(deps.pool, {
-      courseId: course.id,
-      sourceAnalysisHash: currentSource.hash,
-      sourceAnalysisIds: currentSource.analysisIds,
-      model: deps.geminiModel,
-      synthesisPromptVersion: SYNTHESIS_PROMPT_VERSION,
-      synthesisSchemaVersion: SYNTHESIS_SCHEMA_VERSION,
-      synthesizerVersion: SYNTHESIZER_VERSION,
-    });
-
-    try {
-      await deps.jobTrigger.triggerRun();
-    } catch (err) {
-      // Durably queued in Postgres already — a failed trigger call is
-      // recovered the next time any job trigger fires, not fatal here.
-      logger.error("Failed to trigger worker Job execution after enqueueing a synthesis run", {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    res.status(202).json({ created: true, run: serializeRun(run) });
+  return {
+    run: serializeRun(run),
+    clusters: clusters.map((c) => ({ clusterId: c.clusterId, clusterKey: c.clusterKey, canonicalName: c.canonicalName, cluster: c.cluster })),
+    canonicalStrategies: canonicalStrategies.map((c) => ({ canonicalStrategyId: c.canonicalStrategyId, clusterId: c.clusterId, name: c.name, strategy: c.strategy })),
+    coreFramework: playbookRow?.coreFramework ?? null,
+    playbook: playbookRow?.playbook ?? null,
+    decisionFramework: playbookRow?.decisionFramework ?? null,
   };
 }
 
@@ -273,25 +346,7 @@ export function createGetSynthesisHandler(deps: CourseSynthesisRouteDeps) {
       return;
     }
 
-    const run = await getLatestCompletedRun(deps.pool, course.id);
-    if (!run) {
-      res.status(200).json({ run: null });
-      return;
-    }
-
-    const [clusters, canonicalStrategies, playbookRow] = await Promise.all([
-      listStrategyClustersByRun(deps.pool, run.runId),
-      listCanonicalStrategiesByRun(deps.pool, run.runId),
-      getCoursePlaybookByRun(deps.pool, run.runId),
-    ]);
-
-    res.status(200).json({
-      run: serializeRun(run),
-      clusters: clusters.map((c) => ({ clusterId: c.clusterId, clusterKey: c.clusterKey, canonicalName: c.canonicalName, cluster: c.cluster })),
-      canonicalStrategies: canonicalStrategies.map((c) => ({ canonicalStrategyId: c.canonicalStrategyId, clusterId: c.clusterId, name: c.name, strategy: c.strategy })),
-      coreFramework: playbookRow?.coreFramework ?? null,
-      playbook: playbookRow?.playbook ?? null,
-      decisionFramework: playbookRow?.decisionFramework ?? null,
-    });
+    const payload = await buildFullSynthesisPayload(deps, course);
+    res.status(200).json(payload);
   };
 }

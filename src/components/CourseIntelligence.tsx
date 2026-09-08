@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import {
-  getSynthesisStatus,
-  synthesizeCourse,
-  getCourseSynthesis,
-  type SynthesisStatus,
+  getProjectSynthesisStatus,
+  synthesizeProject,
+  getProjectSynthesis,
+  type ProjectSynthesisStatus,
   type SynthesisRunSummary,
   type CourseSynthesisData,
   type CanonicalStrategyInfo,
@@ -16,6 +16,8 @@ export interface CourseIntelligenceProps {
   backendUrl: string | null;
   knoveraToken: string | null;
   connected: boolean;
+  /** Phase 4E — the real numeric project id (never the legacy "mastermind" slug); the route/project determines the synthesis input. Null until the route has resolved (see SynthesisPage.tsx's useResolvedProject). */
+  projectId: number | null;
 }
 
 const TABS = ["Overview", "Canonical Strategies", "Core Framework", "Playbook", "Decision Framework", "Conflicts", "Sources"] as const;
@@ -309,59 +311,121 @@ interface ConfirmDialogState {
   total: number;
 }
 
-export function CourseIntelligence({ backendUrl, knoveraToken }: CourseIntelligenceProps) {
-  const [status, setStatus] = useState<SynthesisStatus | null>(null);
+export function CourseIntelligence({ backendUrl, knoveraToken, projectId }: CourseIntelligenceProps) {
+  const [status, setStatus] = useState<ProjectSynthesisStatus | null>(null);
   const [data, setData] = useState<CourseSynthesisData | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [busy, setBusy] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  async function refresh() {
+  async function refresh(pid: number) {
     if (!backendUrl || !knoveraToken) return;
     try {
-      const nextStatus = await getSynthesisStatus(backendUrl, knoveraToken);
+      const nextStatus = await getProjectSynthesisStatus(backendUrl, knoveraToken, pid);
       setStatus(nextStatus);
-      if (nextStatus?.latestCompletedRun) {
-        const nextData = await getCourseSynthesis(backendUrl, knoveraToken);
-        setData(nextData);
+      if (nextStatus.status === "ready" && nextStatus.latestCompletedRun) {
+        const nextData = await getProjectSynthesis(backendUrl, knoveraToken, pid);
+        setData(
+          nextData.status === "ready"
+            ? {
+                run: nextData.run,
+                clusters: nextData.clusters,
+                canonicalStrategies: nextData.canonicalStrategies,
+                coreFramework: nextData.coreFramework,
+                playbook: nextData.playbook,
+                decisionFramework: nextData.decisionFramework,
+              }
+            : null,
+        );
+      } else {
+        setData(null);
       }
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Failed to load course synthesis.");
+      setErrorMessage(err instanceof Error ? err.message : "Failed to load project synthesis.");
     }
   }
 
-  // Phase 4D — reading existing synthesis (getSynthesisStatus/
-  // getCourseSynthesis) and launching a new run (doSynthesize below) both
+  // Phase 4D — reading existing synthesis (getProjectSynthesisStatus/
+  // getProjectSynthesis) and launching a new run (doSynthesize below) both
   // require only a Knovera session: they never call Whop, only Postgres
   // (see backend http/app.ts's route classification). `connected` (LIVE
   // Whop provider-connection state) must never gate this — Whop being
   // disconnected must not hide an already-completed synthesis.
+  //
+  // Phase 4E — resets status/data synchronously on every projectId change
+  // (including the initial resolve from null) so switching projects never
+  // renders the previous project's synthesis while the new project's fetch
+  // is in flight.
   useEffect(() => {
-    if (!backendUrl || !knoveraToken) return;
-    void refresh();
+    setStatus(null);
+    setData(null);
+    setErrorMessage(null);
+    if (!backendUrl || !knoveraToken || projectId == null) return;
+    void refresh(projectId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, knoveraToken]);
+  }, [backendUrl, knoveraToken, projectId]);
 
   // Poll while a run is in flight — synthesis takes minutes, and the frontend
   // never holds an HTTP request open for it (see backend worker/synthesisLoop.ts).
+  // Keyed on projectId too so navigating to a different project tears down
+  // any interval still polling the previous one.
   useEffect(() => {
     const inFlight = status?.latestRun && (status.latestRun.status === "QUEUED" || status.latestRun.status === "RUNNING");
-    if (!inFlight) return undefined;
-    const interval = setInterval(() => void refresh(), 4000);
+    if (!inFlight || projectId == null) return undefined;
+    const interval = setInterval(() => void refresh(projectId), 4000);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status?.latestRun?.status, status?.latestRun?.runId]);
+  }, [status?.latestRun?.status, status?.latestRun?.runId, projectId]);
 
-  if (!backendUrl || !knoveraToken || !status) return null;
+  if (!backendUrl || !knoveraToken || projectId == null || !status) return null;
+
+  // Phase 4E — a project that can't resolve to a single usable
+  // TRADING_STRATEGIES source (GENERAL_KNOWLEDGE, zero sources, or more
+  // than one source) never reaches the synthesis UI below: no fabricated
+  // data, no fallback to any other project's synthesis, Synthesize
+  // unavailable. See backend/src/http/routes/projectSynthesis.ts's
+  // resolveProjectSynthesisSource for the exact same three reasons.
+  if (status.status !== "ready") {
+    return (
+      <div className="course-section course-intelligence">
+        <div className="course-header">
+          <h2>Synthesized Intelligence</h2>
+        </div>
+        <div className="kv-card knovera-empty-state">
+          {status.status === "unsupported_project_type" && (
+            <>
+              <p>
+                <span className="kv-badge kv-badge-muted">Coming Soon</span>
+              </p>
+              <p>General Knowledge synthesis isn&rsquo;t available yet.</p>
+            </>
+          )}
+          {status.status === "no_source" && (
+            <>
+              <p>No synthesis available yet.</p>
+              <p>Add a source and analyze its content before synthesizing this project.</p>
+            </>
+          )}
+          {status.status === "multiple_sources" && (
+            <>
+              <p>This project has multiple sources.</p>
+              <p>Source selection for synthesis isn&rsquo;t supported yet.</p>
+            </>
+          )}
+        </div>
+        {errorMessage && <div className="error-box">{errorMessage}</div>}
+      </div>
+    );
+  }
 
   async function doSynthesize(force: boolean) {
-    if (!backendUrl || !knoveraToken) return;
+    if (!backendUrl || !knoveraToken || projectId == null) return;
     setBusy(true);
     setErrorMessage(null);
     try {
-      await synthesizeCourse(backendUrl, knoveraToken, force);
-      await refresh();
+      await synthesizeProject(backendUrl, knoveraToken, projectId, force);
+      await refresh(projectId);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Failed to start synthesis.");
     } finally {
@@ -371,7 +435,7 @@ export function CourseIntelligence({ backendUrl, knoveraToken }: CourseIntellige
   }
 
   function handleSynthesizeClick(force: boolean) {
-    if (!status) return;
+    if (!status || status.status !== "ready") return;
     const remaining = status.counts.processing + status.counts.queued;
     if (remaining > 0) {
       setConfirmDialog({ force, analyzed: status.counts.analyzed, remaining, total: status.counts.totalLessons });
@@ -421,7 +485,13 @@ export function CourseIntelligence({ backendUrl, knoveraToken }: CourseIntellige
   return (
     <div className="course-section course-intelligence">
       <div className="course-header">
-        <h2>Course Intelligence</h2>
+        <div>
+          <h2>Synthesized Intelligence</h2>
+          {/* Phase 4E — makes project/source ownership visible without a new card (requirement: restrained, single line). */}
+          <p className="hint synthesis-source-context">
+            Synthesized from {status.sourceName} · {status.counts.totalLessons} lesson{status.counts.totalLessons === 1 ? "" : "s"}
+          </p>
+        </div>
         <div className="course-actions">
           {status.canSynthesizeNow && !inFlight && (
             <button onClick={() => handleSynthesizeClick(false)} disabled={busy}>

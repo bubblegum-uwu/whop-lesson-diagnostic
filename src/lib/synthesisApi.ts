@@ -333,3 +333,106 @@ export async function getCourseSynthesis(backendUrl: string, knoveraToken: strin
   const body = (await res.json()) as CourseSynthesisData & { run: SynthesisRunSummary | null };
   return body.run ? (body as CourseSynthesisData) : null;
 }
+
+/**
+ * Phase 4E — the project-aware synthesis client. The route/project now
+ * determines the synthesis input (see backend/src/http/routes/
+ * projectSynthesis.ts): these calls resolve a project's own course via
+ * `courses.project_id`, never the deployment's globally configured Whop
+ * course. Same Knovera-only auth conventions as above — no Whop token, and
+ * reading/launching synthesis never requires an active Whop connection.
+ */
+export type ProjectSynthesisUnsupportedReason = "unsupported_project_type" | "no_source" | "multiple_sources";
+
+/** Discriminated on `status` — TRADING_STRATEGIES + exactly one course resolves to "ready"; every other shape is a clean, non-fabricated state the UI renders directly (see CourseIntelligence.tsx). */
+export type ProjectSynthesisStatus =
+  | {
+      status: ProjectSynthesisUnsupportedReason;
+      projectId: number;
+      projectType: string;
+      sourceCount: number;
+      sourceCourseId: null;
+      sourceName: null;
+      course: null;
+      counts: null;
+      noStandaloneSetupLessons: NoStandaloneSetupLesson[];
+      latestRun: null;
+      latestCompletedRun: null;
+      isOutOfDate: false;
+      canSynthesizeNow: false;
+      preflight: null;
+    }
+  | {
+      status: "ready";
+      projectId: number;
+      projectType: string;
+      sourceCount: number;
+      sourceCourseId: number;
+      sourceName: string;
+      course: { title: string };
+      counts: { totalLessons: number; analyzed: number; processing: number; queued: number; failed: number };
+      noStandaloneSetupLessons: NoStandaloneSetupLesson[];
+      latestRun: SynthesisRunSummary | null;
+      latestCompletedRun: SynthesisRunSummary | null;
+      isOutOfDate: boolean;
+      canSynthesizeNow: boolean;
+      preflight: SynthesisPreflight;
+    };
+
+export async function getProjectSynthesisStatus(backendUrl: string, knoveraToken: string, projectId: number): Promise<ProjectSynthesisStatus> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis/status`, { headers: authHeaders(knoveraToken) });
+  if (!res.ok) throw new Error(`Failed to load project synthesis status (${res.status}).`);
+  return (await res.json()) as ProjectSynthesisStatus;
+}
+
+export async function synthesizeProject(backendUrl: string, knoveraToken: string, projectId: number, force = false): Promise<SynthesizeResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ force }),
+  });
+  const body = await res.json().catch(() => undefined);
+  if (!res.ok) throw new Error(body?.error?.message ?? `Failed to start synthesis (${res.status}).`);
+  return body as SynthesizeResult;
+}
+
+/** Discriminated on `status` — a resolved project/course with no completed run yet is "no_run" (sourceCourseId/sourceName known, run null); everything else mirrors ProjectSynthesisStatus's non-ready shapes. */
+export type ProjectSynthesisData =
+  | {
+      status: ProjectSynthesisUnsupportedReason;
+      projectId: number;
+      projectType: string;
+      sourceCount: number;
+      sourceCourseId: null;
+      sourceName: null;
+      run: null;
+    }
+  | {
+      status: "no_run";
+      projectId: number;
+      projectType: string;
+      sourceCount: number;
+      sourceCourseId: number;
+      sourceName: string;
+      run: null;
+    }
+  | {
+      status: "ready";
+      projectId: number;
+      projectType: string;
+      sourceCount: number;
+      sourceCourseId: number;
+      sourceName: string;
+      run: SynthesisRunSummary;
+      clusters: ClusterInfo[];
+      canonicalStrategies: CanonicalStrategyInfo[];
+      coreFramework: CoreFramework | null;
+      playbook: CoursePlaybook | null;
+      decisionFramework: DecisionFramework | null;
+    };
+
+export async function getProjectSynthesis(backendUrl: string, knoveraToken: string, projectId: number): Promise<ProjectSynthesisData> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis`, { headers: authHeaders(knoveraToken) });
+  if (!res.ok) throw new Error(`Failed to load project synthesis (${res.status}).`);
+  return (await res.json()) as ProjectSynthesisData;
+}
