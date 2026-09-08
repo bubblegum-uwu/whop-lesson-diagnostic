@@ -60,7 +60,14 @@ export function ProjectsPage({ backendUrl, accessToken }: ProjectsPageProps) {
 
       {state.phase === "signed_out" && (
         <div className="kv-card knovera-empty-state">
-          <p>Sign in with Whop to view your projects.</p>
+          {/* Phase 4C: today, viewing this list genuinely requires a Whop-issued
+              token — this app has no independent Knovera session yet (see the
+              "Knovera Auth vs Provider Auth" section of the Phase 4C PR
+              description). But projects themselves are not conceptually a
+              Whop concept, so this stays worded as app access, not a source
+              connection — "Connect Whop" belongs on the Sources page, where a
+              provider is actually being connected to a project. */}
+          <p>Sign in to view your projects.</p>
           <button type="button" className="link-button" onClick={() => navigate(`/projects/${MASTERMIND_ROUTE_SLUG}/sources`)}>
             Go to Sources →
           </button>

@@ -21,6 +21,7 @@ import { createAnalysisSummaryHandler } from "./routes/analysisSummary.js";
 import { createAnalysisEventsHandler } from "./routes/analysisEvents.js";
 import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "./routes/courseSynthesis.js";
 import { createListProjectsHandler, createGetProjectHandler } from "./routes/projects.js";
+import { createGetProjectSourcesHandler } from "./routes/projectSources.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
 import { requireOperator } from "./middleware/operatorAuth.js";
 import { createJobTrigger } from "../jobs/runJobTrigger.js";
@@ -127,6 +128,10 @@ export function createApp(config: AppConfig): Express {
   const projectsDeps = { pool };
   app.get("/api/projects", operatorAuth, createListProjectsHandler(projectsDeps));
   app.get("/api/projects/:projectId", operatorAuth, createGetProjectHandler(projectsDeps));
+  // Phase 4C: real per-project sources, derived from courses.project_id —
+  // never from config.course.courseId. See projectSources.ts for why this
+  // introduces no new `sources` table.
+  app.get("/api/projects/:projectId/sources", operatorAuth, createGetProjectSourcesHandler(projectsDeps));
 
   const oidcVerifier = createGoogleOidcVerifier(publicApiBaseUrl, schedulerServiceAccountEmail);
   app.post("/internal/ensure-worker-running", createEnsureWorkerRunningHandler({ pool, jobTrigger, oidcVerifier }));

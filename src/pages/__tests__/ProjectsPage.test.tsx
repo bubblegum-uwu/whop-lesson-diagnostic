@@ -51,7 +51,7 @@ function renderProjects(props: Partial<ProjectsPageProps> = {}) {
 describe("ProjectsPage", () => {
   it("prompts sign-in when there is no access token yet, rather than fetching or fabricating data", () => {
     renderProjects({ accessToken: null });
-    expect(screen.getByText("Sign in with Whop to view your projects.")).toBeInTheDocument();
+    expect(screen.getByText("Sign in to view your projects.")).toBeInTheDocument();
   });
 
   it("shows a loading state while GET /api/projects is in flight", async () => {

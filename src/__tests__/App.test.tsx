@@ -44,7 +44,7 @@ describe("App — Phase 4A routing shell", () => {
 
   it("renders the Projects page directly at /projects — signed out, so it prompts sign-in rather than showing fabricated project data", () => {
     renderApp("/projects");
-    expect(screen.getByText("Sign in with Whop to view your projects.")).toBeInTheDocument();
+    expect(screen.getByText("Sign in to view your projects.")).toBeInTheDocument();
   });
 
   it("renders the Sources workspace directly at /projects/mastermind/sources (refreshable hash route)", () => {
