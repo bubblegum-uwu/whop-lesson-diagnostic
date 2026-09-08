@@ -9,40 +9,48 @@ export interface ProjectHeaderProps {
 }
 
 type ResolveState =
-  | { phase: "unresolved" }
+  | { phase: "idle" }
+  | { phase: "loading" }
   | { phase: "resolved"; project: ProjectSummary }
   | { phase: "not_found" };
+
+/** A route param that could never resolve to any project — not the legacy slug, not even a syntactically valid (non-negative integer) database id. Used to redirect immediately on garbage without waiting on a network round trip; a real numeric id always waits for the lookup below instead (see the hotfix note on the redirect condition). */
+function isPlausibleProjectRouteParam(routeParam: string | undefined): boolean {
+  if (!routeParam) return false;
+  return routeParam === MASTERMIND_ROUTE_SLUG || /^\d+$/.test(routeParam);
+}
 
 /**
  * Shared header for both the Sources and Synthesis project pages: "←
  * Projects", the project's name/type, and the Sources/Synthesis tab nav.
  *
- * Phase 4B: resolves the route against the real `GET /api/projects` list
- * instead of a hardcoded lookup. That call requires the operator's Whop
- * access token (same as every other course/analysis route), so while
- * signed out — or before the fetch resolves — this falls back to the
- * known legacy "mastermind" slug's real name/type rather than showing
- * nothing; it only redirects to /projects once a completed fetch
- * definitively finds no matching project for a non-legacy route param.
+ * Resolves the route against the real `GET /api/projects` list instead of a
+ * hardcoded lookup. That call requires the operator's Whop access token
+ * (same as every other course/analysis route), so while signed out — or
+ * before the fetch resolves — this falls back to the known legacy
+ * "mastermind" slug's real name/type rather than showing nothing; it only
+ * redirects to /projects once a completed fetch definitively finds no
+ * matching project, or the route param could never be valid at all.
  */
 export function ProjectHeader({ backendUrl, accessToken }: ProjectHeaderProps) {
   const { projectId: routeParam } = useParams<{ projectId: string }>();
-  const [state, setState] = useState<ResolveState>({ phase: "unresolved" });
+  const [state, setState] = useState<ResolveState>({ phase: "idle" });
 
   async function resolve(url: string, token: string, param: string | undefined, cancelledRef: { current: boolean }) {
+    setState({ phase: "loading" });
     try {
       const projects = await listProjects(url, token);
       if (cancelledRef.current) return;
       const resolved = resolveProjectRoute(projects, param);
       setState(resolved ? { phase: "resolved", project: resolved } : { phase: "not_found" });
     } catch {
-      if (!cancelledRef.current) setState({ phase: "unresolved" });
+      if (!cancelledRef.current) setState({ phase: "idle" });
     }
   }
 
   useEffect(() => {
     if (!backendUrl || !accessToken) {
-      setState({ phase: "unresolved" });
+      setState({ phase: "idle" });
       return;
     }
     const cancelledRef = { current: false };
@@ -53,14 +61,24 @@ export function ProjectHeader({ backendUrl, accessToken }: ProjectHeaderProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl, accessToken, routeParam]);
 
-  if (state.phase === "not_found") return <Navigate to="/projects" replace />;
-
   const isLegacySlug = routeParam === MASTERMIND_ROUTE_SLUG;
-  if (state.phase === "unresolved" && !isLegacySlug) return <Navigate to="/projects" replace />;
 
-  const name = state.phase === "resolved" ? state.project.name : "MasterMind";
-  const projectType = state.phase === "resolved" ? (state.project.projectType as ProjectType) : ProjectType.TRADING_STRATEGIES;
-  const linkId = state.phase === "resolved" ? String(state.project.id) : MASTERMIND_ROUTE_SLUG;
+  // HOTFIX: a syntactically valid numeric project id (e.g. /projects/1/sources
+  // from the real GET /api/projects id) must NOT bounce back to /projects
+  // just because the async lookup above is still idle/in flight — only a
+  // definitive "not_found" from a completed fetch, or a route param that
+  // could never be valid in the first place, redirects. The previous
+  // version redirected on ANY non-legacy-slug param on the very first
+  // (pre-fetch) render, which is what caused Open → Projects loop.
+  if (state.phase === "not_found" || !isPlausibleProjectRouteParam(routeParam)) {
+    return <Navigate to="/projects" replace />;
+  }
+
+  const showLegacyFallback = state.phase !== "resolved" && isLegacySlug;
+  const name = state.phase === "resolved" ? state.project.name : showLegacyFallback ? "MasterMind" : "Loading…";
+  const projectType: ProjectType | null =
+    state.phase === "resolved" ? (state.project.projectType as ProjectType) : showLegacyFallback ? ProjectType.TRADING_STRATEGIES : null;
+  const linkId = state.phase === "resolved" ? String(state.project.id) : showLegacyFallback ? MASTERMIND_ROUTE_SLUG : (routeParam as string);
 
   return (
     <div className="knovera-project-header">
@@ -69,7 +87,7 @@ export function ProjectHeader({ backendUrl, accessToken }: ProjectHeaderProps) {
       </NavLink>
       <div className="knovera-project-title-row">
         <h1>{name}</h1>
-        <span className="kv-badge kv-badge-muted knovera-project-type">{PROJECT_TYPE_LABEL[projectType]}</span>
+        {projectType && <span className="kv-badge kv-badge-muted knovera-project-type">{PROJECT_TYPE_LABEL[projectType]}</span>}
       </div>
       <nav className="knovera-segmented-tabs" aria-label="Project workspace">
         <NavLink to={`/projects/${linkId}/sources`} className={({ isActive }) => (isActive ? "knovera-project-tab active" : "knovera-project-tab")}>
