@@ -24,6 +24,7 @@ import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthes
 import { createProjectSynthesisStatusHandler, createProjectSynthesizeHandler, createGetProjectSynthesisHandler } from "./routes/projectSynthesis.js";
 import { createListProjectsHandler, createGetProjectHandler } from "./routes/projects.js";
 import { createGetProjectSourcesHandler } from "./routes/projectSources.js";
+import { createGetUsageHandler } from "./routes/usage.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
 import { requireOperator } from "./middleware/operatorAuth.js";
 import { requireKnoveraAuth } from "./middleware/knoveraAuth.js";
@@ -192,6 +193,12 @@ export function createApp(config: AppConfig): Express {
   app.get("/api/projects/:projectId/synthesis/status", knoveraAuth, createProjectSynthesisStatusHandler(projectSynthesisDeps));
   app.post("/api/projects/:projectId/synthesis", knoveraAuth, createProjectSynthesizeHandler(projectSynthesisDeps));
   app.get("/api/projects/:projectId/synthesis", knoveraAuth, createGetProjectSynthesisHandler(projectSynthesisDeps));
+
+  // Phase 4F — project-aware Usage dashboard: current-month analysis +
+  // synthesis spend, grouped by `courses.project_id` (see db/usageRepo.ts
+  // for the exact accounting rule). Pure reads of persisted Postgres data —
+  // gated by Knovera auth only, never Whop.
+  app.get("/api/usage", knoveraAuth, createGetUsageHandler({ pool }));
 
   const oidcVerifier = createGoogleOidcVerifier(publicApiBaseUrl, schedulerServiceAccountEmail);
   app.post("/internal/ensure-worker-running", createEnsureWorkerRunningHandler({ pool, jobTrigger, oidcVerifier }));

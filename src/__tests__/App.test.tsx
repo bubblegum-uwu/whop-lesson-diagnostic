@@ -90,7 +90,7 @@ describe("App — Phase 4A routing shell", () => {
   it("renders the Usage page directly at /usage once a Knovera session exists", () => {
     seedKnoveraSession();
     renderApp("/usage");
-    expect(screen.getByText("Usage & Spend")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Usage" })).toBeInTheDocument();
   });
 
   /**

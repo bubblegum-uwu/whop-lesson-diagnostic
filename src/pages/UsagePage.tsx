@@ -1,31 +1,139 @@
-function currentMonthLabel(): string {
-  return new Date().toLocaleDateString(undefined, { month: "long", year: "numeric" });
+import { useEffect, useState } from "react";
+import { PROJECT_TYPE_LABEL, type ProjectType } from "../lib/projects";
+import { getCurrentMonthUsage, type UsageResponse } from "../lib/usageApi";
+
+export interface UsagePageProps {
+  backendUrl: string | null;
+  /** The Knovera session token (Phase 4D) — null until logged in. Never a Whop token: GET /api/usage works with no Whop connection at all. */
+  knoveraToken: string | null;
+}
+
+type LoadState =
+  | { phase: "signed_out" }
+  | { phase: "loading" }
+  | { phase: "loaded"; usage: UsageResponse }
+  | { phase: "error"; message: string };
+
+function formatCost(value: number): string {
+  return `$${value.toFixed(2)}`;
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 /**
- * "/usage". UI shell only, per spec: no monthly-spend query exists yet
- * (that's Phase 4E, which will sum lesson_analyses.estimated_cost +
- * synthesis_runs.estimated_cost for the current month — see the Phase 4
- * investigation report). Deliberately shows no dollar figures at all here,
- * real or otherwise, rather than a fabricated $0.00 that could be
- * mistaken for a real total. Phase 4B: no longer reads the retired
- * frontend-only PROJECTS list — usage-per-project is Phase 4E's job once a
- * real spend query exists; until then this is a single static row.
+ * "/usage" — Phase 4F's real project-aware Usage & Spend dashboard: current
+ * calendar month, analysis + synthesis cost per project, from GET
+ * /api/usage (see db/usageRepo.ts for the exact accounting rule). Requires
+ * only a Knovera session — never Whop; visible with Whop fully
+ * disconnected, exactly like Projects/Sources/Synthesis.
  */
-export function UsagePage() {
+export function UsagePage({ backendUrl, knoveraToken }: UsagePageProps) {
+  const [state, setState] = useState<LoadState>({ phase: "signed_out" });
+
+  async function load(url: string, token: string, cancelledRef: { current: boolean }) {
+    setState({ phase: "loading" });
+    try {
+      const usage = await getCurrentMonthUsage(url, token);
+      if (!cancelledRef.current) setState({ phase: "loaded", usage });
+    } catch (err) {
+      if (!cancelledRef.current) {
+        setState({ phase: "error", message: err instanceof Error ? err.message : "Failed to load usage." });
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!backendUrl || !knoveraToken) {
+      setState({ phase: "signed_out" });
+      return;
+    }
+    const cancelledRef = { current: false };
+    void load(backendUrl, knoveraToken, cancelledRef);
+    return () => {
+      cancelledRef.current = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendUrl, knoveraToken]);
+
   return (
     <div className="knovera-page">
-      <div>
-        <h1 className="knovera-page-title">Usage &amp; Spend</h1>
-        <p className="knovera-usage-month">{currentMonthLabel()}</p>
+      <div className="knovera-page-header">
+        <h1 className="knovera-page-title">Usage</h1>
+        {state.phase === "loaded" && <p className="knovera-usage-month">{state.usage.period.label}</p>}
       </div>
 
-      <div className="kv-card knovera-usage-table">
-        <div className="knovera-usage-row">
-          <span className="knovera-usage-project">MasterMind</span>
-          <span className="knovera-usage-pending">Current-month spend calculation coming in Phase 4E</span>
+      {state.phase === "signed_out" && (
+        <div className="kv-card knovera-empty-state">
+          <p>Sign in to view usage.</p>
         </div>
-      </div>
+      )}
+
+      {state.phase === "loading" && (
+        <div className="kv-card knovera-empty-state">
+          <p>Loading usage…</p>
+        </div>
+      )}
+
+      {state.phase === "error" && (
+        <div className="kv-card knovera-empty-state" role="alert">
+          <p>{state.message}</p>
+        </div>
+      )}
+
+      {state.phase === "loaded" && (
+        <>
+          <div className="kv-card knovera-usage-total-card">
+            <span className="knovera-usage-total-label">Total Spend</span>
+            <span className="knovera-usage-total-value">{formatCost(state.usage.total.totalCost)}</span>
+            <div className="knovera-usage-total-breakdown">
+              <span>
+                Analysis <strong>{formatCost(state.usage.total.analysisCost)}</strong>
+              </span>
+              <span>
+                Synthesis <strong>{formatCost(state.usage.total.synthesisCost)}</strong>
+              </span>
+            </div>
+          </div>
+
+          {state.usage.total.totalCost === 0 && <p className="hint knovera-usage-zero-note">No usage recorded this month.</p>}
+
+          <h2 className="knovera-section-title">Projects</h2>
+          {state.usage.projects.length === 0 ? (
+            <div className="kv-card knovera-empty-state">
+              <p>No projects yet.</p>
+            </div>
+          ) : (
+            <div className="knovera-usage-project-list">
+              {state.usage.projects.map((project) => (
+                <div key={project.projectId} className="kv-card knovera-usage-project-card">
+                  <div className="knovera-usage-project-card-top">
+                    <h3>{project.projectName}</h3>
+                    <span className="kv-badge kv-badge-muted">{PROJECT_TYPE_LABEL[project.projectType as ProjectType]}</span>
+                  </div>
+                  <div className="knovera-usage-project-card-costs">
+                    <span>
+                      Analysis <strong>{formatCost(project.analysisCost)}</strong>
+                    </span>
+                    <span>
+                      Synthesis <strong>{formatCost(project.synthesisCost)}</strong>
+                    </span>
+                    <span className="knovera-usage-project-card-total">
+                      Total <strong>{formatCost(project.totalCost)}</strong>
+                    </span>
+                  </div>
+                  {(project.lessonsAnalyzed > 0 || project.synthesisRuns > 0) && (
+                    <p className="knovera-usage-project-card-meta">
+                      {plural(project.lessonsAnalyzed, "lesson")} analyzed · {plural(project.synthesisRuns, "synthesis run")}
+                    </p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
