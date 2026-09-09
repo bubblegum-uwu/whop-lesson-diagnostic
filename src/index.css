@@ -2361,6 +2361,95 @@ button.kv-topnav-avatar:hover {
   font-size: 0.83rem;
 }
 
+/* Phase 4F — real Usage & Spend dashboard. */
+.knovera-usage-total-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kv-space-2);
+  padding: var(--kv-space-5);
+}
+
+.knovera-usage-total-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--kv-text-muted);
+}
+
+.knovera-usage-total-value {
+  font-size: 2.1rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--kv-accent);
+}
+
+.knovera-usage-total-breakdown {
+  display: flex;
+  gap: var(--kv-space-5);
+  font-size: 0.86rem;
+  color: var(--kv-text-secondary);
+}
+
+.knovera-usage-total-breakdown strong {
+  color: var(--kv-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.knovera-usage-zero-note {
+  margin-top: calc(-1 * var(--kv-space-2));
+}
+
+.knovera-usage-project-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--kv-space-4);
+}
+
+.knovera-usage-project-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kv-space-3);
+  padding: var(--kv-space-5);
+}
+
+.knovera-usage-project-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kv-space-3);
+}
+
+.knovera-usage-project-card-top h3 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.knovera-usage-project-card-costs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kv-space-1);
+  font-size: 0.85rem;
+  color: var(--kv-text-secondary);
+}
+
+.knovera-usage-project-card-costs strong {
+  color: var(--kv-text);
+  font-variant-numeric: tabular-nums;
+  float: right;
+}
+
+.knovera-usage-project-card-total {
+  border-top: 1px solid var(--kv-border);
+  padding-top: var(--kv-space-2);
+  color: var(--kv-text);
+}
+
+.knovera-usage-project-card-meta {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--kv-text-muted);
+}
+
 /* ---- CourseIntelligence secondary nav (Overview/Canonical Strategies/etc.) --
    Restyles ONLY the tab bar's presentation — see CourseIntelligence.tsx,
    whose tab STATE/behavior is unchanged (still a plain useState<Tab>). ---- */

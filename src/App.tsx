@@ -520,7 +520,7 @@ export default function App() {
         element={knoveraToken ? <AppShellLayout onLogout={handleKnoveraLogout} email={knoveraEmail} /> : <Navigate to="/login" replace />}
       >
         <Route path="/projects" element={<ProjectsPage backendUrl={backendUrl} knoveraToken={knoveraToken} />} />
-        <Route path="/usage" element={<UsagePage />} />
+        <Route path="/usage" element={<UsagePage backendUrl={backendUrl} knoveraToken={knoveraToken} />} />
         <Route
           path="/projects/:projectId/sources"
           element={
