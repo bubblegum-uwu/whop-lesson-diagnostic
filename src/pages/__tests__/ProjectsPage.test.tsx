@@ -111,7 +111,7 @@ describe("ProjectsPage", () => {
     expect(screen.getByText("SOURCES_PAGE_MARKER")).toBeInTheDocument();
   });
 
-  it("New Project opens a dialog listing both project types, with General Knowledge marked Coming Soon", async () => {
+  it("New Project opens a dialog listing both project types", async () => {
     stubFetch([MASTERMIND]);
     renderProjects();
     await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
@@ -119,17 +119,46 @@ describe("ProjectsPage", () => {
 
     const dialog = screen.getByRole("dialog");
     expect(within(dialog).getByText("Trading Strategies")).toBeInTheDocument();
-    const generalKnowledgeOption = within(dialog).getByText("General Knowledge").closest("button")!;
-    expect(generalKnowledgeOption).toHaveTextContent("Coming Soon");
+    expect(within(dialog).getByText("General Knowledge")).toBeInTheDocument();
+    expect(within(dialog).getByText("Create the project now. General Knowledge synthesis is coming soon.")).toBeInTheDocument();
   });
 
-  it("never pretends a new project was created — selecting a type shows the honest deferral message (POST /api/projects deferred to Phase 4C)", async () => {
-    stubFetch([MASTERMIND]);
+  it("creating a project navigates to its Sources page and never touches MasterMind's data", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith("/api/projects") && (!init || init.method === undefined)) {
+          return jsonResponse(200, { projects: [MASTERMIND] });
+        }
+        if (url.endsWith("/api/projects") && init?.method === "POST") {
+          return jsonResponse(201, {
+            project: {
+              id: 42,
+              name: "Fresh Start",
+              projectType: "TRADING_STRATEGIES",
+              createdAt: "2026-01-03T00:00:00.000Z",
+              updatedAt: "2026-01-03T00:00:00.000Z",
+              courseCount: 0,
+              lessonCount: 0,
+              analyzedLessonCount: 0,
+              latestSynthesisStatus: null,
+              latestSynthesisCompletedAt: null,
+            },
+          });
+        }
+        return jsonResponse(404, {});
+      }),
+    );
     renderProjects();
     await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "New Project" }));
     const dialog = screen.getByRole("dialog");
-    fireEvent.click(within(dialog).getByText("General Knowledge").closest("button")!);
-    expect(screen.getByText("Project creation will be enabled in the next platform phase.")).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText("Project Name"), { target: { value: "Fresh Start" } });
+    fireEvent.click(within(dialog).getByRole("radio", { name: /Trading Strategies/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Create Project" }));
+
+    await waitFor(() => expect(screen.getByText("SOURCES_PAGE_MARKER")).toBeInTheDocument());
+    // MasterMind's own card content was never re-rendered/mutated by this flow.
+    expect(screen.queryByRole("heading", { name: "MasterMind" })).not.toBeInTheDocument(); // navigated away
   });
 });

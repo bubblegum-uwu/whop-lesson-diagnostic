@@ -2058,6 +2058,25 @@ button.kv-topnav-avatar:hover {
   flex: 1;
 }
 
+.knovera-type-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  flex: 1;
+}
+
+.knovera-type-option-desc {
+  font-weight: 400;
+  font-size: 0.8rem;
+  color: var(--kv-text-secondary);
+}
+
+.knovera-field-error {
+  margin: 0.3rem 0 0;
+  color: var(--kv-danger, #d9534f);
+  font-size: 0.82rem;
+}
+
 .knovera-dialog-notice {
   margin-top: var(--kv-space-4);
   color: var(--kv-warning);
