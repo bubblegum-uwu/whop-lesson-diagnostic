@@ -28,6 +28,7 @@ function baseUsage(overrides: Partial<UsageResponse> = {}): UsageResponse {
         totalCost: 15.36,
         analysisRuns: 28,
         lessonsAnalyzed: 28,
+        sourcesAnalyzed: 0,
         synthesisRuns: 1,
       },
     ],
@@ -100,6 +101,7 @@ describe("UsagePage — project-aware usage dashboard (Phase 4F)", () => {
           totalCost: 0,
           analysisRuns: 0,
           lessonsAnalyzed: 0,
+          sourcesAnalyzed: 0,
           synthesisRuns: 0,
         },
       ],
@@ -140,6 +142,7 @@ describe("UsagePage — project-aware usage dashboard (Phase 4F)", () => {
           totalCost: 0,
           analysisRuns: 0,
           lessonsAnalyzed: 0,
+          sourcesAnalyzed: 0,
           synthesisRuns: 0,
         },
       ],
@@ -165,7 +168,7 @@ describe("UsagePage — project-aware usage dashboard (Phase 4F)", () => {
     const usage = baseUsage({
       total: { analysisCost: 1, synthesisCost: 2.5, totalCost: 3.5 },
       projects: [
-        { projectId: 7, projectName: "MasterMind", projectType: "TRADING_STRATEGIES", analysisCost: 1, synthesisCost: 2.5, totalCost: 3.5, analysisRuns: 1, lessonsAnalyzed: 1, synthesisRuns: 1 },
+        { projectId: 7, projectName: "MasterMind", projectType: "TRADING_STRATEGIES", analysisCost: 1, synthesisCost: 2.5, totalCost: 3.5, analysisRuns: 1, lessonsAnalyzed: 1, sourcesAnalyzed: 0, synthesisRuns: 1 },
       ],
     });
     stubFetch(usage);
@@ -175,6 +178,32 @@ describe("UsagePage — project-aware usage dashboard (Phase 4F)", () => {
     expect(screen.getAllByText("$1.00").length).toBeGreaterThan(0);
     expect(screen.getAllByText("$2.50").length).toBeGreaterThan(0);
     expect(screen.queryByText(/\$1\s*$/)).not.toBeInTheDocument();
+  });
+
+  it("N: renders combined Whop + YouTube analysis spend as one Analysis figure, with a breakdown line naming both lessons and videos analyzed (Phase 4H-B)", async () => {
+    const usage = baseUsage({
+      total: { analysisCost: 9.44, synthesisCost: 6.42, totalCost: 15.86 },
+      projects: [
+        {
+          projectId: 7,
+          projectName: "MasterMind",
+          projectType: "TRADING_STRATEGIES",
+          analysisCost: 9.44, // 8.94 Whop + 0.50 YouTube, already combined server-side
+          synthesisCost: 6.42,
+          totalCost: 15.86,
+          analysisRuns: 29,
+          lessonsAnalyzed: 28,
+          sourcesAnalyzed: 1,
+          synthesisRuns: 1,
+        },
+      ],
+    });
+    stubFetch(usage);
+    render(<UsagePage backendUrl={BACKEND_URL} knoveraToken={TOKEN} />);
+
+    expect(await screen.findByText("MasterMind")).toBeInTheDocument();
+    expect(screen.getAllByText("$9.44").length).toBeGreaterThan(0);
+    expect(screen.getByText("28 lessons analyzed · 1 video analyzed · 1 synthesis run")).toBeInTheDocument();
   });
 
   it("signed out (no Knovera session) prompts sign-in rather than fetching or fabricating data", () => {

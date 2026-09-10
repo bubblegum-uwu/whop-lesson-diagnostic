@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { ProjectHeader } from "./ProjectHeader";
 import { WhopIcon, YouTubeIcon, DiscordIcon } from "../components/ProviderIcons";
-import { DashboardSummary } from "../components/DashboardSummary";
 import { CourseTable, type CourseTableProps } from "../components/CourseTable";
 import { FindWhopUserId, type FindWhopUserIdState } from "../components/FindWhopUserId";
 import { ConfigForm } from "../components/ConfigForm";
@@ -9,11 +8,32 @@ import { DiagnosticResult } from "../components/DiagnosticResult";
 import { ErrorResult } from "../components/ErrorResult";
 import { AnalyzeLesson } from "../components/AnalyzeLesson";
 import { AddYouTubeVideoDialog } from "../components/AddYouTubeVideoDialog";
+import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysisDrawer";
 import type { AnalysisSummary } from "../lib/courseApi";
 import type { DiagnosticDisplayPayload } from "../lib/diagnosticPayload";
 import type { LessonFetchOutcome } from "../lib/whopApi";
 import { useResolvedProject } from "../lib/useResolvedProject";
 import { getProjectSources, type ProjectSource, type WhopProjectSource, type YouTubeProjectSource } from "../lib/sourcesApi";
+import {
+  analyzeProjectSource,
+  getProjectSourceAnalysis,
+  retryProjectSourceAnalysis,
+  ProjectSourceAnalysisError,
+  type ProjectSourceAnalysisStatus,
+} from "../lib/projectSourceAnalysisApi";
+
+/** Phase 4H-B — display labels for the job-status badge on a YouTube source row. Falls back to "Added" for any status this map doesn't recognize (never blank). */
+const ANALYSIS_STATUS_LABELS: Record<string, string> = {
+  QUEUED: "Queued",
+  ANALYZING: "Analyzing",
+  VALIDATING: "Validating",
+  COMPLETED: "Analyzed",
+  NO_STRATEGY: "Analyzed",
+  FAILED: "Failed",
+  CANCELLED: "Cancelled",
+};
+const PENDING_ANALYSIS_STATUSES = new Set(["QUEUED", "ANALYZING", "VALIDATING"]);
+const ANALYSIS_POLL_INTERVAL_MS = 4000;
 
 /**
  * The single-lesson diagnostic flow's state (paste one Whop lesson URL,
@@ -90,6 +110,10 @@ export function SourcesPage(props: SourcesPageProps) {
   const { state: projectState } = useResolvedProject(props.backendUrl, props.knoveraToken);
   const [sourcesState, setSourcesState] = useState<SourcesLoadState>({ phase: "idle" });
   const [showAddYouTubeDialog, setShowAddYouTubeDialog] = useState(false);
+  const [analysisStatuses, setAnalysisStatuses] = useState<Record<number, ProjectSourceAnalysisStatus>>({});
+  const [analyzingSourceId, setAnalyzingSourceId] = useState<number | null>(null);
+  const [analysisActionError, setAnalysisActionError] = useState<string | null>(null);
+  const [viewingSourceId, setViewingSourceId] = useState<number | null>(null);
 
   async function loadSources(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setSourcesState({ phase: "loading" });
@@ -146,6 +170,75 @@ export function SourcesPage(props: SourcesPageProps) {
       void loadSources(props.backendUrl, props.knoveraToken, resolvedProjectId, { current: false });
     }
   }
+
+  const isTradingStrategies = projectState.phase === "resolved" && projectState.project.projectType === "TRADING_STRATEGIES";
+
+  async function loadAnalysisStatus(sourceId: number) {
+    if (!props.backendUrl || !props.knoveraToken || resolvedProjectId == null) return;
+    try {
+      const status = await getProjectSourceAnalysis(props.backendUrl, props.knoveraToken, resolvedProjectId, sourceId);
+      setAnalysisStatuses((prev) => ({ ...prev, [sourceId]: status }));
+    } catch {
+      // Best-effort — a transient status-fetch failure leaves the row at
+      // its last-known state rather than surfacing an error banner for a
+      // read that will simply retry on the next poll tick.
+    }
+  }
+
+  // Phase 4H-B — General Knowledge projects never fetch analysis status at
+  // all (Analyze isn't available there yet — see isTradingStrategies
+  // above), so this never invokes analysis endpoints for a project type
+  // that can't use them.
+  const youtubeSourceIdsKey = youtubeSources.map((s) => s.id).join(",");
+  useEffect(() => {
+    if (!isTradingStrategies || youtubeSources.length === 0) return;
+    youtubeSources.forEach((source) => void loadAnalysisStatus(source.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [youtubeSourceIdsKey, isTradingStrategies, resolvedProjectId]);
+
+  // Polls only sources whose latest job is genuinely still in flight — never
+  // a fabricated progress percentage, just a status re-check until it
+  // reaches a terminal state.
+  useEffect(() => {
+    const pendingIds = youtubeSources.filter((s) => PENDING_ANALYSIS_STATUSES.has(analysisStatuses[s.id]?.job?.status ?? "")).map((s) => s.id);
+    if (pendingIds.length === 0) return;
+    const interval = setInterval(() => {
+      pendingIds.forEach((id) => void loadAnalysisStatus(id));
+    }, ANALYSIS_POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [youtubeSourceIdsKey, JSON.stringify(Object.fromEntries(Object.entries(analysisStatuses).map(([id, s]) => [id, s.job?.status])))]);
+
+  async function handleAnalyze(sourceId: number, force = false) {
+    if (!props.backendUrl || !props.knoveraToken || resolvedProjectId == null) return;
+    setAnalysisActionError(null);
+    setAnalyzingSourceId(sourceId);
+    try {
+      await analyzeProjectSource(props.backendUrl, props.knoveraToken, resolvedProjectId, sourceId, force);
+      await loadAnalysisStatus(sourceId);
+    } catch (err) {
+      setAnalysisActionError(err instanceof ProjectSourceAnalysisError ? err.message : "Failed to start analysis. Please try again.");
+    } finally {
+      setAnalyzingSourceId(null);
+    }
+  }
+
+  async function handleRetry(sourceId: number) {
+    if (!props.backendUrl || !props.knoveraToken || resolvedProjectId == null) return;
+    setAnalysisActionError(null);
+    setAnalyzingSourceId(sourceId);
+    try {
+      await retryProjectSourceAnalysis(props.backendUrl, props.knoveraToken, resolvedProjectId, sourceId);
+      await loadAnalysisStatus(sourceId);
+    } catch (err) {
+      setAnalysisActionError(err instanceof ProjectSourceAnalysisError ? err.message : "Failed to retry analysis. Please try again.");
+    } finally {
+      setAnalyzingSourceId(null);
+    }
+  }
+
+  const viewingSource = viewingSourceId != null ? (youtubeSources.find((s) => s.id === viewingSourceId) ?? null) : null;
+  const viewingStatus = viewingSourceId != null ? analysisStatuses[viewingSourceId] : undefined;
 
   return (
     <div className="knovera-page">
@@ -225,40 +318,77 @@ export function SourcesPage(props: SourcesPageProps) {
       {youtubeSources.length > 0 && (
         <>
           <h2 className="knovera-section-title">YouTube Sources</h2>
+          {analysisActionError && (
+            <div className="kv-card knovera-empty-state" role="alert">
+              <p>{analysisActionError}</p>
+            </div>
+          )}
           <ul className="knovera-youtube-source-list">
-            {youtubeSources.map((source) => (
-              <li key={source.id} className="kv-card knovera-youtube-source-row">
-                <div className="knovera-youtube-source-main">
-                  <span className="knovera-youtube-source-label">YouTube Video</span>
-                  <span className="knovera-youtube-source-title">{source.title ?? source.sourceUrl}</span>
-                </div>
-                <span className="kv-badge kv-badge-muted">Added</span>
-              </li>
-            ))}
+            {youtubeSources.map((source) => {
+              const status = analysisStatuses[source.id];
+              const job = status?.job ?? null;
+              const analysis = status?.analysis ?? null;
+              const busy = analyzingSourceId === source.id;
+              const isPending = !!job && PENDING_ANALYSIS_STATUSES.has(job.status);
+              const isFailed = job?.status === "FAILED";
+              const isDone = !!analysis;
+              const badgeLabel = !isTradingStrategies ? "Added" : job ? (ANALYSIS_STATUS_LABELS[job.status] ?? "Added") : isDone ? "Analyzed" : "Not analyzed";
+              const badgeClass = isFailed ? "kv-badge-danger" : isDone ? "kv-badge-accent" : "kv-badge-muted";
+
+              return (
+                <li key={source.id} className="kv-card knovera-youtube-source-row">
+                  <div className="knovera-youtube-source-main">
+                    <span className="knovera-youtube-source-label">YouTube Video</span>
+                    <span className="knovera-youtube-source-title">{source.title ?? source.sourceUrl}</span>
+                  </div>
+                  <div className="knovera-youtube-source-actions">
+                    <span className={`kv-badge ${badgeClass}`}>{badgeLabel}</span>
+                    {isTradingStrategies && !job && !analysis && (
+                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyze(source.id)}>
+                        {busy ? "Starting…" : "Analyze"}
+                      </button>
+                    )}
+                    {isTradingStrategies && isPending && <span className="hint">Working…</span>}
+                    {isTradingStrategies && isFailed && (
+                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleRetry(source.id)}>
+                        {busy ? "Retrying…" : "Retry"}
+                      </button>
+                    )}
+                    {isTradingStrategies && isDone && (
+                      <>
+                        <button type="button" className="link-button" onClick={() => setViewingSourceId(source.id)}>
+                          View
+                        </button>
+                        <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyze(source.id, true)}>
+                          {busy ? "Starting…" : "Re-analyze"}
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         </>
       )}
 
       {props.backendUrl && !confirmedNeverHadWhopSource && (
-        <>
-          <DashboardSummary summary={props.summary} />
-          <CourseTable
-            courseTitle={props.courseTitle}
-            lessons={props.lessons}
-            connected={props.connected}
-            syncing={props.syncing}
-            authRequired={props.authRequired}
-            lastSyncedAt={props.lastSyncedAt}
-            summary={props.summary}
-            onSignIn={props.onSignIn}
-            onSync={props.onSync}
-            onDisconnect={props.onDisconnect}
-            onEnqueue={props.onEnqueue}
-            onRetry={props.onRetry}
-            onCancel={props.onCancel}
-            onLoadAnalysis={props.onLoadAnalysis}
-          />
-        </>
+        <CourseTable
+          courseTitle={props.courseTitle}
+          lessons={props.lessons}
+          connected={props.connected}
+          syncing={props.syncing}
+          authRequired={props.authRequired}
+          lastSyncedAt={props.lastSyncedAt}
+          summary={props.summary}
+          onSignIn={props.onSignIn}
+          onSync={props.onSync}
+          onDisconnect={props.onDisconnect}
+          onEnqueue={props.onEnqueue}
+          onRetry={props.onRetry}
+          onCancel={props.onCancel}
+          onLoadAnalysis={props.onLoadAnalysis}
+        />
       )}
       {props.courseErrorMessage && <div className="error-box">{props.courseErrorMessage}</div>}
 
@@ -326,6 +456,14 @@ export function SourcesPage(props: SourcesPageProps) {
           }}
         />
       )}
+
+      <ProjectSourceAnalysisDrawer
+        source={viewingSource}
+        job={viewingStatus?.job ?? null}
+        analysis={viewingStatus?.analysis ?? null}
+        loading={false}
+        onClose={() => setViewingSourceId(null)}
+      />
     </div>
   );
 }

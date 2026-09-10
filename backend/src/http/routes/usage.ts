@@ -69,6 +69,7 @@ export function createGetUsageHandler(deps: UsageRouteDeps) {
         totalCost: roundCurrency(analysisCost + synthesisCost),
         analysisRuns: usage?.analysisRuns ?? 0,
         lessonsAnalyzed: usage?.lessonsAnalyzed ?? 0,
+        sourcesAnalyzed: usage?.sourcesAnalyzed ?? 0,
         synthesisRuns: usage?.synthesisRuns ?? 0,
       };
     });

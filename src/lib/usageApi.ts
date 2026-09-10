@@ -32,6 +32,8 @@ export interface ProjectUsage {
   totalCost: number;
   analysisRuns: number;
   lessonsAnalyzed: number;
+  /** Phase 4H-B — distinct YouTube project_sources analyzed this period; kept separate from lessonsAnalyzed (a source is not a lesson) even though both roll into analysisCost/analysisRuns. */
+  sourcesAnalyzed: number;
   synthesisRuns: number;
 }
 

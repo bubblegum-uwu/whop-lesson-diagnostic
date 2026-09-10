@@ -24,6 +24,11 @@ import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthes
 import { createProjectSynthesisStatusHandler, createProjectSynthesizeHandler, createGetProjectSynthesisHandler } from "./routes/projectSynthesis.js";
 import { createListProjectsHandler, createGetProjectHandler, createCreateProjectHandler } from "./routes/projects.js";
 import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler } from "./routes/projectSources.js";
+import {
+  createAnalyzeProjectSourceHandler,
+  createGetProjectSourceAnalysisHandler,
+  createRetryProjectSourceAnalysisHandler,
+} from "./routes/projectSourceAnalysis.js";
 import { createGetUsageHandler } from "./routes/usage.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
 import { requireOperator } from "./middleware/operatorAuth.js";
@@ -185,6 +190,28 @@ export function createApp(config: AppConfig): Express {
   // (see projectSources.ts's route doc comment). Knovera auth alone, same
   // as every other project route above.
   app.post("/api/projects/:projectId/sources/youtube", knoveraAuth, createAddYouTubeSourceHandler(projectsDeps));
+
+  // Phase 4H-B — project-source (YouTube) analysis. Same jobTrigger as
+  // lesson-analysis enqueueing (one Cloud Run Job, one entrypoint, a THIRD
+  // independent processing phase — see server.ts / worker/
+  // projectSourceAnalysisLoop.ts). Knovera auth only, never
+  // requireWhopConnected: YouTube analysis never touches Whop OAuth.
+  const projectSourceAnalysisDeps = { pool, jobTrigger, geminiModel: config.geminiModel };
+  app.post(
+    "/api/projects/:projectId/sources/:sourceId/analyze",
+    knoveraAuth,
+    createAnalyzeProjectSourceHandler(projectSourceAnalysisDeps),
+  );
+  app.get(
+    "/api/projects/:projectId/sources/:sourceId/analysis",
+    knoveraAuth,
+    createGetProjectSourceAnalysisHandler(projectSourceAnalysisDeps),
+  );
+  app.post(
+    "/api/projects/:projectId/sources/:sourceId/retry",
+    knoveraAuth,
+    createRetryProjectSourceAnalysisHandler(projectSourceAnalysisDeps),
+  );
 
   // Phase 4E — the project-aware counterpart to /api/course/synthesis*
   // above: resolves a project's synthesis source via `courses.project_id`

@@ -35,12 +35,26 @@ export interface UsageDateRange {
  * synthesis_runs.created_at)` for synthesis, since a RUNNING/QUEUED run has
  * no completed_at yet but its cost was still incurred starting when the run
  * was created.
+ *
+ * Phase 4H-B — `project_source_analyses.estimated_cost` for project-source
+ * (YouTube) analysis, same source-of-truth precedent as lesson_analyses:
+ * this table IS the record of an analysis attempt (all-or-nothing, same as
+ * lesson_analyses — see the 1789500000000 migration's comment), so there is
+ * no separate usage-records-equivalent table for it, and summing it here
+ * cannot double count anything. Merged directly into `analysisCost`/
+ * `analysisRuns` (not a separate bucket) — the Phase 4H-B PR description's
+ * own framing: "project total analysis cost = existing Whop lesson analysis
+ * cost + project-source analysis cost," one combined figure. Attribution is
+ * DIRECT (`project_sources.project_id`), never through `courses` — simpler
+ * than the Whop join above since project_sources.project_id is NOT NULL.
  */
 export interface ProjectUsageRow {
   projectId: number;
   analysisCost: number;
   analysisRuns: number;
   lessonsAnalyzed: number;
+  /** Phase 4H-B — distinct project_sources analyzed this period; kept separate from lessonsAnalyzed (a source is not a lesson) even though both roll into the same analysisCost/analysisRuns totals above. */
+  sourcesAnalyzed: number;
   synthesisCost: number;
   synthesisRuns: number;
 }
@@ -52,6 +66,13 @@ interface AnalysisUsageDbRow {
   lessons_analyzed: string;
 }
 
+interface ProjectSourceAnalysisUsageDbRow {
+  project_id: string;
+  source_analysis_cost: string;
+  source_analysis_runs: string;
+  sources_analyzed: string;
+}
+
 interface SynthesisUsageDbRow {
   project_id: string;
   synthesis_cost: string;
@@ -59,7 +80,7 @@ interface SynthesisUsageDbRow {
 }
 
 export async function getMonthlyUsageByProject(pool: Pool, range: UsageDateRange): Promise<ProjectUsageRow[]> {
-  const [analysisResult, synthesisResult] = await Promise.all([
+  const [analysisResult, sourceAnalysisResult, synthesisResult] = await Promise.all([
     pool.query<AnalysisUsageDbRow>(
       `SELECT c.project_id AS project_id,
               COALESCE(SUM(la.estimated_cost), 0) AS analysis_cost,
@@ -71,6 +92,17 @@ export async function getMonthlyUsageByProject(pool: Pool, range: UsageDateRange
        WHERE c.project_id IS NOT NULL
          AND la.completed_at >= $1 AND la.completed_at < $2
        GROUP BY c.project_id`,
+      [range.start, range.end],
+    ),
+    pool.query<ProjectSourceAnalysisUsageDbRow>(
+      `SELECT ps.project_id AS project_id,
+              COALESCE(SUM(psa.estimated_cost), 0) AS source_analysis_cost,
+              COUNT(*) AS source_analysis_runs,
+              COUNT(DISTINCT psa.project_source_id) AS sources_analyzed
+       FROM project_source_analyses psa
+       JOIN project_sources ps ON ps.id = psa.project_source_id
+       WHERE psa.completed_at >= $1 AND psa.completed_at < $2
+       GROUP BY ps.project_id`,
       [range.start, range.end],
     ),
     pool.query<SynthesisUsageDbRow>(
@@ -90,7 +122,7 @@ export async function getMonthlyUsageByProject(pool: Pool, range: UsageDateRange
   function ensure(projectId: number): ProjectUsageRow {
     let row = byProject.get(projectId);
     if (!row) {
-      row = { projectId, analysisCost: 0, analysisRuns: 0, lessonsAnalyzed: 0, synthesisCost: 0, synthesisRuns: 0 };
+      row = { projectId, analysisCost: 0, analysisRuns: 0, lessonsAnalyzed: 0, sourcesAnalyzed: 0, synthesisCost: 0, synthesisRuns: 0 };
       byProject.set(projectId, row);
     }
     return row;
@@ -98,9 +130,15 @@ export async function getMonthlyUsageByProject(pool: Pool, range: UsageDateRange
 
   for (const row of analysisResult.rows) {
     const usage = ensure(Number(row.project_id));
-    usage.analysisCost = Number(row.analysis_cost);
-    usage.analysisRuns = Number(row.analysis_runs);
+    usage.analysisCost += Number(row.analysis_cost);
+    usage.analysisRuns += Number(row.analysis_runs);
     usage.lessonsAnalyzed = Number(row.lessons_analyzed);
+  }
+  for (const row of sourceAnalysisResult.rows) {
+    const usage = ensure(Number(row.project_id));
+    usage.analysisCost += Number(row.source_analysis_cost);
+    usage.analysisRuns += Number(row.source_analysis_runs);
+    usage.sourcesAnalyzed = Number(row.sources_analyzed);
   }
   for (const row of synthesisResult.rows) {
     const usage = ensure(Number(row.project_id));

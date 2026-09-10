@@ -6,6 +6,7 @@ import { createGeminiClient } from "./gemini/client.js";
 import { remuxToMp4 } from "./ffmpeg/remux.js";
 import type { WorkerLoopDeps } from "./worker/mainLoop.js";
 import type { SynthesisWorkerDeps } from "./worker/synthesisLoop.js";
+import type { ProjectSourceAnalysisWorkerDeps } from "./worker/projectSourceAnalysisLoop.js";
 
 /** Shared wiring for the Cloud Run Job entrypoint (SERVICE_ROLE=worker) — no HTTP routes are ever mounted here. */
 export function buildWorkerLoopDeps(config: AppConfig): WorkerLoopDeps {
@@ -43,5 +44,23 @@ export function buildSynthesisWorkerDeps(config: AppConfig): SynthesisWorkerDeps
     pool: createPool(config.db),
     gemini: createGeminiClient(config.geminiApiKey),
     model: config.geminiModel,
+  };
+}
+
+/**
+ * Phase 4H-B — shared wiring for the Cloud Run Job's THIRD phase
+ * (project-source analysis, i.e. YouTube). Builds its own Pool/Gemini
+ * client, same precedent as buildSynthesisWorkerDeps above, so this
+ * addition can never share mutable state with the lesson-analysis or
+ * synthesis wiring. Deliberately does NOT include fetchWhopLesson,
+ * remux, or ffmpegPath — this phase never touches Whop or ffmpeg at all
+ * (see youtube/acquireYouTubeVideo.ts).
+ */
+export function buildProjectSourceAnalysisWorkerDeps(config: AppConfig): ProjectSourceAnalysisWorkerDeps {
+  return {
+    pool: createPool(config.db),
+    gemini: createGeminiClient(config.geminiApiKey),
+    geminiModel: config.geminiModel,
+    geminiProcessingMode: config.geminiVideoProcessingMode,
   };
 }

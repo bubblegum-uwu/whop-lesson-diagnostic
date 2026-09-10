@@ -1500,6 +1500,12 @@ col.col-actions {
   border: 1px solid var(--kv-border);
 }
 
+/* Phase 4H-B — a project-source analysis job's FAILED state. */
+.kv-badge-danger {
+  color: var(--kv-error);
+  background: var(--kv-error-soft);
+}
+
 /* ---- Wordmark -------------------------------------------------------------- */
 
 .kv-wordmark {
@@ -2369,6 +2375,14 @@ button.kv-topnav-avatar:hover {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--kv-text-muted);
+}
+
+/* Phase 4H-B — badge + Analyze/View/Retry/Re-analyze affordances on a row. */
+.knovera-youtube-source-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--kv-space-3);
+  flex-shrink: 0;
 }
 
 .knovera-youtube-source-title {

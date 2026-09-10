@@ -118,3 +118,15 @@ export async function listProjectSourcesByProjectId(pool: Pool, projectId: numbe
   );
   return result.rows.map(mapRow);
 }
+
+/**
+ * Phase 4H-B — a single source by id, used by the analyze/retry/analysis
+ * routes and the worker. Callers MUST additionally check
+ * `source.projectId === requestedProjectId` themselves (never rely on
+ * sourceId alone) — see http/routes/projectSourceAnalysis.ts's ownership
+ * check.
+ */
+export async function getProjectSourceById(pool: Pool, id: number): Promise<ProjectSourceRow | null> {
+  const result = await pool.query<ProjectSourceDbRow>(`SELECT ${COLUMNS} FROM project_sources WHERE id = $1`, [id]);
+  return result.rows[0] ? mapRow(result.rows[0]) : null;
+}

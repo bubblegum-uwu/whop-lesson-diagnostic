@@ -3,6 +3,7 @@ import { PROCESSING_STATUSES, type AnalysisSummary, type CourseLessonSummary, ty
 import { StatusBadge } from "./StatusBadge";
 import { LessonDetailDrawer } from "./LessonDetailDrawer";
 import { RowActionsMenu } from "./RowActionsMenu";
+import { DashboardSummary } from "./DashboardSummary";
 
 export interface CourseTableProps {
   courseTitle: string | null;
@@ -352,6 +353,7 @@ export function CourseTable({
     return (
       <div className="course-section">
         <h2>Scarface Trades Mastermind</h2>
+        <DashboardSummary summary={summary} />
         {authRequired ? (
           <div className="error-panel" role="alert">
             <p>Whop authorization expired. Reconnect to resume course sync.</p>
@@ -446,6 +448,7 @@ export function CourseTable({
           )}
         </div>
       </div>
+      <DashboardSummary summary={summary} />
       {!connected && (
         <p className="hint">
           {authRequired ? "Whop authorization expired — reconnect to resume syncing." : "Whop is not connected — these lessons were synced previously and stay visible, but syncing new ones requires reconnecting."}

@@ -6,31 +6,22 @@ import type { RemuxDeps, RemuxOptions, RemuxProgress } from "../ffmpeg/remux.js"
 import { remuxToMp4 } from "../ffmpeg/remux.js";
 import { withTempMp4File } from "../tempFiles/tempFile.js";
 import type { GeminiClient, GeminiUsage } from "../gemini/client.js";
-import {
-  LessonStrategyAnalysisSchema,
-  StrategyOnlyResultSchema,
-  KnowledgeOnlyResultSchema,
-  STRATEGY_ONLY_EXTRACTION_PROMPT,
-  STRATEGY_ONLY_RESPONSE_JSON_SCHEMA,
-  KNOWLEDGE_ONLY_EXTRACTION_PROMPT,
-  KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA,
-  type LessonStrategyAnalysis,
-} from "../gemini/schema.js";
-import type { ZodType } from "zod";
-import { STRATEGY_ANALYSIS_MAX_OUTPUT_TOKENS, KNOWLEDGE_ANALYSIS_MAX_OUTPUT_TOKENS } from "./limits.js";
+import type { LessonStrategyAnalysis } from "../gemini/schema.js";
 import type { SecretRedactor } from "../lib/redact.js";
 import { globalRedactor } from "../lib/redact.js";
 import type { SafeLogger } from "../lib/logger.js";
 import { logger as defaultLogger } from "../lib/logger.js";
+import type { PipelineStage } from "./errors.js";
+import { PipelineError, SchemaValidationError } from "./errors.js";
+import { runRawTwoPassCalls, validateAndCombineTwoPassResult } from "./twoPassExtraction.js";
 
-export type PipelineStage =
-  | "retrieving_lesson"
-  | "resolving_secure_video"
-  | "preparing_video"
-  | "uploading_to_gemini"
-  | "gemini_processing"
-  | "analyzing_lesson"
-  | "validating_result";
+// Re-exported for backward compatibility — every existing caller
+// (errorClassification.ts, http/routes/analyzeLesson.ts, tests) imports
+// these from this file; the actual definitions moved to pipeline/errors.ts
+// (Phase 4H-B) so pipeline/twoPassExtraction.ts can import
+// SchemaValidationError without a circular import back to this file.
+export type { PipelineStage };
+export { PipelineError, SchemaValidationError };
 
 export const STAGE_LABELS: Record<PipelineStage, string> = {
   retrieving_lesson: "Retrieving lesson",
@@ -41,24 +32,6 @@ export const STAGE_LABELS: Record<PipelineStage, string> = {
   analyzing_lesson: "Analyzing lesson",
   validating_result: "Validating result",
 };
-
-export class PipelineError extends Error {
-  constructor(
-    message: string,
-    public readonly stage: PipelineStage,
-    public readonly cause?: unknown,
-  ) {
-    super(message);
-    this.name = "PipelineError";
-  }
-}
-
-export class SchemaValidationError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "SchemaValidationError";
-  }
-}
 
 export interface AnalyzeLessonDeps {
   fetchWhopLesson: FetchWhopLesson;
@@ -93,34 +66,6 @@ export interface AnalyzeLessonResult {
     strategy: GeminiUsage;
     knowledge: GeminiUsage;
   };
-}
-
-function sumNullable(a: number | null, b: number | null): number | null {
-  if (a == null && b == null) return null;
-  return (a ?? 0) + (b ?? 0);
-}
-
-function sumUsage(a: GeminiUsage, b: GeminiUsage): GeminiUsage {
-  return {
-    inputTokens: sumNullable(a.inputTokens, b.inputTokens),
-    outputTokens: sumNullable(a.outputTokens, b.outputTokens),
-    thinkingTokens: sumNullable(a.thinkingTokens, b.thinkingTokens),
-  };
-}
-
-/** JSON.parse + Zod-validate one pass's raw output, with a pass-specific error message so a failure clearly identifies which of the two independent Gemini calls produced it. */
-function parseAndValidatePass<T>(rawText: string, schema: ZodType<T>, passLabel: string): T {
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(rawText);
-  } catch {
-    throw new SchemaValidationError(`Gemini did not return valid JSON for the ${passLabel}.`);
-  }
-  const result = schema.safeParse(parsedJson);
-  if (!result.success) {
-    throw new SchemaValidationError(`Gemini output for the ${passLabel} failed schema validation: ${result.error.message}`);
-  }
-  return result.data;
 }
 
 /**
@@ -216,10 +161,7 @@ export async function analyzeLesson(
     );
   }
 
-  let strategyUsage: GeminiUsage = { inputTokens: null, outputTokens: null, thinkingTokens: null };
-  let knowledgeUsage: GeminiUsage = { inputTokens: null, outputTokens: null, thinkingTokens: null };
-
-  const rawResultTexts = await withTempMp4File(async (tempFilePath) => {
+  const raw = await withTempMp4File(async (tempFilePath) => {
     emit("preparing_video");
     try {
       await deps.remux(signedUrl, tempFilePath, {
@@ -260,37 +202,18 @@ export async function analyzeLesson(
     }
 
     emit("analyzing_lesson");
-    let strategyText: string;
-    let knowledgeText: string;
+    let rawTwoPass;
     try {
-      // Two independent Gemini calls against the SAME uploaded file — the
-      // Files API reference (file.uri) is a stable, reusable resource, not
-      // a one-time token, so both calls can safely run concurrently
-      // without a second upload/prepare. Promise.all also gives the
-      // atomic failure semantics documented on this function: either call
-      // rejecting immediately fails this whole stage.
-      const [strategyResult, knowledgeResult] = await Promise.all([
-        deps.gemini.analyzeVideo(
-          file,
-          deps.geminiModel,
-          deps.geminiProcessingMode,
-          STRATEGY_ONLY_EXTRACTION_PROMPT,
-          STRATEGY_ONLY_RESPONSE_JSON_SCHEMA,
-          STRATEGY_ANALYSIS_MAX_OUTPUT_TOKENS,
-        ),
-        deps.gemini.analyzeVideo(
-          file,
-          deps.geminiModel,
-          deps.geminiProcessingMode,
-          KNOWLEDGE_ONLY_EXTRACTION_PROMPT,
-          KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA,
-          KNOWLEDGE_ANALYSIS_MAX_OUTPUT_TOKENS,
-        ),
-      ]);
-      strategyText = strategyResult.text;
-      strategyUsage = strategyResult.usage;
-      knowledgeText = knowledgeResult.text;
-      knowledgeUsage = knowledgeResult.usage;
+      // Two independent Gemini calls against the SAME uploaded file (see
+      // pipeline/twoPassExtraction.ts's runRawTwoPassCalls) — the Files API
+      // reference (file.uri) is a stable, reusable resource, not a
+      // one-time token, so both calls can safely run concurrently without
+      // a second upload/prepare.
+      rawTwoPass = await runRawTwoPassCalls({ uri: file.uri, mimeType: file.mimeType }, {
+        gemini: deps.gemini,
+        geminiModel: deps.geminiModel,
+        geminiProcessingMode: deps.geminiProcessingMode,
+      });
     } catch (err) {
       throw new PipelineError(
         `Gemini analysis failed: ${err instanceof Error ? err.message : "unknown error"}`,
@@ -302,36 +225,20 @@ export async function analyzeLesson(
       await deps.gemini.deleteFile(file).catch(() => undefined);
     }
 
-    return { strategyText, knowledgeText };
+    return rawTwoPass;
   });
 
   emit("validating_result");
-  const strategyOnly = parseAndValidatePass(rawResultTexts.strategyText, StrategyOnlyResultSchema, "strategy pass");
-  const knowledgeOnly = parseAndValidatePass(rawResultTexts.knowledgeText, KnowledgeOnlyResultSchema, "knowledge pass");
+  // validateAndCombineTwoPassResult combines both independently-validated
+  // passes with the authoritative Whop lesson metadata (never whatever
+  // either pass may have echoed back, if anything) into the SAME final
+  // shape as before the two-pass split, then re-validates against the
+  // unchanged final schema — see pipeline/twoPassExtraction.ts. Throws
+  // SchemaValidationError, unwrapped, exactly as this function has always
+  // propagated a validation failure.
+  const result = validateAndCombineTwoPassResult({ title: lessonTitle, durationSeconds }, raw);
 
-  // Combine both independently-validated passes with the authoritative
-  // Whop lesson metadata (never whatever either pass may have echoed
-  // back, if anything) into the SAME final shape as before the two-pass
-  // split, then re-validate against the unchanged final schema.
-  const combined = {
-    lesson: { title: lessonTitle, duration_seconds: durationSeconds },
-    strategy_found: strategyOnly.strategy_found,
-    strategies: strategyOnly.strategies,
-    knowledge: knowledgeOnly.knowledge,
-  };
-
-  const validation = LessonStrategyAnalysisSchema.safeParse(combined);
-  if (!validation.success) {
-    throw new SchemaValidationError(
-      `Combined lesson analysis failed schema validation: ${validation.error.message}`,
-    );
-  }
-
-  return {
-    analysis: validation.data,
-    usage: sumUsage(strategyUsage, knowledgeUsage),
-    passUsage: { strategy: strategyUsage, knowledge: knowledgeUsage },
-  };
+  return result;
 }
 
 // Re-exported so backend/tests can build a signed-URL–free happy path
