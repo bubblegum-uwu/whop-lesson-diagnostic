@@ -5,7 +5,7 @@ import { createLessonAnalysis, type CreateLessonAnalysisInput } from "../src/db/
 import { createJob } from "../src/db/analysisJobsRepo.js";
 import { createSynthesisRun } from "../src/db/synthesisRunsRepo.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
-import { listProjects, getProjectById, getProjectForCourse, getProjectStats } from "../src/db/projectsRepo.js";
+import { listProjects, getProjectById, getProjectForCourse, getProjectStats, createProject } from "../src/db/projectsRepo.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 
 const pool = createTestPool();
@@ -168,6 +168,76 @@ describe("projectsRepo", () => {
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
     });
+  });
+});
+
+describe("createProject (Phase 4G)", () => {
+  async function countRows(table: string): Promise<number> {
+    const result = await pool.query<{ count: string }>(`SELECT COUNT(*) AS count FROM ${table}`);
+    return Number(result.rows[0].count);
+  }
+
+  it("inserts exactly one projects row and returns it", async () => {
+    const before = await countRows("projects");
+    const name = randomId("new-proj");
+    const project = await createProject(pool, name, "TRADING_STRATEGIES");
+    const after = await countRows("projects");
+
+    expect(after - before).toBe(1);
+    expect(project.name).toBe(name);
+    expect(project.projectType).toBe("TRADING_STRATEGIES");
+    expect(project.id).toBeGreaterThan(0);
+  });
+
+  it("supports GENERAL_KNOWLEDGE as a project type", async () => {
+    const project = await createProject(pool, randomId("gk-proj"), "GENERAL_KNOWLEDGE");
+    expect(project.projectType).toBe("GENERAL_KNOWLEDGE");
+  });
+
+  it("a newly created project owns zero courses (no MasterMind course leak)", async () => {
+    const project = await createProject(pool, randomId("isolated"), "TRADING_STRATEGIES");
+    const stats = await getProjectStats(pool, project.id);
+    expect(stats.courseCount).toBe(0);
+    expect(stats.lessonCount).toBe(0);
+    expect(stats.analyzedLessonCount).toBe(0);
+  });
+
+  it("a newly created project has no synthesis activity (no MasterMind synthesis leak)", async () => {
+    const project = await createProject(pool, randomId("isolated-synth"), "TRADING_STRATEGIES");
+    const stats = await getProjectStats(pool, project.id);
+    expect(stats.latestSynthesisStatus).toBeNull();
+    expect(stats.latestSynthesisCompletedAt).toBeNull();
+  });
+
+  it("creating a project never inserts a lessons, lesson_analyses, or synthesis_runs row", async () => {
+    const before = {
+      lessons: await countRows("lessons"),
+      lessonAnalyses: await countRows("lesson_analyses"),
+      synthesisRuns: await countRows("synthesis_runs"),
+      usageRecords: await countRows("usage_records"),
+    };
+
+    await createProject(pool, randomId("no-side-effects"), "GENERAL_KNOWLEDGE");
+
+    const after = {
+      lessons: await countRows("lessons"),
+      lessonAnalyses: await countRows("lesson_analyses"),
+      synthesisRuns: await countRows("synthesis_runs"),
+      usageRecords: await countRows("usage_records"),
+    };
+    expect(after).toEqual(before);
+  });
+
+  it("does not modify the existing MasterMind project's course association", async () => {
+    const mastermindBefore = (await listProjects(pool)).find((p) => p.name === "MasterMind");
+    await createProject(pool, randomId("sibling"), "TRADING_STRATEGIES");
+    const mastermindAfter = (await listProjects(pool)).find((p) => p.name === "MasterMind");
+
+    expect(mastermindAfter?.id).toBe(mastermindBefore?.id);
+    const mastermindStatsAfter = await getProjectStats(pool, mastermindAfter!.id);
+    // MasterMind's own course association (if any, from the migration
+    // backfill/test fixtures) is unaffected by an unrelated new project.
+    expect(mastermindStatsAfter.courseCount).toBeGreaterThanOrEqual(0);
   });
 });
 

@@ -46,3 +46,44 @@ export async function getProject(backendUrl: string, knoveraToken: string, proje
   const body = (await res.json()) as { project: ProjectSummary };
   return body.project;
 }
+
+export class CreateProjectError extends Error {
+  type: string;
+
+  constructor(message: string, type: string) {
+    super(message);
+    this.name = "CreateProjectError";
+    this.type = type;
+  }
+}
+
+/**
+ * Phase 4G — POST /api/projects. Creates exactly one project row (see
+ * backend/src/db/projectsRepo.ts's createProject doc comment) and returns
+ * it in the same shape GET returns, so the caller (NewProjectDialog) can
+ * navigate straight to `/projects/${project.id}/sources` from the response
+ * alone. Throws CreateProjectError (never a generic Error) on a 400 so
+ * callers can keep the dialog open and show the backend's exact validation
+ * message rather than a generic failure.
+ */
+export async function createProject(
+  backendUrl: string,
+  knoveraToken: string,
+  name: string,
+  projectType: ProjectType,
+): Promise<ProjectSummary> {
+  const res = await fetch(`${backendUrl}/api/projects`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ name, projectType }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => undefined);
+    throw new CreateProjectError(
+      body?.error?.message ?? `Failed to create project (${res.status}).`,
+      body?.error?.type ?? "unknown_error",
+    );
+  }
+  const body = (await res.json()) as { project: ProjectSummary };
+  return body.project;
+}

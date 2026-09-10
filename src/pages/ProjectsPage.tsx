@@ -163,7 +163,17 @@ export function ProjectsPage({ backendUrl, knoveraToken }: ProjectsPageProps) {
         </div>
       )}
 
-      {showNewProject && <NewProjectDialog onClose={() => setShowNewProject(false)} />}
+      {showNewProject && backendUrl && knoveraToken && (
+        <NewProjectDialog
+          backendUrl={backendUrl}
+          knoveraToken={knoveraToken}
+          onClose={() => setShowNewProject(false)}
+          onCreated={(project) => {
+            setShowNewProject(false);
+            navigate(`/projects/${project.id}/sources`);
+          }}
+        />
+      )}
     </div>
   );
 }

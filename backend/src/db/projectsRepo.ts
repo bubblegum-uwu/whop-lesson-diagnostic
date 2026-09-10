@@ -52,6 +52,24 @@ export async function listProjects(pool: Pool): Promise<Project[]> {
   return result.rows.map(mapRow);
 }
 
+/**
+ * Phase 4G — inserts exactly ONE `projects` row and nothing else: no course,
+ * lesson, analysis, synthesis_runs, or usage_records row is ever created
+ * alongside it. Isolation from every other project (including MasterMind)
+ * falls out for free from how ownership is derived everywhere else in this
+ * codebase — `courses.project_id`, and everything joined through it — so a
+ * brand-new project with no course row legitimately has zero sources, zero
+ * lessons, zero synthesis, and zero usage from the moment this INSERT
+ * commits, with no separate cleanup or seeding required here.
+ */
+export async function createProject(pool: Pool, name: string, projectType: ProjectType): Promise<Project> {
+  const result = await pool.query(
+    `INSERT INTO projects (name, project_type) VALUES ($1, $2) RETURNING ${COLUMNS}`,
+    [name, projectType],
+  );
+  return mapRow(result.rows[0]);
+}
+
 export async function getProjectById(pool: Pool, id: number): Promise<Project | null> {
   const result = await pool.query(`SELECT ${COLUMNS} FROM projects WHERE id = $1`, [id]);
   return result.rows[0] ? mapRow(result.rows[0]) : null;

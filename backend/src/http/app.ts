@@ -22,7 +22,7 @@ import { createAnalysisSummaryHandler } from "./routes/analysisSummary.js";
 import { createAnalysisEventsHandler } from "./routes/analysisEvents.js";
 import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "./routes/courseSynthesis.js";
 import { createProjectSynthesisStatusHandler, createProjectSynthesizeHandler, createGetProjectSynthesisHandler } from "./routes/projectSynthesis.js";
-import { createListProjectsHandler, createGetProjectHandler } from "./routes/projects.js";
+import { createListProjectsHandler, createGetProjectHandler, createCreateProjectHandler } from "./routes/projects.js";
 import { createGetProjectSourcesHandler } from "./routes/projectSources.js";
 import { createGetUsageHandler } from "./routes/usage.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
@@ -177,6 +177,7 @@ export function createApp(config: AppConfig): Express {
   // config.course.courseId exactly as before.
   const projectsDeps = { pool };
   app.get("/api/projects", knoveraAuth, createListProjectsHandler(projectsDeps));
+  app.post("/api/projects", knoveraAuth, createCreateProjectHandler(projectsDeps));
   app.get("/api/projects/:projectId", knoveraAuth, createGetProjectHandler(projectsDeps));
   app.get("/api/projects/:projectId/sources", knoveraAuth, createGetProjectSourcesHandler(projectsDeps));
 
