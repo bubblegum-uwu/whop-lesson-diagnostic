@@ -123,9 +123,15 @@ export function UsagePage({ backendUrl, knoveraToken }: UsagePageProps) {
                       Total <strong>{formatCost(project.totalCost)}</strong>
                     </span>
                   </div>
-                  {(project.lessonsAnalyzed > 0 || project.synthesisRuns > 0) && (
+                  {(project.lessonsAnalyzed > 0 || project.sourcesAnalyzed > 0 || project.synthesisRuns > 0) && (
                     <p className="knovera-usage-project-card-meta">
-                      {plural(project.lessonsAnalyzed, "lesson")} analyzed · {plural(project.synthesisRuns, "synthesis run")}
+                      {[
+                        project.lessonsAnalyzed > 0 ? `${plural(project.lessonsAnalyzed, "lesson")} analyzed` : null,
+                        project.sourcesAnalyzed > 0 ? `${plural(project.sourcesAnalyzed, "video")} analyzed` : null,
+                        `${plural(project.synthesisRuns, "synthesis run")}`,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")}
                     </p>
                   )}
                 </div>

@@ -13,6 +13,22 @@ export interface GeminiFileRef {
   state: "PROCESSING" | "ACTIVE" | "FAILED";
 }
 
+/**
+ * Phase 4H-B — the minimal shape analyzeVideo actually needs: a video URI,
+ * with an optional mime type. A GeminiFileRef already structurally
+ * satisfies this (it has both fields), so this widening is backward
+ * compatible with every existing Whop call site — no behavior change.
+ * Lets a second acquisition path (a direct public YouTube URL — see
+ * youtube/acquireYouTubeVideo.ts) call the SAME analyzeVideo, with the
+ * SAME prompts/schema, without ever going through uploadFile/
+ * waitUntilActive/deleteFile, which only make sense for an actual Gemini
+ * Files API reference.
+ */
+export interface VideoInputRef {
+  uri: string;
+  mimeType?: string;
+}
+
 export class GeminiUploadError extends Error {
   constructor(message: string) {
     super(message);
@@ -161,7 +177,7 @@ export interface GeminiClient {
    * computeCompletionDiagnostics.
    */
   analyzeVideo(
-    file: GeminiFileRef,
+    file: VideoInputRef,
     model: string,
     processingMode: "agentic" | "static",
     prompt: string,
@@ -272,7 +288,7 @@ export function createGeminiClient(apiKey: string): GeminiClient {
   }
 
   async function analyzeVideo(
-    file: GeminiFileRef,
+    file: VideoInputRef,
     model: string,
     processingMode: "agentic" | "static",
     prompt: string,

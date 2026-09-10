@@ -1,8 +1,9 @@
 import { loadConfig } from "./config.js";
 import { createApp } from "./http/app.js";
-import { buildWorkerLoopDeps, buildSynthesisWorkerDeps } from "./workerDeps.js";
+import { buildWorkerLoopDeps, buildSynthesisWorkerDeps, buildProjectSourceAnalysisWorkerDeps } from "./workerDeps.js";
 import { runWorkerLoop } from "./worker/mainLoop.js";
 import { runSynthesisLoop } from "./worker/synthesisLoop.js";
+import { runProjectSourceAnalysisLoop } from "./worker/projectSourceAnalysisLoop.js";
 import { globalRedactor } from "./lib/redact.js";
 import { logger } from "./lib/logger.js";
 
@@ -31,10 +32,16 @@ globalRedactor.register(config.refreshTokenEncryptionKey);
  * processOneSynthesisRun; only a catastrophic failure outside that (e.g. a
  * lost DB connection) would reach the .catch below, exactly like the
  * lesson loop above it.
+ *
+ * Phase 4H-B — project-source (YouTube) analysis reuses the exact same
+ * pattern as a THIRD, independent phase run after synthesis has drained,
+ * under its own advisory lock (see worker/projectSourceAnalysisLoop.ts).
+ * Same reasoning: preferred over introducing a second Cloud Run Job.
  */
 if (config.serviceRole === "worker") {
   runWorkerLoop(buildWorkerLoopDeps(config))
     .then(() => runSynthesisLoop(buildSynthesisWorkerDeps(config)))
+    .then(() => runProjectSourceAnalysisLoop(buildProjectSourceAnalysisWorkerDeps(config)))
     .then(() => process.exit(0))
     .catch((err) => {
       logger.error("Worker execution failed", { message: err instanceof Error ? err.message : String(err) });

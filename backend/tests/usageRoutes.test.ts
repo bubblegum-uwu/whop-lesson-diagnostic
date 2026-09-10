@@ -4,6 +4,8 @@ import { upsertCourse } from "../src/db/coursesRepo.js";
 import { syncLessons, listLessons } from "../src/db/lessonsRepo.js";
 import { createLessonAnalysis } from "../src/db/lessonAnalysesRepo.js";
 import { createSynthesisRun } from "../src/db/synthesisRunsRepo.js";
+import { createYouTubeSource } from "../src/db/projectSourcesRepo.js";
+import { createProjectSourceAnalysis } from "../src/db/projectSourceAnalysesRepo.js";
 import { createGetUsageHandler } from "../src/http/routes/usage.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import type { Strategy } from "../src/gemini/schema.js";
@@ -21,6 +23,7 @@ beforeEach(async () => {
   await pool.query("TRUNCATE synthesis_runs, strategy_clusters, canonical_strategies, course_playbooks RESTART IDENTITY CASCADE");
   await pool.query("TRUNCATE analysis_jobs, lesson_analyses, strategy_instances, usage_records, job_events RESTART IDENTITY CASCADE");
   await pool.query("TRUNCATE courses, lessons RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE project_source_analysis_jobs, project_source_analyses, project_sources RESTART IDENTITY CASCADE");
   // Deliberately never truncates `projects` — matches
   // projectSourcesRoutes.test.ts/projectSynthesisRoutes.test.ts's existing
   // convention: each test creates its own project(s) via randomId()-named
@@ -142,6 +145,47 @@ async function makeAnalyzedLesson(courseId: number, opts: { cost: number; comple
   });
 }
 
+/** Phase 4H-B — a project_source_analyses row with explicit cost/timestamp, mirroring makeAnalyzedLesson's shape for the YouTube path. */
+async function makeAnalyzedProjectSource(projectId: number, opts: { cost: number; completedAt: Date }) {
+  const { source } = await createYouTubeSource(pool, {
+    projectId,
+    externalId: randomId("vid").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 11).padEnd(11, "0"),
+    sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  });
+  const jobId = (
+    await pool.query(`INSERT INTO project_source_analysis_jobs (project_source_id, analysis_fingerprint, status) VALUES ($1, $2, 'COMPLETED') RETURNING job_id`, [
+      source.id,
+      randomId("fp"),
+    ])
+  ).rows[0].job_id;
+
+  return createProjectSourceAnalysis(pool, {
+    projectSourceId: source.id,
+    jobId,
+    status: "no_strategy",
+    strategyFound: false,
+    validatedJson: {
+      lesson: { title: "YouTube video", duration_seconds: null },
+      strategy_found: false,
+      strategies: [],
+      knowledge: EMPTY_LESSON_KNOWLEDGE,
+    },
+    analysisSummary: "No strategy found.",
+    model: GEMINI_MODEL,
+    promptVersion: "v2",
+    extractorVersion: "v2",
+    schemaVersion: "v2",
+    analysisFingerprint: randomId("fp"),
+    startedAt: opts.completedAt,
+    completedAt: opts.completedAt,
+    processingDurationSeconds: 10,
+    inputTokens: 50,
+    outputTokens: 10,
+    thinkingTokens: 0,
+    estimatedCost: opts.cost,
+  });
+}
+
 /** A synthesis_runs row with explicit status/cost/timestamps — createSynthesisRun always uses DB defaults (now()), so the timestamps are set with a direct UPDATE afterward, same pattern as courseSynthesisRoutes.test.ts's progress-manipulation tests. */
 async function makeSynthesisRun(courseId: number, opts: { cost: number; status?: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED"; completedAt?: Date | null; createdAt?: Date }) {
   const run = await createSynthesisRun(pool, {
@@ -193,6 +237,7 @@ interface UsageBody {
     totalCost: number;
     analysisRuns: number;
     lessonsAnalyzed: number;
+    sourcesAnalyzed: number;
     synthesisRuns: number;
   }[];
 }
@@ -414,6 +459,7 @@ describe("GET /api/usage", () => {
       totalCost: 0,
       analysisRuns: 0,
       lessonsAnalyzed: 0,
+      sourcesAnalyzed: 0,
       synthesisRuns: 0,
     });
   });
@@ -430,5 +476,61 @@ describe("GET /api/usage", () => {
     const row = findProject(body as unknown as UsageBody, project.id)!;
     expect(row.analysisCost).toBe(0.3);
     expect(Number.isInteger(row.analysisCost * 100)).toBe(true);
+  });
+
+  it("T: a project's YouTube (project-source) analysis cost is included in analysisCost/totalCost", async () => {
+    const project = await makeProject();
+    await makeAnalyzedProjectSource(project.id, { cost: 0.5, completedAt: midCurrentMonth() });
+
+    const { body } = await callUsage();
+    const row = findProject(body as unknown as UsageBody, project.id)!;
+    expect(row.analysisCost).toBe(0.5);
+    expect(row.totalCost).toBe(0.5);
+    expect(row.sourcesAnalyzed).toBe(1);
+  });
+
+  it("T: a project's Whop AND YouTube analysis costs are combined into ONE analysisCost total", async () => {
+    const project = await makeProject();
+    const course = await makeCourse(project.id);
+    await makeAnalyzedLesson(course.id, { cost: 1.0, completedAt: midCurrentMonth() });
+    await makeAnalyzedProjectSource(project.id, { cost: 0.25, completedAt: midCurrentMonth() });
+
+    const { body } = await callUsage();
+    const row = findProject(body as unknown as UsageBody, project.id)!;
+    expect(row.analysisCost).toBe(1.25);
+    expect(row.lessonsAnalyzed).toBe(1);
+    expect(row.sourcesAnalyzed).toBe(1);
+  });
+
+  it("U: YouTube analysis cost is never double-counted — summed exactly once per project_source_analyses row, no separate usage-records-equivalent table exists to duplicate it", async () => {
+    const project = await makeProject();
+    await makeAnalyzedProjectSource(project.id, { cost: 0.4, completedAt: midCurrentMonth() });
+    await makeAnalyzedProjectSource(project.id, { cost: 0.6, completedAt: midCurrentMonth() });
+
+    const { body } = await callUsage();
+    const row = findProject(body as unknown as UsageBody, project.id)!;
+    expect(row.analysisCost).toBe(1.0);
+    expect(row.sourcesAnalyzed).toBe(2);
+  });
+
+  it("U: a YouTube source analyzed in a PREVIOUS month is excluded from the current-month total, same boundary as Whop lessons", async () => {
+    const project = await makeProject();
+    await makeAnalyzedProjectSource(project.id, { cost: 5, completedAt: lastMomentOfPreviousMonth() });
+
+    const { body } = await callUsage();
+    const row = findProject(body as unknown as UsageBody, project.id)!;
+    expect(row.analysisCost).toBe(0);
+    expect(row.sourcesAnalyzed).toBe(0);
+  });
+
+  it("E: a different project's YouTube analysis cost is never attributed to this project", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    await makeAnalyzedProjectSource(projectB.id, { cost: 9, completedAt: midCurrentMonth() });
+
+    const { body } = await callUsage();
+    const rowA = findProject(body as unknown as UsageBody, projectA.id)!;
+    expect(rowA.analysisCost).toBe(0);
+    expect(rowA.sourcesAnalyzed).toBe(0);
   });
 });
