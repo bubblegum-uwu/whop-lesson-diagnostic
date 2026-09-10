@@ -105,6 +105,40 @@ describe("SourcesPage — project-source (YouTube) analysis actions (Phase 4H-B)
     );
   });
 
+  it("E: clicking Analyze disables the button (shows 'Starting…') while the request is in flight, preventing a duplicate submission", async () => {
+    let resolveAnalyze!: (res: Response) => void;
+    const analyzePromise = new Promise<Response>((resolve) => {
+      resolveAnalyze = resolve;
+    });
+    let queued = false;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
+      if (url === "https://backend.example.com/api/projects/7/sources") return jsonResponse(200, { projectId: 7, sources: [YOUTUBE_SOURCE] });
+      if (url === "https://backend.example.com/api/projects/7/sources/1/analysis") {
+        return jsonResponse(200, queued ? analysisJson({ job: { jobId: "job-1", projectSourceId: 1, status: "QUEUED", attemptCount: 1, sanitizedError: null } }) : analysisJson());
+      }
+      if (url === "https://backend.example.com/api/projects/7/sources/1/analyze" && init?.method === "POST") {
+        queued = true;
+        return analyzePromise;
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
+
+    // Still in flight — the button must already be disabled so a second
+    // click (or a second render tick) can never fire a duplicate request.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Starting…" })).toBeDisabled());
+    const analyzeCalls = fetchMock.mock.calls.filter(([url]) => url === "https://backend.example.com/api/projects/7/sources/1/analyze");
+    expect(analyzeCalls).toHaveLength(1); // never a second/duplicate analyze call while the first is still in flight
+
+    resolveAnalyze(jsonResponse(202, { alreadyQueued: false, job: { jobId: "job-1", projectSourceId: 1, status: "QUEUED", attemptCount: 1, sanitizedError: null } }));
+    await waitFor(() => expect(screen.getByText("Queued")).toBeInTheDocument());
+  });
+
   it("D: Whop disconnected does not disable the Analyze button", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });

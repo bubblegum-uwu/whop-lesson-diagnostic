@@ -152,6 +152,21 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
     void job;
   });
 
+  it("P: never calls getValidAccessToken — a YouTube analysis job is processed with zero Whop OAuth involvement", async () => {
+    const sessionService = await import("../src/whop/sessionService.js");
+    const spy = vi.spyOn(sessionService, "getValidAccessToken");
+
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+    await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+    const { deps } = makeDeps();
+    await runProjectSourceAnalysisLoop(deps);
+
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   it("K/M: analyzeVideo is called with the canonical YouTube URL reconstructed from external_id, not a Gemini Files reference", async () => {
     const project = await makeProject();
     const source = await makeSource(project.id);
