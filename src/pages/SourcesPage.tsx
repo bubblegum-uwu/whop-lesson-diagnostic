@@ -8,11 +8,12 @@ import { ConfigForm } from "../components/ConfigForm";
 import { DiagnosticResult } from "../components/DiagnosticResult";
 import { ErrorResult } from "../components/ErrorResult";
 import { AnalyzeLesson } from "../components/AnalyzeLesson";
+import { AddYouTubeVideoDialog } from "../components/AddYouTubeVideoDialog";
 import type { AnalysisSummary } from "../lib/courseApi";
 import type { DiagnosticDisplayPayload } from "../lib/diagnosticPayload";
 import type { LessonFetchOutcome } from "../lib/whopApi";
 import { useResolvedProject } from "../lib/useResolvedProject";
-import { getProjectSources, type ProjectSource } from "../lib/sourcesApi";
+import { getProjectSources, type ProjectSource, type WhopProjectSource, type YouTubeProjectSource } from "../lib/sourcesApi";
 
 /**
  * The single-lesson diagnostic flow's state (paste one Whop lesson URL,
@@ -88,6 +89,7 @@ type SourcesLoadState =
 export function SourcesPage(props: SourcesPageProps) {
   const { state: projectState } = useResolvedProject(props.backendUrl, props.knoveraToken);
   const [sourcesState, setSourcesState] = useState<SourcesLoadState>({ phase: "idle" });
+  const [showAddYouTubeDialog, setShowAddYouTubeDialog] = useState(false);
 
   async function loadSources(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setSourcesState({ phase: "loading" });
@@ -114,15 +116,36 @@ export function SourcesPage(props: SourcesPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
 
-  const whopSource = sourcesState.phase === "loaded" ? sourcesState.sources.find((s) => s.provider === "WHOP") : undefined;
+  const whopSource: WhopProjectSource | undefined =
+    sourcesState.phase === "loaded" ? sourcesState.sources.find((s): s is WhopProjectSource => s.provider === "WHOP") : undefined;
+  // Phase 4H-A — this project's persisted YouTube sources, independent of
+  // whopSource above: a project can have YouTube sources with zero Whop
+  // courses, and vice versa (see the Phase 4H-A PR description's project
+  // isolation rules).
+  const youtubeSources: YouTubeProjectSource[] =
+    sourcesState.phase === "loaded" ? sourcesState.sources.filter((s): s is YouTubeProjectSource => s.provider === "YOUTUBE") : [];
   // Only a completed, successful lookup that found zero Whop sources counts
-  // as "confirmed never had a source" — idle (signed out / not yet
+  // as "confirmed never had a Whop source" — idle (signed out / not yet
   // resolved), loading, and error all fall back to the pre-Phase-4C
   // behavior below (which includes CourseTable's own "Connect Whop"
   // prompt), so those states must never hide it. This is independent of
-  // live Whop connection — see the component doc comment above.
-  const confirmedNeverHadSource = sourcesState.phase === "loaded" && !whopSource;
+  // live Whop connection — see the component doc comment above. Gates the
+  // Whop-specific CourseTable/DashboardSummary block and Diagnostic Tools
+  // below — both are Whop utilities, unaffected by whether this project
+  // also has YouTube sources.
+  const confirmedNeverHadWhopSource = sourcesState.phase === "loaded" && !whopSource;
+  // The top empty-state box, by contrast, is about this project having NO
+  // source at all — a project with YouTube sources but no Whop course must
+  // never show "No sources connected yet."
+  const confirmedNeverHadAnySource = confirmedNeverHadWhopSource && youtubeSources.length === 0;
   const whopLiveConnected = props.connected;
+  const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
+
+  function refreshSources() {
+    if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) {
+      void loadSources(props.backendUrl, props.knoveraToken, resolvedProjectId, { current: false });
+    }
+  }
 
   return (
     <div className="knovera-page">
@@ -161,9 +184,16 @@ export function SourcesPage(props: SourcesPageProps) {
               <YouTubeIcon className="knovera-provider-icon" />
               <h3>YouTube</h3>
             </div>
-            <span className="kv-badge kv-badge-muted">Coming Soon</span>
           </div>
-          <p className="knovera-provider-desc">Analyze a list of YouTube video URLs.</p>
+          <p className="knovera-provider-desc">Add public YouTube videos to this project.</p>
+          <button
+            type="button"
+            className="knovera-provider-connect-button"
+            onClick={() => setShowAddYouTubeDialog(true)}
+            disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+          >
+            Add YouTube Video
+          </button>
         </div>
         <div className="kv-card knovera-provider-card">
           <div className="knovera-provider-card-top">
@@ -185,14 +215,31 @@ export function SourcesPage(props: SourcesPageProps) {
         </div>
       )}
 
-      {confirmedNeverHadSource && (
+      {confirmedNeverHadAnySource && (
         <div className="kv-card knovera-empty-state">
           <p>No sources connected yet.</p>
-          <p>Connect Whop to add content. YouTube and Discord support are coming soon.</p>
+          <p>Connect Whop or add a YouTube video to add content. Discord support is coming soon.</p>
         </div>
       )}
 
-      {props.backendUrl && !confirmedNeverHadSource && (
+      {youtubeSources.length > 0 && (
+        <>
+          <h2 className="knovera-section-title">YouTube Sources</h2>
+          <ul className="knovera-youtube-source-list">
+            {youtubeSources.map((source) => (
+              <li key={source.id} className="kv-card knovera-youtube-source-row">
+                <div className="knovera-youtube-source-main">
+                  <span className="knovera-youtube-source-label">YouTube Video</span>
+                  <span className="knovera-youtube-source-title">{source.title ?? source.sourceUrl}</span>
+                </div>
+                <span className="kv-badge kv-badge-muted">Added</span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {props.backendUrl && !confirmedNeverHadWhopSource && (
         <>
           <DashboardSummary summary={props.summary} />
           <CourseTable
@@ -220,8 +267,12 @@ export function SourcesPage(props: SourcesPageProps) {
           purpose on a project confirmed to have no Whop course. Hidden only
           on that definitive signal, same as CourseTable above, so it never
           disappears mid-load or pre-auth (where it's still the way to sign
-          in) — and never hidden for MasterMind, which does have a source. */}
-      {!confirmedNeverHadSource && (
+          in) — and never hidden for MasterMind, which does have a source.
+          Phase 4H-A: this gate stays Whop-specific (confirmedNeverHadWhopSource,
+          not confirmedNeverHadAnySource) — a project with only YouTube
+          sources still has no Whop course to run these Whop utilities
+          against. */}
+      {!confirmedNeverHadWhopSource && (
         <details className="knovera-diagnostic-tools">
           <summary>Diagnostic Tools</summary>
           <FindWhopUserId state={props.identifyState} onStart={props.onFindUserId} />
@@ -261,6 +312,19 @@ export function SourcesPage(props: SourcesPageProps) {
             </>
           )}
         </details>
+      )}
+
+      {showAddYouTubeDialog && props.backendUrl && props.knoveraToken && resolvedProjectId != null && (
+        <AddYouTubeVideoDialog
+          backendUrl={props.backendUrl}
+          knoveraToken={props.knoveraToken}
+          projectId={resolvedProjectId}
+          onClose={() => setShowAddYouTubeDialog(false)}
+          onAdded={() => {
+            setShowAddYouTubeDialog(false);
+            refreshSources();
+          }}
+        />
       )}
     </div>
   );

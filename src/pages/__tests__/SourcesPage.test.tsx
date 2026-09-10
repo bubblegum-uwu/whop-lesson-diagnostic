@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { SourcesPage, type SourcesPageProps } from "../SourcesPage";
 
@@ -138,20 +138,21 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     await waitFor(() => expect(screen.getByText("Sources unavailable.")).toBeInTheDocument());
   });
 
-  it("E/C: a valid project with no sources shows the empty-source state with accurate copy, not fabricated data or a promise about YouTube/Discord being connectable now", async () => {
+  it("E/C: a valid project with no sources shows the empty-source state with accurate copy, not fabricated data or a promise about Discord being connectable now", async () => {
     stubFetch([]);
     renderSources("/projects/7/sources", { connected: false });
 
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
-    expect(screen.getByText("Connect Whop to add content. YouTube and Discord support are coming soon.")).toBeInTheDocument();
+    expect(screen.getByText("Connect Whop or add a YouTube video to add content. Discord support is coming soon.")).toBeInTheDocument();
     expect(screen.queryByText(/Connect Whop, YouTube, or Discord/)).not.toBeInTheDocument();
   });
 
-  it("F/G/H: YouTube and Discord show Coming Soon; Whop shows Not Connected (signed out, no live Whop connection) before its source is resolved", () => {
+  it("F/G/H: Discord shows Coming Soon; YouTube is functional (Add YouTube Video); Whop shows Not Connected (signed out, no live Whop connection) before its source is resolved", () => {
     renderSources("/projects/mastermind/sources", { backendUrl: null, knoveraToken: null, connected: false });
-    expect(screen.getAllByText("Coming Soon")).toHaveLength(2);
+    expect(screen.getAllByText("Coming Soon")).toHaveLength(1);
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument();
   });
 
   it("I: a real numeric project id route (from the mocked API) works end to end", async () => {
@@ -227,5 +228,125 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     // out: the Phase 4D provider-card button (shown whenever Whop isn't
     // live-connected) and CourseTable's own pre-existing sign-in button.
     expect(screen.getAllByText("Connect Whop").length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+const YOUTUBE_SOURCE = {
+  provider: "YOUTUBE",
+  sourceType: "VIDEO",
+  id: 1,
+  externalId: "dQw4w9WgXcQ",
+  sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+  title: "Support & Resistance Basics",
+  durationSeconds: null,
+  status: "READY",
+  createdAt: "2026-01-05T00:00:00.000Z",
+};
+
+describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
+  it("A: the YouTube provider card shows Add YouTube Video instead of Coming Soon", async () => {
+    stubFetch([]);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument());
+  });
+
+  it("B/C: clicking Add YouTube Video opens the dialog with a URL field", async () => {
+    stubFetch([]);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));
+
+    expect(screen.getByRole("dialog", { name: "Add YouTube Video" })).toBeInTheDocument();
+    expect(screen.getByLabelText("YouTube URL")).toBeInTheDocument();
+  });
+
+  it("F/G/H: a successful add closes the dialog, refreshes the sources list, and renders the new YouTube source", async () => {
+    let sourcesCallCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
+      if (url === "https://backend.example.com/api/projects/7/sources/youtube" && init?.method === "POST") {
+        return jsonResponse(201, { source: YOUTUBE_SOURCE, duplicate: false });
+      }
+      if (url === "https://backend.example.com/api/projects/7/sources") {
+        sourcesCallCount += 1;
+        return jsonResponse(200, { projectId: 7, sources: sourcesCallCount === 1 ? [] : [YOUTUBE_SOURCE] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeEnabled());
+
+    fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));
+    fireEvent.change(screen.getByLabelText("YouTube URL"), { target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add Video" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add YouTube Video" })).not.toBeInTheDocument());
+    await waitFor(() => expect(sourcesCallCount).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
+    expect(screen.getByText("YouTube Video")).toBeInTheDocument();
+    expect(screen.getByText("Added")).toBeInTheDocument();
+  });
+
+  it("H: a YouTube source with no title falls back to its canonical URL, never a fabricated title", async () => {
+    stubFetch([{ ...YOUTUBE_SOURCE, title: null }]);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByText("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toBeInTheDocument());
+  });
+
+  it("K: no analysis controls (analyzed/lesson-count/Trading-Strategies UI) appear for a YouTube-only source", async () => {
+    stubFetch([YOUTUBE_SOURCE]);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
+
+    expect(screen.queryByText("Sync Course")).not.toBeInTheDocument();
+    expect(screen.queryByText("Analyze All Unanalyzed")).not.toBeInTheDocument();
+    expect(screen.queryByText(/analyzed/i)).not.toBeInTheDocument();
+  });
+
+  it("a YouTube-only project (no Whop course) does not show the empty-state box or the Whop CourseTable", async () => {
+    stubFetch([YOUTUBE_SOURCE]);
+    renderSources("/projects/7/sources", { courseTitle: "The Trading Accelerator" });
+
+    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
+    expect(screen.queryByText("No sources connected yet.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Sync Course")).not.toBeInTheDocument();
+  });
+
+  it("I: adding a YouTube video works while Whop is disconnected (no live Whop connection)", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
+      if (url === "https://backend.example.com/api/projects/7/sources/youtube" && init?.method === "POST") {
+        return jsonResponse(201, { source: YOUTUBE_SOURCE, duplicate: false });
+      }
+      if (url === "https://backend.example.com/api/projects/7/sources") return jsonResponse(200, { projectId: 7, sources: [] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderSources("/projects/7/sources", { connected: false });
+    await waitFor(() => expect(screen.getByText("Not Connected")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));
+    fireEvent.change(screen.getByLabelText("YouTube URL"), { target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add Video" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "https://backend.example.com/api/projects/7/sources/youtube",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+  });
+
+  it("N: YouTube and Whop sources both render together from one coherent GET /sources response", async () => {
+    stubFetch([WHOP_SOURCE, YOUTUBE_SOURCE]);
+    renderSources("/projects/7/sources");
+
+    await waitFor(() => expect(screen.getByText(/The Trading Accelerator — course lessons/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
   });
 });

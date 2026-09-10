@@ -1,19 +1,20 @@
 /**
- * Client for GET /api/projects/:projectId/sources. Requires the caller's
- * Knovera session token (Phase 4D) — never a Whop token; a project's
- * sources are readable regardless of whether Whop is currently connected.
+ * Client for GET /api/projects/:projectId/sources and (Phase 4H-A) POST
+ * /api/projects/:projectId/sources/youtube. Requires the caller's Knovera
+ * session token — never a Whop token; a project's sources are readable
+ * (and, for YouTube, writable) regardless of whether Whop is currently
+ * connected.
  */
 function authHeaders(knoveraToken: string): HeadersInit {
   return { Authorization: `Bearer ${knoveraToken}` };
 }
 
-/** Only WHOP is ever returned by the backend today — see lib/providers.ts for the full conceptual provider set (including YouTube/Discord, which have no connected data yet). */
-export type SourceProvider = "WHOP";
-export type SourceType = "COURSE";
+export type SourceProvider = "WHOP" | "YOUTUBE";
+export type SourceType = "COURSE" | "VIDEO";
 
-export interface ProjectSource {
-  provider: SourceProvider;
-  sourceType: SourceType;
+export interface WhopProjectSource {
+  provider: "WHOP";
+  sourceType: "COURSE";
   courseId: number;
   externalId: string;
   name: string;
@@ -26,6 +27,27 @@ export interface ProjectSource {
   lastSyncedAt: string | null;
   totalCost: number | null;
 }
+
+/**
+ * Phase 4H-A — the first non-Whop project source. Deliberately its own
+ * shape rather than forced into WhopProjectSource's fields (no fake
+ * courseId/lessonCount/etc.). `status` is source-record readiness, never
+ * analysis readiness — Phase 4H-A never analyzes anything, so this is
+ * never an analysis-progress indicator.
+ */
+export interface YouTubeProjectSource {
+  provider: "YOUTUBE";
+  sourceType: "VIDEO";
+  id: number;
+  externalId: string;
+  sourceUrl: string;
+  title: string | null;
+  durationSeconds: number | null;
+  status: string;
+  createdAt: string;
+}
+
+export type ProjectSource = WhopProjectSource | YouTubeProjectSource;
 
 export interface ProjectSourcesResult {
   projectId: number;
@@ -43,4 +65,49 @@ export async function getProjectSources(backendUrl: string, knoveraToken: string
     throw new Error(await readErrorMessage(res, `Failed to load sources (${res.status}).`));
   }
   return (await res.json()) as ProjectSourcesResult;
+}
+
+export class AddYouTubeSourceError extends Error {
+  type: string;
+
+  constructor(message: string, type: string) {
+    super(message);
+    this.name = "AddYouTubeSourceError";
+    this.type = type;
+  }
+}
+
+export interface AddYouTubeSourceResult {
+  source: YouTubeProjectSource;
+  /** True when this exact video was already a source of this project — the existing row is returned, nothing new was created. */
+  duplicate: boolean;
+}
+
+/**
+ * Phase 4H-A — POST /api/projects/:projectId/sources/youtube. Adds a
+ * public YouTube video's canonical identity as a project source; never
+ * fetches the video itself (see backend/src/http/routes/projectSources.ts
+ * for the server-side scope). Throws AddYouTubeSourceError (never a
+ * generic Error) on a non-2xx response so the caller (AddYouTubeVideoDialog)
+ * can show the backend's exact validation message.
+ */
+export async function addYouTubeSource(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  url: string,
+): Promise<AddYouTubeSourceResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/sources/youtube`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => undefined);
+    throw new AddYouTubeSourceError(
+      body?.error?.message ?? `Failed to add YouTube video (${res.status}).`,
+      body?.error?.type ?? "unknown_error",
+    );
+  }
+  return (await res.json()) as AddYouTubeSourceResult;
 }
