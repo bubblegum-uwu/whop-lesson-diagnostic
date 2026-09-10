@@ -2093,6 +2093,31 @@ button.kv-topnav-avatar:hover {
   justify-content: flex-end;
 }
 
+/* ---- Add YouTube Video dialog field layout (Phase 4H-A polish) --------
+   Scoped to this one dialog's URL field only — global `label`/`input`
+   stay untouched (label is inline by default, sized to its text; input has
+   no explicit width), which is exactly why the URL field previously
+   rendered cramped next to its label instead of using the dialog's width. */
+.knovera-youtube-url-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: var(--kv-space-4);
+}
+
+.knovera-youtube-url-field label {
+  margin-top: 0;
+}
+
+.knovera-youtube-url-field input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.knovera-youtube-dialog-actions {
+  gap: var(--kv-space-3);
+}
+
 .knovera-login-body {
   flex: 1;
   display: flex;

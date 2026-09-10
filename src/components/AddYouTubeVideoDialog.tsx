@@ -63,17 +63,19 @@ export function AddYouTubeVideoDialog({ backendUrl, knoveraToken, projectId, onC
         <h2 id="add-youtube-video-title">Add YouTube Video</h2>
 
         <form onSubmit={handleSubmit}>
-          <label htmlFor="youtube-video-url">YouTube URL</label>
-          <input
-            id="youtube-video-url"
-            type="text"
-            placeholder="https://www.youtube.com/watch?v=..."
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            disabled={submitting}
-            autoFocus
-            autoComplete="off"
-          />
+          <div className="knovera-youtube-url-field">
+            <label htmlFor="youtube-video-url">YouTube URL</label>
+            <input
+              id="youtube-video-url"
+              type="text"
+              placeholder="https://www.youtube.com/watch?v=..."
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              disabled={submitting}
+              autoFocus
+              autoComplete="off"
+            />
+          </div>
 
           {state.phase === "error" && (
             <p className="knovera-field-error" role="alert">
@@ -81,7 +83,7 @@ export function AddYouTubeVideoDialog({ backendUrl, knoveraToken, projectId, onC
             </p>
           )}
 
-          <div className="knovera-dialog-actions">
+          <div className="knovera-dialog-actions knovera-youtube-dialog-actions">
             <button type="button" className="link-button" onClick={onClose} disabled={submitting}>
               Cancel
             </button>
