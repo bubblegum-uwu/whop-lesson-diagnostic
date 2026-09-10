@@ -63,13 +63,14 @@ describe("Project workspace navigation", () => {
     expect(screen.getByRole("link", { name: "← Projects" })).toBeInTheDocument();
   });
 
-  it("lists Whop (Not Connected, since this workspace has no live Whop connection), YouTube (Coming Soon), and Discord (Coming Soon) as source providers", () => {
+  it("lists Whop (Not Connected, since this workspace has no live Whop connection), YouTube (functional, Add YouTube Video), and Discord (Coming Soon) as source providers", () => {
     renderProjectWorkspace("/projects/mastermind/sources");
     expect(screen.getByRole("heading", { name: "Whop" })).toBeInTheDocument();
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "YouTube" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Discord" })).toBeInTheDocument();
-    expect(screen.getAllByText("Coming Soon")).toHaveLength(2);
+    expect(screen.getAllByText("Coming Soon")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument();
   });
 
   it("clicking the Synthesis tab from Sources navigates to the Synthesis page", () => {

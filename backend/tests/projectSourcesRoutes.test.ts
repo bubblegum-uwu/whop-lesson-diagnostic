@@ -6,7 +6,8 @@ import { createLessonAnalysis, type CreateLessonAnalysisInput } from "../src/db/
 import { createJob } from "../src/db/analysisJobsRepo.js";
 import { createSynthesisRun } from "../src/db/synthesisRunsRepo.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
-import { createGetProjectSourcesHandler, type ProjectSource } from "../src/http/routes/projectSources.js";
+import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, type ProjectSource } from "../src/http/routes/projectSources.js";
+import { listProjects } from "../src/db/projectsRepo.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 import { makeResponse } from "./helpers/httpMocks.js";
 
@@ -205,6 +206,160 @@ describe("GET /api/projects/:projectId/sources", () => {
       lessons: await countRows("lessons"),
       lessonAnalyses: await countRows("lesson_analyses"),
       synthesisRuns: await countRows("synthesis_runs"),
+    };
+    expect(after).toEqual(before);
+  });
+});
+
+async function callAddYouTubeHandler(projectId: string, url: unknown) {
+  const handler = createAddYouTubeSourceHandler({ pool });
+  const { res, statusCode, body } = makeResponse();
+  await handler({ params: { projectId }, body: { url } } as unknown as Request, res);
+  return {
+    statusCode: statusCode(),
+    body: body() as { source?: ProjectSource; duplicate?: boolean; error?: { type: string; message: string } },
+  };
+}
+
+describe("POST /api/projects/:projectId/sources/youtube (Phase 4H-A)", () => {
+  it("J: authenticated (handler-level) source creation succeeds with a 201 and the canonical source shape", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddYouTubeHandler(String(project.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    expect(statusCode).toBe(201);
+    expect(body.duplicate).toBe(false);
+    expect(body.source?.provider).toBe("YOUTUBE");
+    expect(body.source?.sourceType).toBe("VIDEO");
+    expect(body.source?.externalId).toBe("dQw4w9WgXcQ");
+    expect(body.source?.sourceUrl).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(body.source?.title).toBeNull();
+    expect(body.source?.status).toBe("READY");
+  });
+
+  it("rejects a malformed URL with a deterministic 400", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddYouTubeHandler(String(project.id), "not a url");
+    expect(statusCode).toBe(400);
+    expect(body.error?.type).toBe("invalid_youtube_url");
+  });
+
+  it("rejects a non-YouTube URL with a deterministic 400", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddYouTubeHandler(String(project.id), "https://vimeo.com/12345");
+    expect(statusCode).toBe(400);
+    expect(body.error?.type).toBe("invalid_youtube_url");
+  });
+
+  it("rejects a playlist URL with a deterministic 400", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddYouTubeHandler(String(project.id), "https://www.youtube.com/playlist?list=PLabc123");
+    expect(statusCode).toBe(400);
+    expect(body.error?.type).toBe("invalid_youtube_url");
+  });
+
+  it("rejects a missing url body with a deterministic 400", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddYouTubeHandler(String(project.id), undefined);
+    expect(statusCode).toBe(400);
+    expect(body.error?.type).toBe("invalid_request");
+  });
+
+  it("returns a deterministic 404 for an unknown project", async () => {
+    const { statusCode, body } = await callAddYouTubeHandler("999999999", "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(statusCode).toBe(404);
+    expect(body.error?.type).toBe("project_not_found");
+  });
+
+  it("M: duplicate in same project is deterministic — second add returns 200 with duplicate: true and the same source id", async () => {
+    const project = await makeProject();
+    const first = await callAddYouTubeHandler(String(project.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    const second = await callAddYouTubeHandler(String(project.id), "https://youtu.be/dQw4w9WgXcQ");
+
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(200);
+    expect(second.body.duplicate).toBe(true);
+    expect(second.body.source?.id).toBe(first.body.source?.id);
+  });
+
+  it("N: the same video is allowed in two different projects", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    const inA = await callAddYouTubeHandler(String(projectA.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    const inB = await callAddYouTubeHandler(String(projectB.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    expect(inA.statusCode).toBe(201);
+    expect(inB.statusCode).toBe(201);
+    expect(inA.body.source?.id).not.toBe(inB.body.source?.id);
+  });
+
+  it("O: Project A/B isolation — a YouTube source added to Project A never appears in Project B's GET /sources", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    await callAddYouTubeHandler(String(projectA.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    const { body: bodyA } = await callHandler(String(projectA.id));
+    const { body: bodyB } = await callHandler(String(projectB.id));
+
+    expect(bodyA.sources).toHaveLength(1);
+    expect(bodyA.sources![0].provider).toBe("YOUTUBE");
+    expect(bodyB.sources).toEqual([]);
+  });
+
+  it("P: adding a YouTube source to an unrelated project never touches MasterMind's Whop course association", async () => {
+    const mastermindBefore = (await listProjects(pool)).find((p) => p.name === "MasterMind");
+    const { body: mastermindSourcesBefore } = await callHandler(String(mastermindBefore!.id));
+
+    const otherProject = await makeProject();
+    await callAddYouTubeHandler(String(otherProject.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    const { body: mastermindSourcesAfter } = await callHandler(String(mastermindBefore!.id));
+    expect(mastermindSourcesAfter.sources).toEqual(mastermindSourcesBefore.sources);
+  });
+
+  it("Q: GET /sources returns Whop and YouTube sources coherently in one list", async () => {
+    const project = await makeProject();
+    await makeCourse(project.id, { title: "The Trading Accelerator" });
+    await callAddYouTubeHandler(String(project.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    const { statusCode, body } = await callHandler(String(project.id));
+    expect(statusCode).toBe(200);
+    expect(body.sources).toHaveLength(2);
+    const providers = body.sources!.map((s) => s.provider).sort();
+    expect(providers).toEqual(["WHOP", "YOUTUBE"]);
+  });
+
+  it("R: a GENERAL_KNOWLEDGE project can add a YouTube source", async () => {
+    const project = await makeProject("GENERAL_KNOWLEDGE");
+    const { statusCode } = await callAddYouTubeHandler(String(project.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(statusCode).toBe(201);
+
+    const { body } = await callHandler(String(project.id));
+    expect(body.sources).toHaveLength(1);
+    expect(body.sources![0].provider).toBe("YOUTUBE");
+  });
+
+  it("S/T/U/V/W: adding a YouTube source never creates a course, lesson, analysis_job, lesson_analyses, synthesis_runs, or usage_records row", async () => {
+    const project = await makeProject();
+    const countRows = async (table: string): Promise<number> =>
+      Number((await pool.query<{ count: string }>(`SELECT COUNT(*) AS count FROM ${table}`)).rows[0].count);
+    const before = {
+      courses: await countRows("courses"),
+      lessons: await countRows("lessons"),
+      analysisJobs: await countRows("analysis_jobs"),
+      lessonAnalyses: await countRows("lesson_analyses"),
+      synthesisRuns: await countRows("synthesis_runs"),
+      usageRecords: await countRows("usage_records"),
+    };
+
+    await callAddYouTubeHandler(String(project.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    const after = {
+      courses: await countRows("courses"),
+      lessons: await countRows("lessons"),
+      analysisJobs: await countRows("analysis_jobs"),
+      lessonAnalyses: await countRows("lesson_analyses"),
+      synthesisRuns: await countRows("synthesis_runs"),
+      usageRecords: await countRows("usage_records"),
     };
     expect(after).toEqual(before);
   });

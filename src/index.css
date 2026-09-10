@@ -2093,6 +2093,31 @@ button.kv-topnav-avatar:hover {
   justify-content: flex-end;
 }
 
+/* ---- Add YouTube Video dialog field layout (Phase 4H-A polish) --------
+   Scoped to this one dialog's URL field only — global `label`/`input`
+   stay untouched (label is inline by default, sized to its text; input has
+   no explicit width), which is exactly why the URL field previously
+   rendered cramped next to its label instead of using the dialog's width. */
+.knovera-youtube-url-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: var(--kv-space-4);
+}
+
+.knovera-youtube-url-field label {
+  margin-top: 0;
+}
+
+.knovera-youtube-url-field input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.knovera-youtube-dialog-actions {
+  gap: var(--kv-space-3);
+}
+
 .knovera-login-body {
   flex: 1;
   display: flex;
@@ -2310,6 +2335,48 @@ button.kv-topnav-avatar:hover {
 .knovera-provider-connect-button:hover {
   border-color: var(--kv-accent);
   color: var(--kv-accent);
+}
+
+/* ---- YouTube sources list (Phase 4H-A) -------------------------------- */
+
+.knovera-youtube-source-list {
+  list-style: none;
+  margin: 0 0 var(--kv-space-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kv-space-2);
+}
+
+.knovera-youtube-source-row {
+  padding: var(--kv-space-3) var(--kv-space-4);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kv-space-3);
+}
+
+.knovera-youtube-source-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.knovera-youtube-source-label {
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--kv-text-muted);
+}
+
+.knovera-youtube-source-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .knovera-diagnostic-tools {
