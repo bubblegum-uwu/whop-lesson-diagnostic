@@ -190,7 +190,7 @@ export function ProjectSourceAnalysisDrawer({ source, job, analysis, loading, on
           {analysis?.analysisSummary && <p className="drawer-summary">{analysis.analysisSummary}</p>}
 
           <div className="detail-actions">
-            <a href={source.sourceUrl} target="_blank" rel="noreferrer">
+            <a href={source.sourceUrl} target="_blank" rel="noreferrer" className="link-button">
               Open on YouTube
             </a>
           </div>

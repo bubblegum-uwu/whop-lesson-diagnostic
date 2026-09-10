@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { ProjectHeader } from "./ProjectHeader";
 import { WhopIcon, YouTubeIcon, DiscordIcon } from "../components/ProviderIcons";
-import { DashboardSummary } from "../components/DashboardSummary";
 import { CourseTable, type CourseTableProps } from "../components/CourseTable";
 import { FindWhopUserId, type FindWhopUserIdState } from "../components/FindWhopUserId";
 import { ConfigForm } from "../components/ConfigForm";
@@ -374,25 +373,22 @@ export function SourcesPage(props: SourcesPageProps) {
       )}
 
       {props.backendUrl && !confirmedNeverHadWhopSource && (
-        <>
-          <DashboardSummary summary={props.summary} />
-          <CourseTable
-            courseTitle={props.courseTitle}
-            lessons={props.lessons}
-            connected={props.connected}
-            syncing={props.syncing}
-            authRequired={props.authRequired}
-            lastSyncedAt={props.lastSyncedAt}
-            summary={props.summary}
-            onSignIn={props.onSignIn}
-            onSync={props.onSync}
-            onDisconnect={props.onDisconnect}
-            onEnqueue={props.onEnqueue}
-            onRetry={props.onRetry}
-            onCancel={props.onCancel}
-            onLoadAnalysis={props.onLoadAnalysis}
-          />
-        </>
+        <CourseTable
+          courseTitle={props.courseTitle}
+          lessons={props.lessons}
+          connected={props.connected}
+          syncing={props.syncing}
+          authRequired={props.authRequired}
+          lastSyncedAt={props.lastSyncedAt}
+          summary={props.summary}
+          onSignIn={props.onSignIn}
+          onSync={props.onSync}
+          onDisconnect={props.onDisconnect}
+          onEnqueue={props.onEnqueue}
+          onRetry={props.onRetry}
+          onCancel={props.onCancel}
+          onLoadAnalysis={props.onLoadAnalysis}
+        />
       )}
       {props.courseErrorMessage && <div className="error-box">{props.courseErrorMessage}</div>}
 
