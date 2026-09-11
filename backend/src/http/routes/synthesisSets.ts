@@ -243,7 +243,7 @@ export function createAddSourceToSynthesisSetHandler(deps: SynthesisSetsRouteDep
       return;
     }
 
-    const { created } = await addSourceToSynthesisSet(deps.pool, set.id, sourceId);
+    const { created } = await addSourceToSynthesisSet(deps.pool, set.id, sourceId, set.projectId);
     res.status(created ? 201 : 200).json({ synthesisSetId: set.id, sourceId, added: created });
   };
 }

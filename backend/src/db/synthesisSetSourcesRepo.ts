@@ -4,8 +4,11 @@ import type { Pool } from "pg";
  * Phase 4J — the many-to-many join between synthesis_sets and
  * project_sources. See the 1789700000000_synthesis-sets.sql migration's
  * comment for why this is a plain `project_source_id` FK rather than
- * polymorphic, and why cross-project membership is enforced here in
- * application code rather than by a DB constraint.
+ * polymorphic, and for the full reasoning behind `project_id` and the two
+ * composite foreign keys below: they're what makes cross-project
+ * membership impossible at the database layer, not just rejected by
+ * application code (application code still checks it too, ahead of the
+ * insert, purely for a clean 404 instead of a raw constraint error).
  *
  * Deliberately a pure membership table — no status, no ordering, no
  * weighting (Phase 4J explicitly excludes all of that). Adding/removing a
@@ -15,12 +18,14 @@ import type { Pool } from "pg";
 export interface SynthesisSetMembershipRow {
   synthesisSetId: number;
   projectSourceId: number;
+  projectId: number;
   createdAt: Date;
 }
 
 interface MembershipDbRow {
   synthesis_set_id: string;
   project_source_id: string;
+  project_id: string;
   created_at: Date;
 }
 
@@ -28,6 +33,7 @@ function mapRow(row: MembershipDbRow): SynthesisSetMembershipRow {
   return {
     synthesisSetId: Number(row.synthesis_set_id),
     projectSourceId: Number(row.project_source_id),
+    projectId: Number(row.project_id),
     createdAt: row.created_at,
   };
 }
@@ -39,30 +45,37 @@ function mapRow(row: MembershipDbRow): SynthesisSetMembershipRow {
  * a second row — `created` tells the caller which happened, exactly
  * mirroring projectSourcesRepo.createYouTubeSource's convention.
  *
- * Callers MUST have already verified project_source.project_id ===
- * synthesis_set.project_id themselves before calling this (see
- * http/routes/synthesisSets.ts's resolveOwnedSynthesisSet /
- * resolveOwnedSourceForMembership) — this function does not re-check it,
- * mirroring how projectSourceAnalysisJobsRepo trusts its caller's already
- * -performed ownership resolution.
+ * `projectId` MUST be the project both the set and the source already
+ * belong to — callers MUST have already verified
+ * project_source.project_id === synthesis_set.project_id themselves
+ * before calling this (see http/routes/synthesisSets.ts's
+ * resolveOwnedSynthesisSet / resolveOwnedSourceForMembership), mirroring
+ * how projectSourceAnalysisJobsRepo trusts its caller's already-performed
+ * ownership resolution. That app-level check is defense-in-depth for a
+ * clean error response — even a caller that skips it, or a direct SQL
+ * insert with a mismatched projectId, is rejected by the migration's
+ * composite foreign keys (synthesis_set_id, project_id) and
+ * (project_source_id, project_id): a row here can only ever reference a
+ * set and a source that both truly belong to `projectId`.
  */
 export async function addSourceToSynthesisSet(
   pool: Pool,
   synthesisSetId: number,
   projectSourceId: number,
+  projectId: number,
 ): Promise<{ membership: SynthesisSetMembershipRow; created: boolean }> {
   const inserted = await pool.query<MembershipDbRow>(
-    `INSERT INTO synthesis_set_sources (synthesis_set_id, project_source_id)
-     VALUES ($1, $2)
+    `INSERT INTO synthesis_set_sources (synthesis_set_id, project_source_id, project_id)
+     VALUES ($1, $2, $3)
      ON CONFLICT (synthesis_set_id, project_source_id) DO NOTHING
-     RETURNING synthesis_set_id, project_source_id, created_at`,
-    [synthesisSetId, projectSourceId],
+     RETURNING synthesis_set_id, project_source_id, project_id, created_at`,
+    [synthesisSetId, projectSourceId, projectId],
   );
   if (inserted.rows[0]) {
     return { membership: mapRow(inserted.rows[0]), created: true };
   }
   const existing = await pool.query<MembershipDbRow>(
-    `SELECT synthesis_set_id, project_source_id, created_at FROM synthesis_set_sources WHERE synthesis_set_id = $1 AND project_source_id = $2`,
+    `SELECT synthesis_set_id, project_source_id, project_id, created_at FROM synthesis_set_sources WHERE synthesis_set_id = $1 AND project_source_id = $2`,
     [synthesisSetId, projectSourceId],
   );
   return { membership: mapRow(existing.rows[0]), created: false };

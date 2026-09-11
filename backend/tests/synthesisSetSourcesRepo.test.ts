@@ -66,7 +66,7 @@ describe("synthesisSetSourcesRepo", () => {
     const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
     const source = await makeYouTubeSource(project.id);
 
-    const { created } = await addSourceToSynthesisSet(pool, set.id, source.id);
+    const { created } = await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
     expect(created).toBe(true);
     expect(await listProjectSourceIdsForSynthesisSet(pool, set.id)).toEqual([source.id]);
   });
@@ -75,7 +75,7 @@ describe("synthesisSetSourcesRepo", () => {
     const project = await makeProject();
     const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
     const source = await makeYouTubeSource(project.id);
-    await addSourceToSynthesisSet(pool, set.id, source.id);
+    await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
 
     const removed = await removeSourceFromSynthesisSet(pool, set.id, source.id);
     expect(removed).toBe(true);
@@ -94,8 +94,8 @@ describe("synthesisSetSourcesRepo", () => {
     const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
     const source = await makeYouTubeSource(project.id);
 
-    const first = await addSourceToSynthesisSet(pool, set.id, source.id);
-    const second = await addSourceToSynthesisSet(pool, set.id, source.id);
+    const first = await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
+    const second = await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
     expect(first.created).toBe(true);
     expect(second.created).toBe(false);
 
@@ -112,11 +112,70 @@ describe("synthesisSetSourcesRepo", () => {
     const source = await makeYouTubeSource(project.id);
 
     const [a, b, c] = await Promise.all([
-      addSourceToSynthesisSet(pool, set.id, source.id),
-      addSourceToSynthesisSet(pool, set.id, source.id),
-      addSourceToSynthesisSet(pool, set.id, source.id),
+      addSourceToSynthesisSet(pool, set.id, source.id, project.id),
+      addSourceToSynthesisSet(pool, set.id, source.id, project.id),
+      addSourceToSynthesisSet(pool, set.id, source.id, project.id),
     ]);
     expect([a, b, c].filter((r) => r.created).length).toBe(1);
+  });
+
+  describe("cross-project membership is rejected by the database itself, not just application code", () => {
+    it("CRITICAL: a direct SQL INSERT bypassing the repo/route layer — Set from Project A + Source from Project B — is rejected by a foreign-key violation, tagged with the set's project_id", async () => {
+      const projectA = await makeProject();
+      const projectB = await makeProject();
+      const setA = await createSynthesisSet(pool, { projectId: projectA.id, name: "Set A", description: null });
+      const sourceB = await makeYouTubeSource(projectB.id);
+
+      await expect(
+        pool.query(
+          `INSERT INTO synthesis_set_sources (synthesis_set_id, project_source_id, project_id) VALUES ($1, $2, $3)`,
+          [setA.id, sourceB.id, projectA.id],
+        ),
+      ).rejects.toThrow(/foreign key constraint/i);
+
+      const rows = await pool.query(`SELECT 1 FROM synthesis_set_sources WHERE synthesis_set_id = $1`, [setA.id]);
+      expect(rows.rows).toEqual([]);
+    });
+
+    it("CRITICAL: the same direct SQL INSERT tagged with the source's project_id instead is ALSO rejected — there is no project_id value that makes a cross-project row insertable", async () => {
+      const projectA = await makeProject();
+      const projectB = await makeProject();
+      const setA = await createSynthesisSet(pool, { projectId: projectA.id, name: "Set A", description: null });
+      const sourceB = await makeYouTubeSource(projectB.id);
+
+      await expect(
+        pool.query(
+          `INSERT INTO synthesis_set_sources (synthesis_set_id, project_source_id, project_id) VALUES ($1, $2, $3)`,
+          [setA.id, sourceB.id, projectB.id],
+        ),
+      ).rejects.toThrow(/foreign key constraint/i);
+
+      const rows = await pool.query(`SELECT 1 FROM synthesis_set_sources WHERE project_source_id = $1`, [sourceB.id]);
+      expect(rows.rows).toEqual([]);
+    });
+
+    it("same-project membership still succeeds via the same direct-SQL path (the constraint isn't overly strict)", async () => {
+      const project = await makeProject();
+      const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
+      const source = await makeYouTubeSource(project.id);
+
+      await pool.query(
+        `INSERT INTO synthesis_set_sources (synthesis_set_id, project_source_id, project_id) VALUES ($1, $2, $3)`,
+        [set.id, source.id, project.id],
+      );
+
+      expect(await listProjectSourceIdsForSynthesisSet(pool, set.id)).toEqual([source.id]);
+    });
+
+    it("the application-level addSourceToSynthesisSet call still succeeds normally for same-project membership (both layers agree)", async () => {
+      const project = await makeProject();
+      const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
+      const source = await makeYouTubeSource(project.id);
+
+      const { created } = await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
+      expect(created).toBe(true);
+      expect(await listProjectSourceIdsForSynthesisSet(pool, set.id)).toEqual([source.id]);
+    });
   });
 
   it("CRITICAL: one source belongs to multiple synthesis sets — Source X in both A and B, Source Y only in A", async () => {
@@ -126,9 +185,9 @@ describe("synthesisSetSourcesRepo", () => {
     const sourceX = await makeYouTubeSource(project.id);
     const sourceY = await makeDiscordSource(project.id);
 
-    await addSourceToSynthesisSet(pool, setA.id, sourceX.id);
-    await addSourceToSynthesisSet(pool, setB.id, sourceX.id);
-    await addSourceToSynthesisSet(pool, setA.id, sourceY.id);
+    await addSourceToSynthesisSet(pool, setA.id, sourceX.id, project.id);
+    await addSourceToSynthesisSet(pool, setB.id, sourceX.id, project.id);
+    await addSourceToSynthesisSet(pool, setA.id, sourceY.id, project.id);
 
     // Source X exists only once in the DB, but is visible in both sets.
     const membershipsOfX = await listSynthesisSetIdsForSource(pool, sourceX.id);
@@ -155,7 +214,7 @@ describe("synthesisSetSourcesRepo", () => {
     const project = await makeProject();
     const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
     const source = await makeYouTubeSource(project.id);
-    await addSourceToSynthesisSet(pool, set.id, source.id);
+    await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
 
     await pool.query(`DELETE FROM project_sources WHERE id = $1`, [source.id]);
 
@@ -168,7 +227,7 @@ describe("synthesisSetSourcesRepo", () => {
     const project = await makeProject();
     const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
     const source = await makeYouTubeSource(project.id);
-    await addSourceToSynthesisSet(pool, set.id, source.id);
+    await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
     await markAnalyzed(source.id);
 
     await pool.query(`DELETE FROM synthesis_sets WHERE id = $1`, [set.id]);
@@ -184,7 +243,7 @@ describe("synthesisSetSourcesRepo", () => {
       const project = await makeProject();
       const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
       const source = await makeYouTubeSource(project.id);
-      await addSourceToSynthesisSet(pool, set.id, source.id);
+      await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
       await markAnalyzed(source.id);
 
       const readiness = await getSynthesisSetReadiness(pool, set.id);
@@ -195,7 +254,7 @@ describe("synthesisSetSourcesRepo", () => {
       const project = await makeProject();
       const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
       const source = await makeYouTubeSource(project.id);
-      await addSourceToSynthesisSet(pool, set.id, source.id);
+      await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
 
       const readiness = await getSynthesisSetReadiness(pool, set.id);
       expect(readiness).toEqual({ sourceCount: 1, analyzedSourceCount: 0, needsAnalysisCount: 1 });
@@ -205,7 +264,7 @@ describe("synthesisSetSourcesRepo", () => {
       const project = await makeProject();
       const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
       const memberSource = await makeYouTubeSource(project.id);
-      await addSourceToSynthesisSet(pool, set.id, memberSource.id);
+      await addSourceToSynthesisSet(pool, set.id, memberSource.id, project.id);
 
       const nonMemberAnalyzed = await makeDiscordSource(project.id);
       await markAnalyzed(nonMemberAnalyzed.id);
@@ -222,9 +281,9 @@ describe("synthesisSetSourcesRepo", () => {
       const a = await makeYouTubeSource(project.id);
       const b = await makeDiscordSource(project.id);
       const c = await makeYouTubeSource(project.id);
-      await addSourceToSynthesisSet(pool, set.id, a.id);
-      await addSourceToSynthesisSet(pool, set.id, b.id);
-      await addSourceToSynthesisSet(pool, set.id, c.id);
+      await addSourceToSynthesisSet(pool, set.id, a.id, project.id);
+      await addSourceToSynthesisSet(pool, set.id, b.id, project.id);
+      await addSourceToSynthesisSet(pool, set.id, c.id, project.id);
       await markAnalyzed(a.id);
       await markAnalyzed(c.id);
 
@@ -237,7 +296,7 @@ describe("synthesisSetSourcesRepo", () => {
       const setA = await createSynthesisSet(pool, { projectId: project.id, name: "A", description: null });
       const setB = await createSynthesisSet(pool, { projectId: project.id, name: "B", description: null });
       const source = await makeYouTubeSource(project.id);
-      await addSourceToSynthesisSet(pool, setA.id, source.id);
+      await addSourceToSynthesisSet(pool, setA.id, source.id, project.id);
       await markAnalyzed(source.id);
 
       const byId = await getReadinessBySynthesisSetId(pool, [setA.id, setB.id]);
@@ -249,7 +308,7 @@ describe("synthesisSetSourcesRepo", () => {
       const project = await makeProject();
       const set = await createSynthesisSet(pool, { projectId: project.id, name: "s", description: null });
       const source = await makeYouTubeSource(project.id);
-      await addSourceToSynthesisSet(pool, set.id, source.id);
+      await addSourceToSynthesisSet(pool, set.id, source.id, project.id);
       await markAnalyzed(source.id);
       await markAnalyzed(source.id); // simulates a Re-analyze producing a second analysis row
 

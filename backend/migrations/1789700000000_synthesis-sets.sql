@@ -37,15 +37,29 @@
 -- can decide deliberately how to extend this (e.g. a parallel
 -- `synthesis_set_lessons` table, or a real project_sources-unifying
 -- migration) once that requirement is concrete.
+-- The `UNIQUE (id, project_id)` below adds no real constraint beyond what
+-- already holds (id is already globally unique as the primary key) — its
+-- only purpose is to expose the pair as a valid composite-FK target for
+-- synthesis_set_sources below, which is how cross-project membership gets
+-- rejected at the database layer, not just in application code.
 CREATE TABLE synthesis_sets (
   id            BIGSERIAL PRIMARY KEY,
   project_id    BIGINT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name          TEXT NOT NULL,
   description   TEXT,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (id, project_id)
 );
 CREATE INDEX synthesis_sets_project_idx ON synthesis_sets (project_id, created_at DESC);
+
+-- project_sources already exists (see 1789400000000_project-sources.sql,
+-- already merged) — this ALTER TABLE lives here, in the new migration,
+-- rather than editing that already-applied one. Same reasoning as the
+-- UNIQUE on synthesis_sets above: id is already project_sources' own
+-- primary key (globally unique), so this adds no real constraint beyond
+-- what already holds, it only exposes the pair as a composite-FK target.
+ALTER TABLE project_sources ADD CONSTRAINT project_sources_id_project_id_key UNIQUE (id, project_id);
 
 -- The many-to-many join. PRIMARY KEY on the pair IS the uniqueness
 -- guarantee (adding the same source to the same set twice is a race-safe
@@ -62,17 +76,33 @@ CREATE INDEX synthesis_sets_project_idx ON synthesis_sets (project_id, created_a
 -- its analysis; that is exactly what this FK direction guarantees.
 --
 -- Cross-project membership (a source from a different project than the
--- synthesis set) is NOT rejectable by a table-level CHECK constraint in
--- Postgres (a CHECK cannot reference another table's row) — enforced in
--- application code instead, at the one writer (see
--- synthesisSetSourcesRepo.addSourceToSynthesisSet), the same "the more
--- precise enforcement point is application code" precedent already used
--- for project_sources.provider allow-listing.
+-- synthesis set) cannot be rejected by a plain CHECK constraint in
+-- Postgres (a CHECK cannot reference another table's row) — but it CAN be,
+-- and is, rejected by relational integrity: `project_id` is stored
+-- redundantly on every membership row, and BOTH foreign keys below are
+-- composite, referencing (id, project_id) on their respective parent
+-- rather than id alone. That forces this row's `project_id` to equal both
+-- the referenced synthesis_set's project_id AND the referenced
+-- project_source's project_id simultaneously — which is only possible
+-- when the set and the source already belong to the same project. A
+-- direct SQL INSERT that tries to attach a source from a different
+-- project fails with a foreign-key violation, full stop, with no way to
+-- route around it. Application code (see
+-- synthesisSetSourcesRepo.addSourceToSynthesisSet and
+-- http/routes/synthesisSets.ts) still checks this too, ahead of the
+-- insert — not because the database can't enforce it, but so a
+-- cross-project attempt gets the app's own precise 404 rather than a raw
+-- Postgres constraint-violation error. Both layers stay in place
+-- deliberately: the app layer for a clean, predictable API response, the
+-- database layer as the actual, unbypassable guarantee.
 CREATE TABLE synthesis_set_sources (
-  synthesis_set_id   BIGINT NOT NULL REFERENCES synthesis_sets(id) ON DELETE CASCADE,
-  project_source_id  BIGINT NOT NULL REFERENCES project_sources(id) ON DELETE CASCADE,
+  synthesis_set_id   BIGINT NOT NULL,
+  project_source_id  BIGINT NOT NULL,
+  project_id         BIGINT NOT NULL,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  PRIMARY KEY (synthesis_set_id, project_source_id)
+  PRIMARY KEY (synthesis_set_id, project_source_id),
+  FOREIGN KEY (synthesis_set_id, project_id) REFERENCES synthesis_sets (id, project_id) ON DELETE CASCADE,
+  FOREIGN KEY (project_source_id, project_id) REFERENCES project_sources (id, project_id) ON DELETE CASCADE
 );
 -- Supports "which sets is this source a member of" (e.g. a future Sources
 -- -page "Add to Synthesis" control) without a sequential scan.
@@ -82,3 +112,4 @@ CREATE INDEX synthesis_set_sources_source_idx ON synthesis_set_sources (project_
 
 DROP TABLE synthesis_set_sources;
 DROP TABLE synthesis_sets;
+ALTER TABLE project_sources DROP CONSTRAINT project_sources_id_project_id_key;
