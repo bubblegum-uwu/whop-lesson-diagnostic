@@ -15,6 +15,12 @@ import {
 } from "./routes/auth.js";
 import { createKnoveraLoginHandler, createKnoveraMeHandler, createKnoveraLogoutHandler } from "./routes/knoveraAuth.js";
 import { createCourseSyncHandler } from "./routes/courseSync.js";
+import {
+  createConnectWhopCourseHandler,
+  createListWhopCoursesHandler,
+  createRefreshWhopCourseHandler,
+  createListWhopCourseLessonsHandler,
+} from "./routes/whopCourses.js";
 import { createCourseLessonsHandler } from "./routes/courseLessons.js";
 import { createEnqueueJobsHandler, createRetryJobHandler, createCancelJobHandler, createGetJobHandler } from "./routes/analysisJobs.js";
 import { createLessonAnalysisDetailHandler } from "./routes/lessonAnalysisDetail.js";
@@ -23,7 +29,20 @@ import { createAnalysisEventsHandler } from "./routes/analysisEvents.js";
 import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "./routes/courseSynthesis.js";
 import { createProjectSynthesisStatusHandler, createProjectSynthesizeHandler, createGetProjectSynthesisHandler } from "./routes/projectSynthesis.js";
 import { createListProjectsHandler, createGetProjectHandler, createCreateProjectHandler } from "./routes/projects.js";
-import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, createAddDiscordSourceHandler } from "./routes/projectSources.js";
+import {
+  createGetProjectSourcesHandler,
+  createAddYouTubeSourceHandler,
+  createAddDiscordSourceHandler,
+  createBatchAddYouTubeSourcesHandler,
+  createBatchAddDiscordSourcesHandler,
+} from "./routes/projectSources.js";
+import {
+  createListSourceCollectionsHandler,
+  createGetSourceCollectionHandler,
+  createAddYouTubeCollectionHandler,
+  createRefreshSourceCollectionHandler,
+  createDeleteSourceCollectionHandler,
+} from "./routes/sourceCollections.js";
 import {
   createListSynthesisSetsHandler,
   createCreateSynthesisSetHandler,
@@ -37,6 +56,7 @@ import {
   createAnalyzeProjectSourceHandler,
   createGetProjectSourceAnalysisHandler,
   createRetryProjectSourceAnalysisHandler,
+  createBatchAnalyzeProjectSourcesHandler,
 } from "./routes/projectSourceAnalysis.js";
 import { createGetUsageHandler } from "./routes/usage.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
@@ -137,6 +157,18 @@ export function createApp(config: AppConfig): Express {
     whopConnected,
     createCourseSyncHandler({ pool, courseClient, oauthClient, refreshTokenEncryptionKey: config.refreshTokenEncryptionKey, course: config.course }),
   );
+
+  // Phase 4K — multiple Whop courses per project (the source-catalog side
+  // only; legacy course-scoped synthesis is untouched — see
+  // http/routes/whopCourses.ts's doc comment). Same whopConnected
+  // pre-check as /api/course/sync above for connect/refresh (both call
+  // the live Whop API); the list/lessons reads below touch only
+  // already-persisted Postgres data, so they need no such gate.
+  const whopCoursesDeps = { pool, courseClient, oauthClient, refreshTokenEncryptionKey: config.refreshTokenEncryptionKey };
+  app.post("/api/projects/:projectId/whop-courses", knoveraAuth, whopConnected, createConnectWhopCourseHandler(whopCoursesDeps));
+  app.get("/api/projects/:projectId/whop-courses", knoveraAuth, createListWhopCoursesHandler(whopCoursesDeps));
+  app.post("/api/projects/:projectId/whop-courses/:courseId/refresh", knoveraAuth, whopConnected, createRefreshWhopCourseHandler(whopCoursesDeps));
+  app.get("/api/projects/:projectId/whop-courses/:courseId/lessons", knoveraAuth, createListWhopCourseLessonsHandler(whopCoursesDeps));
   // Reads of already-persisted course/lesson data — never call Whop (see
   // courseLessons.ts / lessonAnalysisDetail.ts: both read Postgres only).
   // Whop being disconnected must never hide content that already exists.
@@ -203,6 +235,25 @@ export function createApp(config: AppConfig): Express {
   // Discord video attachment source (see projectSources.ts's route doc
   // comment).
   app.post("/api/projects/:projectId/sources/discord", knoveraAuth, createAddDiscordSourceHandler(projectsDeps));
+  // Phase 4K — bulk à-la-carte import: multiple URLs in one request, each
+  // independently validated/deduped/imported (see projectSources.ts's doc
+  // comment on createBatchAddYouTubeSourcesHandler/
+  // createBatchAddDiscordSourcesHandler). Never analyzes anything.
+  app.post("/api/projects/:projectId/sources/youtube/batch", knoveraAuth, createBatchAddYouTubeSourcesHandler(projectsDeps));
+  app.post("/api/projects/:projectId/sources/discord/batch", knoveraAuth, createBatchAddDiscordSourcesHandler(projectsDeps));
+
+  // Phase 4K — the source-collection catalog layer (YouTube channels /
+  // Discord collections) above project_sources. See
+  // http/routes/sourceCollections.ts's doc comments — Whop deliberately
+  // has no equivalent route here (a Whop course already IS a
+  // project-scoped collection via courses.project_id; see the Whop routes
+  // registered further below).
+  const sourceCollectionsDeps = { pool };
+  app.get("/api/projects/:projectId/collections", knoveraAuth, createListSourceCollectionsHandler(sourceCollectionsDeps));
+  app.post("/api/projects/:projectId/collections/youtube", knoveraAuth, createAddYouTubeCollectionHandler(sourceCollectionsDeps));
+  app.get("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createGetSourceCollectionHandler(sourceCollectionsDeps));
+  app.post("/api/projects/:projectId/collections/:collectionId/refresh", knoveraAuth, createRefreshSourceCollectionHandler(sourceCollectionsDeps));
+  app.delete("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createDeleteSourceCollectionHandler(sourceCollectionsDeps));
 
   // Phase 4H-B — project-source analysis (YouTube; Discord as of Phase 4I).
   // Same jobTrigger as lesson-analysis enqueueing (one Cloud Run Job, one
@@ -224,6 +275,14 @@ export function createApp(config: AppConfig): Express {
     "/api/projects/:projectId/sources/:sourceId/retry",
     knoveraAuth,
     createRetryProjectSourceAnalysisHandler(projectSourceAnalysisDeps),
+  );
+  // Phase 4K — explicit "Analyze Selected": orchestrates the SAME per-item
+  // job-creation logic as the single-item route above, over a
+  // caller-supplied list of sourceIds. Never a second analysis engine.
+  app.post(
+    "/api/projects/:projectId/sources/analyze-batch",
+    knoveraAuth,
+    createBatchAnalyzeProjectSourcesHandler(projectSourceAnalysisDeps),
   );
 
   // Phase 4J — Synthesis Sets: a persistent, named configuration of which

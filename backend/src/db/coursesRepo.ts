@@ -7,6 +7,8 @@ export interface CourseRow {
   slug: string;
   title: string;
   lastSyncedAt: Date | null;
+  /** Phase 4K — exposed so callers (http/routes/whopCourses.ts) can tell "unclaimed" from "claimed by a different project" before ever writing to it; null exactly matches the nullable courses.project_id column (Phase 4B). */
+  projectId: number | null;
 }
 
 export interface UpsertCourseInput {
@@ -23,6 +25,7 @@ function mapRow(row: {
   slug: string;
   title: string;
   last_synced_at: Date | null;
+  project_id: string | null;
 }): CourseRow {
   return {
     id: Number(row.id),
@@ -31,10 +34,11 @@ function mapRow(row: {
     slug: row.slug,
     title: row.title,
     lastSyncedAt: row.last_synced_at,
+    projectId: row.project_id == null ? null : Number(row.project_id),
   };
 }
 
-/** Inserts the course on first sync, or refreshes its metadata and `last_synced_at` on every sync after. */
+/** Inserts the course on first sync, or refreshes its metadata and `last_synced_at` on every sync after. Never touches project_id — course-to-project association is a separate, deliberate action (see http/routes/whopCourses.ts). */
 export async function upsertCourse(pool: Pool, input: UpsertCourseInput): Promise<CourseRow> {
   const result = await pool.query(
     `INSERT INTO courses (whop_course_id, whop_experience_id, slug, title, last_synced_at)
@@ -45,7 +49,7 @@ export async function upsertCourse(pool: Pool, input: UpsertCourseInput): Promis
        title = EXCLUDED.title,
        updated_at = now(),
        last_synced_at = now()
-     RETURNING id, whop_course_id, whop_experience_id, slug, title, last_synced_at`,
+     RETURNING id, whop_course_id, whop_experience_id, slug, title, last_synced_at, project_id`,
     [input.whopCourseId, input.whopExperienceId, input.slug, input.title],
   );
   return mapRow(result.rows[0]);
@@ -53,7 +57,7 @@ export async function upsertCourse(pool: Pool, input: UpsertCourseInput): Promis
 
 export async function getCourseByWhopId(pool: Pool, whopCourseId: string): Promise<CourseRow | null> {
   const result = await pool.query(
-    `SELECT id, whop_course_id, whop_experience_id, slug, title, last_synced_at
+    `SELECT id, whop_course_id, whop_experience_id, slug, title, last_synced_at, project_id
      FROM courses WHERE whop_course_id = $1`,
     [whopCourseId],
   );
@@ -69,7 +73,7 @@ export async function getCourseByWhopId(pool: Pool, whopCourseId: string): Promi
  */
 export async function getCoursesByProjectId(pool: Pool, projectId: number): Promise<CourseRow[]> {
   const result = await pool.query(
-    `SELECT id, whop_course_id, whop_experience_id, slug, title, last_synced_at
+    `SELECT id, whop_course_id, whop_experience_id, slug, title, last_synced_at, project_id
      FROM courses WHERE project_id = $1
      ORDER BY id ASC`,
     [projectId],

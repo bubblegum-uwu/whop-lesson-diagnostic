@@ -8,6 +8,8 @@ import { SourcesPage } from "./pages/SourcesPage";
 import { SynthesisPage } from "./pages/SynthesisPage";
 import { SynthesisSetsPage } from "./pages/SynthesisSetsPage";
 import { SynthesisSetDetailPage } from "./pages/SynthesisSetDetailPage";
+import { CollectionDetailPage } from "./pages/CollectionDetailPage";
+import { WhopCourseDetailPage } from "./pages/WhopCourseDetailPage";
 import { UsagePage } from "./pages/UsagePage";
 import type { FindWhopUserIdState } from "./components/FindWhopUserId";
 import {
@@ -564,6 +566,14 @@ export default function App() {
         <Route
           path="/projects/:projectId/synthesis-sets/:setId"
           element={<SynthesisSetDetailPage backendUrl={backendUrl} knoveraToken={knoveraToken} />}
+        />
+        <Route
+          path="/projects/:projectId/collections/:collectionId"
+          element={<CollectionDetailPage backendUrl={backendUrl} knoveraToken={knoveraToken} />}
+        />
+        <Route
+          path="/projects/:projectId/whop-courses/:courseId"
+          element={<WhopCourseDetailPage backendUrl={backendUrl} knoveraToken={knoveraToken} />}
         />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />

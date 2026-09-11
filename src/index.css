@@ -2672,3 +2672,50 @@ button.kv-topnav-avatar:hover {
   height: 18px;
   cursor: pointer;
 }
+
+/* ---- Source Collections & Catalog (Phase 4K) --------------------------- */
+
+.knovera-provider-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--kv-space-3);
+  flex-wrap: wrap;
+  margin-top: var(--kv-space-2);
+}
+
+.knovera-batch-import-textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: 0.88rem;
+  padding: var(--kv-space-3);
+  border-radius: var(--kv-radius);
+  border: 1px solid var(--kv-border);
+  background: var(--kv-surface-2);
+  color: var(--kv-text);
+  resize: vertical;
+}
+
+.knovera-batch-import-results {
+  list-style: none;
+  margin: var(--kv-space-3) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kv-space-2);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.knovera-batch-import-results li {
+  display: flex;
+  align-items: center;
+  gap: var(--kv-space-3);
+  font-size: 0.85rem;
+}
+
+.knovera-batch-import-url {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}

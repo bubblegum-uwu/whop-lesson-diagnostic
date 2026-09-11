@@ -39,6 +39,8 @@ export interface ProjectSourceRow {
   durationSeconds: number | null;
   status: ProjectSourceStatus;
   errorMessage: string | null;
+  /** Phase 4K — the source_collections row this item was discovered through, or null for an à-la-carte item never imported via a collection (see 1789800000000_source-collections.sql). */
+  collectionId: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -47,6 +49,10 @@ export interface CreateYouTubeSourceInput {
   projectId: number;
   externalId: string;
   sourceUrl: string;
+  /** Phase 4K — set when created via channel discovery (see sourceCollectionsRepo.ts); omitted/null for an à-la-carte add, exactly like before. */
+  collectionId?: number | null;
+  /** Phase 4K — channel discovery already knows the video's title; à-la-carte add still never fetches one. */
+  title?: string | null;
 }
 
 export interface CreateDiscordSourceInput {
@@ -65,6 +71,7 @@ interface ProjectSourceDbRow {
   duration_seconds: number | null;
   status: string;
   error_message: string | null;
+  collection_id: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -80,13 +87,14 @@ function mapRow(row: ProjectSourceDbRow): ProjectSourceRow {
     durationSeconds: row.duration_seconds,
     status: row.status as ProjectSourceStatus,
     errorMessage: row.error_message,
+    collectionId: row.collection_id == null ? null : Number(row.collection_id),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
 const COLUMNS =
-  "id, project_id, provider, external_id, source_url, title, duration_seconds, status, error_message, created_at, updated_at";
+  "id, project_id, provider, external_id, source_url, title, duration_seconds, status, error_message, collection_id, created_at, updated_at";
 
 /**
  * Phase 4H-A — the ONLY writer of `project_sources` this phase ships.
@@ -106,29 +114,37 @@ const COLUMNS =
  * true`) without raising a raw unique-violation error to the caller, and
  * without a second transaction — two concurrent requests for the same
  * (project, video) can never both "win".
+ *
+ * Phase 4K — `collectionId`/`title` extend this for channel discovery
+ * without changing à-la-carte behavior at all (both default to null,
+ * identical to the pre-Phase-4K INSERT). When the same video already
+ * exists (added à-la-carte, or already a member of a DIFFERENT sync of
+ * the same collection), the conflict branch ADOPTS it into the collection
+ * — `collection_id = COALESCE(project_sources.collection_id, EXCLUDED.collection_id)`
+ * never clobbers an existing association, it only fills one in when the
+ * row had none — and backfills a NULL title the same way, but never
+ * touches `project_source_analyses`/`project_source_analysis_jobs`: this
+ * is the exact same row (same id), so its full analysis history is
+ * preserved automatically (Phase 4K spec sections 17/39).
  */
 export async function createYouTubeSource(
   pool: Pool,
   input: CreateYouTubeSourceInput,
 ): Promise<{ source: ProjectSourceRow; created: boolean }> {
+  const collectionId = input.collectionId ?? null;
+  const title = input.title ?? null;
   const inserted = await pool.query<ProjectSourceDbRow>(
-    `INSERT INTO project_sources (project_id, provider, external_id, source_url, title, duration_seconds, status)
-     VALUES ($1, 'YOUTUBE', $2, $3, NULL, NULL, 'READY')
-     ON CONFLICT (project_id, provider, external_id) DO NOTHING
-     RETURNING ${COLUMNS}`,
-    [input.projectId, input.externalId, input.sourceUrl],
+    `INSERT INTO project_sources (project_id, provider, external_id, source_url, title, duration_seconds, status, collection_id)
+     VALUES ($1, 'YOUTUBE', $2, $3, $4, NULL, 'READY', $5)
+     ON CONFLICT (project_id, provider, external_id) DO UPDATE SET
+       collection_id = COALESCE(project_sources.collection_id, EXCLUDED.collection_id),
+       title = COALESCE(project_sources.title, EXCLUDED.title),
+       updated_at = now()
+     RETURNING ${COLUMNS}, (xmax = 0) AS inserted`,
+    [input.projectId, input.externalId, input.sourceUrl, title, collectionId],
   );
-  if (inserted.rows[0]) {
-    return { source: mapRow(inserted.rows[0]), created: true };
-  }
-
-  const existing = await pool.query<ProjectSourceDbRow>(
-    `SELECT ${COLUMNS} FROM project_sources WHERE project_id = $1 AND provider = 'YOUTUBE' AND external_id = $2`,
-    [input.projectId, input.externalId],
-  );
-  // The row must exist — the ON CONFLICT above only fires because a row
-  // matching this exact (project_id, provider, external_id) already does.
-  return { source: mapRow(existing.rows[0]), created: false };
+  const row = inserted.rows[0] as ProjectSourceDbRow & { inserted: boolean };
+  return { source: mapRow(row), created: row.inserted };
 }
 
 /**

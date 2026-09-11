@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { WhopIcon, YouTubeIcon, DiscordIcon } from "../components/ProviderIcons";
 import { CourseTable, type CourseTableProps } from "../components/CourseTable";
@@ -9,6 +10,9 @@ import { ErrorResult } from "../components/ErrorResult";
 import { AnalyzeLesson } from "../components/AnalyzeLesson";
 import { AddYouTubeVideoDialog } from "../components/AddYouTubeVideoDialog";
 import { AddDiscordVideoDialog } from "../components/AddDiscordVideoDialog";
+import { BatchImportDialog } from "../components/BatchImportDialog";
+import { AddYouTubeChannelDialog } from "../components/AddYouTubeChannelDialog";
+import { ConnectWhopCourseDialog } from "../components/ConnectWhopCourseDialog";
 import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysisDrawer";
 import type { AnalysisSummary } from "../lib/courseApi";
 import type { DiagnosticDisplayPayload } from "../lib/diagnosticPayload";
@@ -28,6 +32,7 @@ import {
   ProjectSourceAnalysisError,
   type ProjectSourceAnalysisStatus,
 } from "../lib/projectSourceAnalysisApi";
+import { listSourceCollections, type CatalogCollectionSummary } from "../lib/catalogApi";
 
 /** Phase 4H-B — display labels for the job-status badge on a video source row. Falls back to "Added" for any status this map doesn't recognize (never blank). */
 const ANALYSIS_STATUS_LABELS: Record<string, string> = {
@@ -118,10 +123,15 @@ type SourcesLoadState =
  * only flip the provider card to "Not Connected" and offer Connect Whop.
  */
 export function SourcesPage(props: SourcesPageProps) {
+  const navigate = useNavigate();
   const { state: projectState } = useResolvedProject(props.backendUrl, props.knoveraToken);
   const [sourcesState, setSourcesState] = useState<SourcesLoadState>({ phase: "idle" });
   const [showAddYouTubeDialog, setShowAddYouTubeDialog] = useState(false);
   const [showAddDiscordDialog, setShowAddDiscordDialog] = useState(false);
+  const [batchImportProvider, setBatchImportProvider] = useState<"YOUTUBE" | "DISCORD" | null>(null);
+  const [showAddYouTubeChannelDialog, setShowAddYouTubeChannelDialog] = useState(false);
+  const [showConnectWhopCourseDialog, setShowConnectWhopCourseDialog] = useState(false);
+  const [collections, setCollections] = useState<CatalogCollectionSummary[]>([]);
   const [analysisStatuses, setAnalysisStatuses] = useState<Record<number, ProjectSourceAnalysisStatus>>({});
   const [analyzingSourceId, setAnalyzingSourceId] = useState<number | null>(null);
   const [analysisActionError, setAnalysisActionError] = useState<string | null>(null);
@@ -152,8 +162,32 @@ export function SourcesPage(props: SourcesPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
 
-  const whopSource: WhopProjectSource | undefined =
-    sourcesState.phase === "loaded" ? sourcesState.sources.find((s): s is WhopProjectSource => s.provider === "WHOP") : undefined;
+  async function loadCollections(url: string, token: string, projectId: number) {
+    try {
+      setCollections(await listSourceCollections(url, token, projectId));
+    } catch {
+      // Best-effort — the flat video-source list below still shows every
+      // source regardless of collection, so a transient collections-list
+      // failure never hides content, only the grouped-by-channel view.
+    }
+  }
+
+  useEffect(() => {
+    if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
+      setCollections([]);
+      return;
+    }
+    void loadCollections(props.backendUrl, props.knoveraToken, projectState.project.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectState, props.backendUrl, props.knoveraToken]);
+
+  // Phase 4K — a project may now own any number of Whop courses (see
+  // http/routes/whopCourses.ts); GET /api/projects/:projectId/sources
+  // already returns one WhopProjectSource entry per course (backend was
+  // already multi-course-capable here, see projectSources.ts), so this
+  // only needed to change from .find() (one) to .filter() (all).
+  const whopSources: WhopProjectSource[] =
+    sourcesState.phase === "loaded" ? sourcesState.sources.filter((s): s is WhopProjectSource => s.provider === "WHOP") : [];
   // Phase 4H-A/4I — this project's persisted video sources (YouTube and, as
   // of Phase 4I, Discord), independent of whopSource above: a project can
   // have video sources with zero Whop courses, and vice versa (see the
@@ -173,7 +207,7 @@ export function SourcesPage(props: SourcesPageProps) {
   // Whop-specific CourseTable/DashboardSummary block and Diagnostic Tools
   // below — both are Whop utilities, unaffected by whether this project
   // also has video sources.
-  const confirmedNeverHadWhopSource = sourcesState.phase === "loaded" && !whopSource;
+  const confirmedNeverHadWhopSource = sourcesState.phase === "loaded" && whopSources.length === 0;
   // The top empty-state box, by contrast, is about this project having NO
   // source at all — a project with video sources but no Whop course must
   // never show "No sources connected yet."
@@ -184,6 +218,12 @@ export function SourcesPage(props: SourcesPageProps) {
   function refreshSources() {
     if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) {
       void loadSources(props.backendUrl, props.knoveraToken, resolvedProjectId, { current: false });
+    }
+  }
+
+  function refreshCollections() {
+    if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) {
+      void loadCollections(props.backendUrl, props.knoveraToken, resolvedProjectId);
     }
   }
 
@@ -275,15 +315,24 @@ export function SourcesPage(props: SourcesPageProps) {
             )}
           </div>
           <p className="knovera-provider-desc">
-            {whopSource
-              ? `${whopSource.name} — course lessons, synced and analyzed via Whop.`
+            {whopSources.length > 0
+              ? `${whopSources.length} course${whopSources.length === 1 ? "" : "s"} connected — lessons synced and analyzed via Whop.`
               : sourcesState.phase !== "loaded" && whopLiveConnected
                 ? `${props.courseTitle ?? "The Trading Accelerator"} — course lessons, synced and analyzed via Whop.`
                 : "Connect a Whop course to sync and analyze its lessons."}
           </p>
-          {!whopLiveConnected && (
+          {!whopLiveConnected ? (
             <button type="button" className="knovera-provider-connect-button" onClick={props.onSignIn}>
               Connect Whop
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="knovera-provider-connect-button"
+              onClick={() => setShowConnectWhopCourseDialog(true)}
+              disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+            >
+              + Connect Another Course
             </button>
           )}
         </div>
@@ -294,15 +343,33 @@ export function SourcesPage(props: SourcesPageProps) {
               <h3>YouTube</h3>
             </div>
           </div>
-          <p className="knovera-provider-desc">Add public YouTube videos to this project.</p>
-          <button
-            type="button"
-            className="knovera-provider-connect-button"
-            onClick={() => setShowAddYouTubeDialog(true)}
-            disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
-          >
-            Add YouTube Video
-          </button>
+          <p className="knovera-provider-desc">Add public YouTube videos or a whole channel to this project.</p>
+          <div className="knovera-provider-card-actions">
+            <button
+              type="button"
+              className="knovera-provider-connect-button"
+              onClick={() => setShowAddYouTubeDialog(true)}
+              disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+            >
+              Add YouTube Video
+            </button>
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => setShowAddYouTubeChannelDialog(true)}
+              disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+            >
+              Add Channel
+            </button>
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => setBatchImportProvider("YOUTUBE")}
+              disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+            >
+              Bulk Import
+            </button>
+          </div>
         </div>
         <div className="kv-card knovera-provider-card">
           <div className="knovera-provider-card-top">
@@ -312,14 +379,24 @@ export function SourcesPage(props: SourcesPageProps) {
             </div>
           </div>
           <p className="knovera-provider-desc">Add a video attachment shared in Discord to this project.</p>
-          <button
-            type="button"
-            className="knovera-provider-connect-button"
-            onClick={() => setShowAddDiscordDialog(true)}
-            disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
-          >
-            Add Discord Video
-          </button>
+          <div className="knovera-provider-card-actions">
+            <button
+              type="button"
+              className="knovera-provider-connect-button"
+              onClick={() => setShowAddDiscordDialog(true)}
+              disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+            >
+              Add Discord Video
+            </button>
+            <button
+              type="button"
+              className="link-button"
+              onClick={() => setBatchImportProvider("DISCORD")}
+              disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+            >
+              Bulk Import
+            </button>
+          </div>
         </div>
       </div>
 
@@ -336,6 +413,63 @@ export function SourcesPage(props: SourcesPageProps) {
           <p>No sources connected yet.</p>
           <p>Connect Whop, add a YouTube video, or add a Discord video to add content.</p>
         </div>
+      )}
+
+      {whopSources.length > 0 && (
+        <>
+          <h2 className="knovera-section-title">Whop Courses</h2>
+          <div className="knovera-project-grid">
+            {whopSources.map((course) => (
+              <div key={course.courseId} className="kv-card knovera-project-card">
+                <div className="knovera-project-card-top">
+                  <div>
+                    <h2>{course.name}</h2>
+                    <p className="knovera-project-card-source">
+                      {course.lessonCount} lesson{course.lessonCount === 1 ? "" : "s"} · {course.analyzedLessonCount} analyzed
+                    </p>
+                  </div>
+                </div>
+                <div className="knovera-project-card-footer">
+                  <button type="button" className="knovera-open-link" onClick={() => navigate(`/projects/${resolvedProjectId}/whop-courses/${course.courseId}`)}>
+                    Open
+                    <span className="knovera-cta-arrow" aria-hidden="true">
+                      →
+                    </span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {collections.length > 0 && (
+        <>
+          <h2 className="knovera-section-title">Collections</h2>
+          <div className="knovera-project-grid">
+            {collections.map((collection) => (
+              <div key={collection.id} className="kv-card knovera-project-card">
+                <div className="knovera-project-card-top">
+                  <div>
+                    <h2>{collection.title}</h2>
+                    <p className="knovera-project-card-source">
+                      {collection.provider === "YOUTUBE" ? "YouTube Channel" : "Discord Collection"} · {collection.itemCount} item{collection.itemCount === 1 ? "" : "s"} · {collection.analyzedCount} analyzed
+                    </p>
+                    {collection.status === "SYNC_FAILED" && collection.sanitizedError && <p className="knovera-field-error">{collection.sanitizedError}</p>}
+                  </div>
+                </div>
+                <div className="knovera-project-card-footer">
+                  <button type="button" className="knovera-open-link" onClick={() => navigate(`/projects/${resolvedProjectId}/collections/${collection.id}`)}>
+                    Open
+                    <span className="knovera-cta-arrow" aria-hidden="true">
+                      →
+                    </span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
       )}
 
       {videoSources.length > 0 && (
@@ -488,6 +622,44 @@ export function SourcesPage(props: SourcesPageProps) {
           onClose={() => setShowAddDiscordDialog(false)}
           onAdded={() => {
             setShowAddDiscordDialog(false);
+            refreshSources();
+          }}
+        />
+      )}
+
+      {batchImportProvider && props.backendUrl && props.knoveraToken && resolvedProjectId != null && (
+        <BatchImportDialog
+          backendUrl={props.backendUrl}
+          knoveraToken={props.knoveraToken}
+          projectId={resolvedProjectId}
+          provider={batchImportProvider}
+          onClose={() => setBatchImportProvider(null)}
+          onImported={refreshSources}
+        />
+      )}
+
+      {showAddYouTubeChannelDialog && props.backendUrl && props.knoveraToken && resolvedProjectId != null && (
+        <AddYouTubeChannelDialog
+          backendUrl={props.backendUrl}
+          knoveraToken={props.knoveraToken}
+          projectId={resolvedProjectId}
+          onClose={() => setShowAddYouTubeChannelDialog(false)}
+          onAdded={() => {
+            setShowAddYouTubeChannelDialog(false);
+            refreshCollections();
+            refreshSources();
+          }}
+        />
+      )}
+
+      {showConnectWhopCourseDialog && props.backendUrl && props.knoveraToken && resolvedProjectId != null && (
+        <ConnectWhopCourseDialog
+          backendUrl={props.backendUrl}
+          knoveraToken={props.knoveraToken}
+          projectId={resolvedProjectId}
+          onClose={() => setShowConnectWhopCourseDialog(false)}
+          onConnected={() => {
+            setShowConnectWhopCourseDialog(false);
             refreshSources();
           }}
         />

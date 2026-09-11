@@ -222,3 +222,78 @@ describe("deleteProjectSource (Phase 4I durability fix — compensating cleanup)
     expect(await listProjectSourcesByProjectId(pool, projectB.id)).toHaveLength(1);
   });
 });
+
+describe("createYouTubeSource collection linkage (Phase 4K)", () => {
+  it("à-la-carte add (no collectionId) behaves exactly as before — collectionId stays null", async () => {
+    const project = await makeProject();
+    const { source, created } = await createYouTubeSource(pool, { projectId: project.id, externalId: randomId("vid").slice(0, 11).padEnd(11, "0"), sourceUrl: "https://www.youtube.com/watch?v=a" });
+    expect(created).toBe(true);
+    expect(source.collectionId).toBeNull();
+  });
+
+  it("channel-discovered add sets collectionId and title on first insert", async () => {
+    const project = await makeProject();
+    const result = await pool.query<{ id: string }>(
+      `INSERT INTO source_collections (project_id, provider, external_id, title, source_url) VALUES ($1, 'YOUTUBE', 'UCtest0000000000000000', 'Test Channel', 'https://x') RETURNING id`,
+      [project.id],
+    );
+    const collectionId = Number(result.rows[0].id);
+
+    const { source, created } = await createYouTubeSource(pool, {
+      projectId: project.id,
+      externalId: randomId("vid").slice(0, 11).padEnd(11, "0"),
+      sourceUrl: "https://www.youtube.com/watch?v=b",
+      collectionId,
+      title: "Discovered Video",
+    });
+    expect(created).toBe(true);
+    expect(source.collectionId).toBe(collectionId);
+    expect(source.title).toBe("Discovered Video");
+  });
+
+  it("DEDUPLICATION: an à-la-carte video later discovered by a channel is ADOPTED into the collection — same source id, analysis history untouched, never a duplicate row", async () => {
+    const project = await makeProject();
+    const externalId = randomId("vid").slice(0, 11).padEnd(11, "0");
+    const { source: alaCarteSource } = await createYouTubeSource(pool, { projectId: project.id, externalId, sourceUrl: "https://www.youtube.com/watch?v=c" });
+    expect(alaCarteSource.collectionId).toBeNull();
+
+    const collectionResult = await pool.query<{ id: string }>(
+      `INSERT INTO source_collections (project_id, provider, external_id, title, source_url) VALUES ($1, 'YOUTUBE', 'UCadopt00000000000000000', 'Adopting Channel', 'https://x') RETURNING id`,
+      [project.id],
+    );
+    const collectionId = Number(collectionResult.rows[0].id);
+
+    const { source: adopted, created } = await createYouTubeSource(pool, {
+      projectId: project.id,
+      externalId,
+      sourceUrl: "https://www.youtube.com/watch?v=c",
+      collectionId,
+      title: "Now Discovered",
+    });
+    expect(created).toBe(false); // adoption, not a fresh insert
+    expect(adopted.id).toBe(alaCarteSource.id); // SAME row — no duplicate
+    expect(adopted.collectionId).toBe(collectionId);
+    expect(adopted.title).toBe("Now Discovered"); // title was null, backfilled
+
+    const all = await listProjectSourcesByProjectId(pool, project.id);
+    expect(all.filter((s) => s.externalId === externalId)).toHaveLength(1);
+  });
+
+  it("REVERSE DEDUPLICATION: a channel-discovered video later submitted à-la-carte keeps its collection association — never clobbered back to null", async () => {
+    const project = await makeProject();
+    const collectionResult = await pool.query<{ id: string }>(
+      `INSERT INTO source_collections (project_id, provider, external_id, title, source_url) VALUES ($1, 'YOUTUBE', 'UCreverse0000000000000000', 'Reverse Channel', 'https://x') RETURNING id`,
+      [project.id],
+    );
+    const collectionId = Number(collectionResult.rows[0].id);
+    const externalId = randomId("vid").slice(0, 11).padEnd(11, "0");
+    const { source: discovered } = await createYouTubeSource(pool, { projectId: project.id, externalId, sourceUrl: "https://www.youtube.com/watch?v=d", collectionId, title: "Channel Video" });
+
+    // Re-submitted à-la-carte (no collectionId in the input, exactly what the single-URL add route sends).
+    const { source: resubmitted, created } = await createYouTubeSource(pool, { projectId: project.id, externalId, sourceUrl: "https://www.youtube.com/watch?v=d" });
+    expect(created).toBe(false);
+    expect(resubmitted.id).toBe(discovered.id);
+    expect(resubmitted.collectionId).toBe(collectionId); // still linked — never cleared
+    expect(resubmitted.title).toBe("Channel Video"); // never overwritten with null
+  });
+});
