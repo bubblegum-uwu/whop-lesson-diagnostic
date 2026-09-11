@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import type { Request } from "express";
 import { upsertCourse } from "../src/db/coursesRepo.js";
 import { syncLessons, type SyncLessonInput } from "../src/db/lessonsRepo.js";
@@ -6,7 +6,9 @@ import { createLessonAnalysis, type CreateLessonAnalysisInput } from "../src/db/
 import { createJob } from "../src/db/analysisJobsRepo.js";
 import { createSynthesisRun } from "../src/db/synthesisRunsRepo.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
-import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, type ProjectSource } from "../src/http/routes/projectSources.js";
+import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, createAddDiscordSourceHandler, type ProjectSource } from "../src/http/routes/projectSources.js";
+import { getProjectSourceMedia } from "../src/db/projectSourceMediaRepo.js";
+import { DiscordAttachmentDownloadError } from "../src/discord/downloadDiscordAttachment.js";
 import { listProjects } from "../src/db/projectsRepo.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 import { makeResponse } from "./helpers/httpMocks.js";
@@ -352,6 +354,183 @@ describe("POST /api/projects/:projectId/sources/youtube (Phase 4H-A)", () => {
     };
 
     await callAddYouTubeHandler(String(project.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    const after = {
+      courses: await countRows("courses"),
+      lessons: await countRows("lessons"),
+      analysisJobs: await countRows("analysis_jobs"),
+      lessonAnalyses: await countRows("lesson_analyses"),
+      synthesisRuns: await countRows("synthesis_runs"),
+      usageRecords: await countRows("usage_records"),
+    };
+    expect(after).toEqual(before);
+  });
+});
+
+const DISCORD_URL = "https://cdn.discordapp.com/attachments/123456789012345678/987654321098765432/clip.mp4?ex=1&is=2&hm=3";
+
+/** A stand-in for the real HTTP downloader — no test in this file ever makes a real network call. */
+function fakeDownloadDiscordAttachment(overrides: Partial<{ content: Buffer; contentType: string; byteSize: number }> = {}) {
+  return vi.fn(async () => ({
+    content: Buffer.from("fake-video-bytes"),
+    contentType: "video/mp4",
+    byteSize: 16,
+    ...overrides,
+  }));
+}
+
+async function callAddDiscordHandler(
+  projectId: string,
+  url: unknown,
+  downloadDiscordAttachment: ReturnType<typeof fakeDownloadDiscordAttachment> = fakeDownloadDiscordAttachment(),
+) {
+  const handler = createAddDiscordSourceHandler({ pool, downloadDiscordAttachment });
+  const { res, statusCode, body } = makeResponse();
+  await handler({ params: { projectId }, body: { url } } as unknown as Request, res);
+  return {
+    statusCode: statusCode(),
+    body: body() as { source?: ProjectSource; duplicate?: boolean; error?: { type: string; message: string } },
+  };
+}
+
+describe("POST /api/projects/:projectId/sources/discord (Phase 4I)", () => {
+  it("A: authenticated (handler-level) source creation succeeds with a 201 and the canonical source shape", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), DISCORD_URL);
+
+    expect(statusCode).toBe(201);
+    expect(body.duplicate).toBe(false);
+    expect(body.source?.provider).toBe("DISCORD");
+    expect(body.source?.sourceType).toBe("VIDEO");
+    expect(body.source?.externalId).toBe("987654321098765432");
+    expect(body.source?.sourceUrl).toBe(DISCORD_URL);
+    expect(body.source?.title).toBeNull();
+    expect(body.source?.status).toBe("READY");
+  });
+
+  it("durably persists the downloaded video bytes at add-time (Phase 4I durability fix), while the pasted URL is still fresh", async () => {
+    const project = await makeProject();
+    const download = fakeDownloadDiscordAttachment({ content: Buffer.from("real-bytes-here"), contentType: "video/quicktime", byteSize: 15 });
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), DISCORD_URL, download);
+
+    expect(statusCode).toBe(201);
+    expect(download).toHaveBeenCalledWith(DISCORD_URL);
+    const media = await getProjectSourceMedia(pool, body.source!.id);
+    expect(media?.content.toString()).toBe("real-bytes-here");
+    expect(media?.contentType).toBe("video/quicktime");
+    expect(media?.byteSize).toBe(15);
+  });
+
+  it("a download failure at add-time deletes the just-created source (compensating cleanup) and returns a clear, retryable error — never a broken un-analyzable source", async () => {
+    const project = await makeProject();
+    const failingDownload = vi.fn(async () => {
+      throw new DiscordAttachmentDownloadError("Could not download this Discord attachment (HTTP 403) — the link may already be invalid or expired.");
+    });
+
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), DISCORD_URL, failingDownload);
+
+    expect(statusCode).toBe(502);
+    expect(body.error?.type).toBe("discord_media_unavailable");
+    expect(body.error?.message).toMatch(/invalid or expired/);
+
+    const { body: sourcesBody } = await callHandler(String(project.id));
+    expect(sourcesBody.sources).toEqual([]);
+  });
+
+  it("D: rejects a malformed URL with a deterministic 400", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), "not a url");
+    expect(statusCode).toBe(400);
+    expect(body.error?.type).toBe("invalid_discord_url");
+  });
+
+  it("D: rejects a non-Discord URL with a deterministic 400", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), "https://example.com/video.mp4");
+    expect(statusCode).toBe(400);
+    expect(body.error?.type).toBe("invalid_discord_url");
+  });
+
+  it("D: rejects a non-video Discord attachment (e.g. an image) with a deterministic 400", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddDiscordHandler(
+      String(project.id),
+      "https://cdn.discordapp.com/attachments/123456789012345678/987654321098765432/screenshot.png",
+    );
+    expect(statusCode).toBe(400);
+    expect(body.error?.type).toBe("invalid_discord_url");
+  });
+
+  it("rejects a missing url body with a deterministic 400", async () => {
+    const project = await makeProject();
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), undefined);
+    expect(statusCode).toBe(400);
+    expect(body.error?.type).toBe("invalid_request");
+  });
+
+  it("returns a deterministic 404 for an unknown project", async () => {
+    const { statusCode, body } = await callAddDiscordHandler("999999999", DISCORD_URL);
+    expect(statusCode).toBe(404);
+    expect(body.error?.type).toBe("project_not_found");
+  });
+
+  it("duplicate in same project is deterministic — second add returns 200 with duplicate: true and the same source id", async () => {
+    const project = await makeProject();
+    const first = await callAddDiscordHandler(String(project.id), DISCORD_URL);
+    const second = await callAddDiscordHandler(String(project.id), DISCORD_URL);
+
+    expect(first.statusCode).toBe(201);
+    expect(second.statusCode).toBe(200);
+    expect(second.body.duplicate).toBe(true);
+    expect(second.body.source?.id).toBe(first.body.source?.id);
+  });
+
+  it("C: Project A/B isolation — a Discord source added to Project A never appears in Project B's GET /sources", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    await callAddDiscordHandler(String(projectA.id), DISCORD_URL);
+
+    const { body: bodyA } = await callHandler(String(projectA.id));
+    const { body: bodyB } = await callHandler(String(projectB.id));
+
+    expect(bodyA.sources).toHaveLength(1);
+    expect(bodyA.sources![0].provider).toBe("DISCORD");
+    expect(bodyB.sources).toEqual([]);
+  });
+
+  it("R: a GENERAL_KNOWLEDGE project can add a Discord source (storage/listing only — analysis gating is a separate concern)", async () => {
+    const project = await makeProject("GENERAL_KNOWLEDGE");
+    const { statusCode } = await callAddDiscordHandler(String(project.id), DISCORD_URL);
+    expect(statusCode).toBe(201);
+  });
+
+  it("Q: GET /sources returns Whop, YouTube, and Discord sources coherently in one list", async () => {
+    const project = await makeProject();
+    await makeCourse(project.id, { title: "The Trading Accelerator" });
+    await callAddYouTubeHandler(String(project.id), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    await callAddDiscordHandler(String(project.id), DISCORD_URL);
+
+    const { statusCode, body } = await callHandler(String(project.id));
+    expect(statusCode).toBe(200);
+    expect(body.sources).toHaveLength(3);
+    const providers = body.sources!.map((s) => s.provider).sort();
+    expect(providers).toEqual(["DISCORD", "WHOP", "YOUTUBE"]);
+  });
+
+  it("S/T/U/V/W: adding a Discord source never creates a course, lesson, analysis_job, lesson_analyses, synthesis_runs, or usage_records row", async () => {
+    const project = await makeProject();
+    const countRows = async (table: string): Promise<number> =>
+      Number((await pool.query<{ count: string }>(`SELECT COUNT(*) AS count FROM ${table}`)).rows[0].count);
+    const before = {
+      courses: await countRows("courses"),
+      lessons: await countRows("lessons"),
+      analysisJobs: await countRows("analysis_jobs"),
+      lessonAnalyses: await countRows("lesson_analyses"),
+      synthesisRuns: await countRows("synthesis_runs"),
+      usageRecords: await countRows("usage_records"),
+    };
+
+    await callAddDiscordHandler(String(project.id), DISCORD_URL);
 
     const after = {
       courses: await countRows("courses"),

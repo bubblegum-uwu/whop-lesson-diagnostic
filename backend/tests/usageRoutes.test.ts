@@ -4,7 +4,7 @@ import { upsertCourse } from "../src/db/coursesRepo.js";
 import { syncLessons, listLessons } from "../src/db/lessonsRepo.js";
 import { createLessonAnalysis } from "../src/db/lessonAnalysesRepo.js";
 import { createSynthesisRun } from "../src/db/synthesisRunsRepo.js";
-import { createYouTubeSource } from "../src/db/projectSourcesRepo.js";
+import { createYouTubeSource, createDiscordSource } from "../src/db/projectSourcesRepo.js";
 import { createProjectSourceAnalysis } from "../src/db/projectSourceAnalysesRepo.js";
 import { createGetUsageHandler } from "../src/http/routes/usage.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
@@ -145,13 +145,20 @@ async function makeAnalyzedLesson(courseId: number, opts: { cost: number; comple
   });
 }
 
-/** Phase 4H-B — a project_source_analyses row with explicit cost/timestamp, mirroring makeAnalyzedLesson's shape for the YouTube path. */
-async function makeAnalyzedProjectSource(projectId: number, opts: { cost: number; completedAt: Date }) {
-  const { source } = await createYouTubeSource(pool, {
-    projectId,
-    externalId: randomId("vid").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 11).padEnd(11, "0"),
-    sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  });
+/** Phase 4H-B — a project_source_analyses row with explicit cost/timestamp, mirroring makeAnalyzedLesson's shape for the YouTube path. Phase 4I: `provider` lets the same helper prove Discord attributes usage identically (the query never filters by provider). */
+async function makeAnalyzedProjectSource(projectId: number, opts: { cost: number; completedAt: Date; provider?: "YOUTUBE" | "DISCORD" }) {
+  const { source } =
+    (opts.provider ?? "YOUTUBE") === "DISCORD"
+      ? await createDiscordSource(pool, {
+          projectId,
+          externalId: randomId("attach"),
+          sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1&is=2&hm=3",
+        })
+      : await createYouTubeSource(pool, {
+          projectId,
+          externalId: randomId("vid").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 11).padEnd(11, "0"),
+          sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        });
   const jobId = (
     await pool.query(`INSERT INTO project_source_analysis_jobs (project_source_id, analysis_fingerprint, status) VALUES ($1, $2, 'COMPLETED') RETURNING job_id`, [
       source.id,
@@ -500,6 +507,32 @@ describe("GET /api/usage", () => {
     expect(row.analysisCost).toBe(1.25);
     expect(row.lessonsAnalyzed).toBe(1);
     expect(row.sourcesAnalyzed).toBe(1);
+  });
+
+  it("W/X: a Discord (project-source) analysis cost is attributed exactly once, combined with Whop/YouTube in the same analysisCost total (Phase 4I)", async () => {
+    const project = await makeProject();
+    const course = await makeCourse(project.id);
+    await makeAnalyzedLesson(course.id, { cost: 1.0, completedAt: midCurrentMonth() });
+    await makeAnalyzedProjectSource(project.id, { cost: 0.25, completedAt: midCurrentMonth(), provider: "YOUTUBE" });
+    await makeAnalyzedProjectSource(project.id, { cost: 0.4, completedAt: midCurrentMonth(), provider: "DISCORD" });
+
+    const { body } = await callUsage();
+    const row = findProject(body as unknown as UsageBody, project.id)!;
+    expect(row.analysisCost).toBeCloseTo(1.65, 5);
+    expect(row.lessonsAnalyzed).toBe(1);
+    expect(row.sourcesAnalyzed).toBe(2); // one YouTube + one Discord project_source, counted the same way
+  });
+
+  it("Y: a different project's Discord analysis cost is never attributed to this project", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    await makeAnalyzedProjectSource(projectB.id, { cost: 0.75, completedAt: midCurrentMonth(), provider: "DISCORD" });
+
+    const { body } = await callUsage();
+    const rowA = findProject(body as unknown as UsageBody, projectA.id);
+    const rowB = findProject(body as unknown as UsageBody, projectB.id)!;
+    expect(rowA?.analysisCost ?? 0).toBe(0);
+    expect(rowB.analysisCost).toBe(0.75);
   });
 
   it("U: YouTube analysis cost is never double-counted — summed exactly once per project_source_analyses row, no separate usage-records-equivalent table exists to duplicate it", async () => {

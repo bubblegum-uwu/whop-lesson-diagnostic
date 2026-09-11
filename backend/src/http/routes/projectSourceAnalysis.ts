@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
 import { getProjectById } from "../../db/projectsRepo.js";
-import { getProjectSourceById } from "../../db/projectSourcesRepo.js";
+import { getProjectSourceById, ANALYZABLE_PROJECT_SOURCE_PROVIDERS } from "../../db/projectSourcesRepo.js";
 import {
   createJob,
   getLatestJobForProjectSource,
@@ -71,7 +71,7 @@ export function createAnalyzeProjectSourceHandler(deps: ProjectSourceAnalysisRou
     }
     const { project, source } = resolved;
 
-    if (source.provider !== "YOUTUBE") {
+    if (!ANALYZABLE_PROJECT_SOURCE_PROVIDERS.has(source.provider)) {
       res.status(400).json({ error: { message: "This source's provider does not support analysis yet.", type: "unsupported_provider" } });
       return;
     }

@@ -1,10 +1,10 @@
-import type { YouTubeProjectSource } from "../lib/sourcesApi";
+import type { YouTubeProjectSource, DiscordProjectSource } from "../lib/sourcesApi";
 import type { ProjectSourceAnalysis, ProjectSourceAnalysisJob } from "../lib/projectSourceAnalysisApi";
 import { isKnowledgeItemScoped, type KnowledgeCategory, type KnowledgeItem, type LessonExample, type LessonKnowledge } from "../lib/courseApi";
 
 export interface ProjectSourceAnalysisDrawerProps {
   /** null closes the drawer. */
-  source: YouTubeProjectSource | null;
+  source: YouTubeProjectSource | DiscordProjectSource | null;
   job: ProjectSourceAnalysisJob | null;
   analysis: ProjectSourceAnalysis | null;
   loading: boolean;
@@ -21,8 +21,12 @@ export interface ProjectSourceAnalysisDrawerProps {
  * completely unaffected. Deliberately simpler than the full 15-category
  * Whop drawer (no Instructor Heuristics/Conflicts breakout) while still
  * exposing every category of Phase 3.5A content. Never shows a fake
- * lesson/course identity — the header always reads "YouTube Video".
+ * lesson/course identity — the header reads "YouTube Video" or "Discord
+ * Video" per source.provider (Phase 4I), never a fabricated one.
  */
+
+const PROVIDER_LABELS = { YOUTUBE: "YouTube Video", DISCORD: "Discord Video" } as const;
+const PROVIDER_LINK_LABELS = { YOUTUBE: "Open on YouTube", DISCORD: "Open Attachment" } as const;
 
 const KNOWLEDGE_CATEGORY_SECTIONS: { key: KnowledgeCategory; label: string }[] = [
   { key: "market_context", label: "Market Context" },
@@ -165,7 +169,7 @@ export function ProjectSourceAnalysisDrawer({ source, job, analysis, loading, on
       <div className="lesson-drawer" role="dialog" aria-modal="true" aria-label={`Analysis for ${title}`}>
         <div className="drawer-header">
           <div>
-            <p className="knovera-youtube-source-label">YouTube Video</p>
+            <p className="knovera-youtube-source-label">{PROVIDER_LABELS[source.provider]}</p>
             <h2 className="drawer-title">{title}</h2>
           </div>
           <button className="drawer-close" onClick={onClose} aria-label="Close analysis panel">
@@ -191,7 +195,7 @@ export function ProjectSourceAnalysisDrawer({ source, job, analysis, loading, on
 
           <div className="detail-actions">
             <a href={source.sourceUrl} target="_blank" rel="noreferrer" className="link-button">
-              Open on YouTube
+              {PROVIDER_LINK_LABELS[source.provider]}
             </a>
           </div>
 

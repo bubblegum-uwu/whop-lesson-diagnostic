@@ -5,11 +5,26 @@ import type { Pool } from "pg";
  * 1789400000000_project-sources.sql migration's comment for why `provider`
  * is plain TEXT in the schema rather than a CHECK/ENUM: the allow-listing
  * of supported providers lives here, in application code, instead.
+ *
+ * Phase 4I adds 'DISCORD' here, exactly as that migration comment
+ * anticipated — no migration required, purely an application-code
+ * widening.
  */
-export type ProjectSourceProvider = "YOUTUBE";
+export type ProjectSourceProvider = "YOUTUBE" | "DISCORD";
 
-/** Phase 4I adds 'DISCORD' here, not in a migration — see the schema comment. */
-export const SUPPORTED_PROJECT_SOURCE_PROVIDERS: ReadonlySet<string> = new Set<ProjectSourceProvider>(["YOUTUBE"]);
+export const SUPPORTED_PROJECT_SOURCE_PROVIDERS: ReadonlySet<string> = new Set<ProjectSourceProvider>(["YOUTUBE", "DISCORD"]);
+
+/**
+ * Phase 4I — providers whose sources can be analyzed via the generic
+ * project-source analysis pipeline (see http/routes/projectSourceAnalysis.ts
+ * and worker/projectSourceAnalysisLoop.ts). Every currently-supported
+ * provider is analyzable today; kept as its own named set (rather than
+ * reusing SUPPORTED_PROJECT_SOURCE_PROVIDERS directly at each call site) so
+ * a future provider that's storable-but-not-yet-analyzable (mirroring how
+ * GENERAL_KNOWLEDGE projects can store but not analyze YouTube/Discord
+ * sources today) doesn't require touching every analysis call site.
+ */
+export const ANALYZABLE_PROJECT_SOURCE_PROVIDERS: ReadonlySet<string> = new Set<ProjectSourceProvider>(["YOUTUBE", "DISCORD"]);
 
 /** Source-record readiness, never analysis readiness — Phase 4H-A never runs an analysis, so every row it creates is READY the moment it's inserted. */
 export type ProjectSourceStatus = "READY" | "FAILED";
@@ -29,6 +44,12 @@ export interface ProjectSourceRow {
 }
 
 export interface CreateYouTubeSourceInput {
+  projectId: number;
+  externalId: string;
+  sourceUrl: string;
+}
+
+export interface CreateDiscordSourceInput {
   projectId: number;
   externalId: string;
   sourceUrl: string;
@@ -110,6 +131,40 @@ export async function createYouTubeSource(
   return { source: mapRow(existing.rows[0]), created: false };
 }
 
+/**
+ * Phase 4I — the second project_sources writer, mirroring
+ * createYouTubeSource exactly (same NULL title/duration, same READY
+ * status, same ON CONFLICT DO NOTHING race-safety). `sourceUrl` here is
+ * the exact, verbatim Discord CDN URL (signature included) — see
+ * lib/discordUrl.ts's doc comment on why it can't be normalized down to
+ * an id the way YouTube's can. This URL is used ONLY once, immediately
+ * after this call, to durably capture the video's bytes (see
+ * discord/downloadDiscordAttachment.ts /
+ * db/projectSourceMediaRepo.ts) — it is never relied on again afterward,
+ * since its signature expires and cannot be reconstructed later.
+ */
+export async function createDiscordSource(
+  pool: Pool,
+  input: CreateDiscordSourceInput,
+): Promise<{ source: ProjectSourceRow; created: boolean }> {
+  const inserted = await pool.query<ProjectSourceDbRow>(
+    `INSERT INTO project_sources (project_id, provider, external_id, source_url, title, duration_seconds, status)
+     VALUES ($1, 'DISCORD', $2, $3, NULL, NULL, 'READY')
+     ON CONFLICT (project_id, provider, external_id) DO NOTHING
+     RETURNING ${COLUMNS}`,
+    [input.projectId, input.externalId, input.sourceUrl],
+  );
+  if (inserted.rows[0]) {
+    return { source: mapRow(inserted.rows[0]), created: true };
+  }
+
+  const existing = await pool.query<ProjectSourceDbRow>(
+    `SELECT ${COLUMNS} FROM project_sources WHERE project_id = $1 AND provider = 'DISCORD' AND external_id = $2`,
+    [input.projectId, input.externalId],
+  );
+  return { source: mapRow(existing.rows[0]), created: false };
+}
+
 /** Every source this project owns, across all providers — scoped by project_id alone, never a global fallback. */
 export async function listProjectSourcesByProjectId(pool: Pool, projectId: number): Promise<ProjectSourceRow[]> {
   const result = await pool.query<ProjectSourceDbRow>(
@@ -129,4 +184,20 @@ export async function listProjectSourcesByProjectId(pool: Pool, projectId: numbe
 export async function getProjectSourceById(pool: Pool, id: number): Promise<ProjectSourceRow | null> {
   const result = await pool.query<ProjectSourceDbRow>(`SELECT ${COLUMNS} FROM project_sources WHERE id = $1`, [id]);
   return result.rows[0] ? mapRow(result.rows[0]) : null;
+}
+
+/**
+ * Phase 4I durability fix — the ONE compensating-cleanup use case this
+ * writer exists for: createAddDiscordSourceHandler creates a project_source
+ * row, then immediately attempts to durably capture its video bytes (see
+ * project_source_media). If that capture fails, the just-created row would
+ * be permanently unanalyzable (its media never captured, and its
+ * originally-pasted signed URL likely stale by the time anyone retries),
+ * so the route deletes it here rather than leaving a broken row behind —
+ * the user simply re-submits with a fresh link. Never used to delete a
+ * source that has ever successfully completed creation with its media
+ * intact.
+ */
+export async function deleteProjectSource(pool: Pool, id: number): Promise<void> {
+  await pool.query(`DELETE FROM project_sources WHERE id = $1`, [id]);
 }

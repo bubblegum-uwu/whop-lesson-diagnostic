@@ -1,6 +1,9 @@
 import { describe, it, expect, afterAll } from "vitest";
 import {
   createYouTubeSource,
+  createDiscordSource,
+  deleteProjectSource,
+  getProjectSourceById,
   listProjectSourcesByProjectId,
   SUPPORTED_PROJECT_SOURCE_PROVIDERS,
 } from "../src/db/projectSourcesRepo.js";
@@ -21,8 +24,8 @@ async function makeProject(projectType: "TRADING_STRATEGIES" | "GENERAL_KNOWLEDG
 }
 
 describe("SUPPORTED_PROJECT_SOURCE_PROVIDERS", () => {
-  it("allow-lists exactly YOUTUBE in Phase 4H-A (never DISCORD, never WHOP)", () => {
-    expect(Array.from(SUPPORTED_PROJECT_SOURCE_PROVIDERS)).toEqual(["YOUTUBE"]);
+  it("allow-lists YOUTUBE and, as of Phase 4I, DISCORD (never WHOP — that path is courses.project_id, not a project_sources row)", () => {
+    expect(Array.from(SUPPORTED_PROJECT_SOURCE_PROVIDERS).sort()).toEqual(["DISCORD", "YOUTUBE"]);
   });
 });
 
@@ -136,5 +139,86 @@ describe("listProjectSourcesByProjectId", () => {
     expect(created).toBe(true);
     const sources = await listProjectSourcesByProjectId(pool, project.id);
     expect(sources).toHaveLength(1);
+  });
+});
+
+const DISCORD_URL = "https://cdn.discordapp.com/attachments/123456789012345678/987654321098765432/clip.mp4?ex=1&is=2&hm=3";
+
+describe("createDiscordSource (Phase 4I)", () => {
+  it("inserts a new project_sources row with provider DISCORD, status READY, and no title/duration", async () => {
+    const project = await makeProject();
+    const { source, created } = await createDiscordSource(pool, {
+      projectId: project.id,
+      externalId: "987654321098765432",
+      sourceUrl: DISCORD_URL,
+    });
+
+    expect(created).toBe(true);
+    expect(source.projectId).toBe(project.id);
+    expect(source.provider).toBe("DISCORD");
+    expect(source.externalId).toBe("987654321098765432");
+    expect(source.sourceUrl).toBe(DISCORD_URL);
+    expect(source.title).toBeNull();
+    expect(source.durationSeconds).toBeNull();
+    expect(source.status).toBe("READY");
+  });
+
+  it("adding the same Discord attachment twice to the same project is a deterministic duplicate (created: false, same row)", async () => {
+    const project = await makeProject();
+    const first = await createDiscordSource(pool, { projectId: project.id, externalId: "dupAttach001", sourceUrl: DISCORD_URL });
+    const second = await createDiscordSource(pool, { projectId: project.id, externalId: "dupAttach001", sourceUrl: DISCORD_URL });
+
+    expect(first.created).toBe(true);
+    expect(second.created).toBe(false);
+    expect(second.source.id).toBe(first.source.id);
+  });
+
+  it("the same Discord attachment id is allowed in two different projects (identity is scoped per-project, same as YouTube)", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    const inA = await createDiscordSource(pool, { projectId: projectA.id, externalId: "sharedAttach1", sourceUrl: DISCORD_URL });
+    const inB = await createDiscordSource(pool, { projectId: projectB.id, externalId: "sharedAttach1", sourceUrl: DISCORD_URL });
+
+    expect(inA.created).toBe(true);
+    expect(inB.created).toBe(true);
+    expect(inA.source.id).not.toBe(inB.source.id);
+  });
+
+  it("YouTube and Discord sources with the same external_id string never collide — provider is part of the identity", async () => {
+    const project = await makeProject();
+    const yt = await createYouTubeSource(pool, { projectId: project.id, externalId: "sameIdString", sourceUrl: "https://www.youtube.com/watch?v=sameIdString" });
+    const disc = await createDiscordSource(pool, { projectId: project.id, externalId: "sameIdString", sourceUrl: DISCORD_URL });
+
+    expect(yt.created).toBe(true);
+    expect(disc.created).toBe(true);
+    expect(yt.source.id).not.toBe(disc.source.id);
+
+    const sources = await listProjectSourcesByProjectId(pool, project.id);
+    expect(sources).toHaveLength(2);
+    expect(sources.map((s) => s.provider).sort()).toEqual(["DISCORD", "YOUTUBE"]);
+  });
+});
+
+describe("deleteProjectSource (Phase 4I durability fix — compensating cleanup)", () => {
+  it("removes the source so it never appears again", async () => {
+    const project = await makeProject();
+    const { source } = await createDiscordSource(pool, { projectId: project.id, externalId: "toDelete1", sourceUrl: DISCORD_URL });
+
+    await deleteProjectSource(pool, source.id);
+
+    expect(await getProjectSourceById(pool, source.id)).toBeNull();
+    expect(await listProjectSourcesByProjectId(pool, project.id)).toEqual([]);
+  });
+
+  it("deleting one project's source never affects another project's sources", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    const { source: sourceA } = await createDiscordSource(pool, { projectId: projectA.id, externalId: "toDelete2", sourceUrl: DISCORD_URL });
+    await createDiscordSource(pool, { projectId: projectB.id, externalId: "keepThis1", sourceUrl: DISCORD_URL });
+
+    await deleteProjectSource(pool, sourceA.id);
+
+    expect(await listProjectSourcesByProjectId(pool, projectA.id)).toEqual([]);
+    expect(await listProjectSourcesByProjectId(pool, projectB.id)).toHaveLength(1);
   });
 });
