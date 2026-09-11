@@ -116,7 +116,8 @@ function toDiscordProjectSource(row: ProjectSourceRow): DiscordProjectSource {
 }
 
 /** Dispatches a raw project_sources row to its provider-specific response shape — the one place that mapping happens, so a new provider means one new branch here, never a change to the GET handler's own logic. */
-function toProjectSource(row: ProjectSourceRow): YouTubeProjectSource | DiscordProjectSource {
+/** Exported for reuse by http/routes/synthesisSets.ts, which needs the same provider-specific source shape for its detail view's member list — the one place this mapping happens, never duplicated. */
+export function toProjectSource(row: ProjectSourceRow): YouTubeProjectSource | DiscordProjectSource {
   return row.provider === "YOUTUBE" ? toYouTubeProjectSource(row) : toDiscordProjectSource(row);
 }
 

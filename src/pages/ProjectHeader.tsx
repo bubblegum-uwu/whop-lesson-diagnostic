@@ -65,6 +65,19 @@ export function ProjectHeader({ backendUrl, knoveraToken }: ProjectHeaderProps) 
         <NavLink to={`/projects/${linkId}/synthesis`} className={({ isActive }) => (isActive ? "knovera-project-tab active" : "knovera-project-tab")}>
           Synthesis
         </NavLink>
+        {/* Phase 4J — a distinct tab from "Synthesis" above on purpose: that
+            tab is the frozen Phase 3.5B Whop-only synthesis EXECUTION UI,
+            while this one is the new persistent source-grouping
+            CONFIGURATION UI (Synthesis Set != Synthesis Run — see the
+            synthesisSetsApi.ts doc comment). isActive matches this tab for
+            both the list and detail routes since both start with this
+            prefix. */}
+        <NavLink
+          to={`/projects/${linkId}/synthesis-sets`}
+          className={({ isActive }) => (isActive ? "knovera-project-tab active" : "knovera-project-tab")}
+        >
+          Synthesis Sets
+        </NavLink>
       </nav>
     </div>
   );

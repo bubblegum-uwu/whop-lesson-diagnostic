@@ -39,7 +39,11 @@ export function corsMiddleware(allowedOrigin: string) {
       res.setHeader("Access-Control-Allow-Origin", allowedOrigin);
       res.setHeader("Vary", "Origin");
       res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
-      res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+      // Phase 4J adds this app's first PATCH/DELETE routes (Synthesis Set
+      // rename/delete and membership removal) — GET/PATCH/DELETE must be
+      // allowed here or the browser's preflight blocks every one of those
+      // calls before the request is ever sent.
+      res.setHeader("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS");
     }
 
     if (req.method === "OPTIONS") {

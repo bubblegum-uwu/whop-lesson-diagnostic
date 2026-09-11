@@ -76,6 +76,18 @@ describe("corsMiddleware", () => {
     expect(next).toHaveBeenCalledOnce();
   });
 
+  it("allows GET/POST/PATCH/DELETE in Access-Control-Allow-Methods (Phase 4J's Synthesis Set routes are this app's first PATCH/DELETE endpoints)", () => {
+    const middleware = corsMiddleware(ALLOWED);
+    const req = { headers: { origin: ALLOWED }, method: "DELETE" };
+    const res = mockRes();
+    const next = vi.fn();
+
+    middleware(req, res as never, next);
+
+    const allowedMethods = res.headers["Access-Control-Allow-Methods"].split(",").map((m) => m.trim());
+    expect(allowedMethods).toEqual(expect.arrayContaining(["GET", "POST", "PATCH", "DELETE", "OPTIONS"]));
+  });
+
   it("short-circuits OPTIONS preflight requests with 204", () => {
     const middleware = corsMiddleware(ALLOWED);
     const req = { headers: { origin: ALLOWED }, method: "OPTIONS" };
