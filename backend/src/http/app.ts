@@ -25,6 +25,15 @@ import { createProjectSynthesisStatusHandler, createProjectSynthesizeHandler, cr
 import { createListProjectsHandler, createGetProjectHandler, createCreateProjectHandler } from "./routes/projects.js";
 import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, createAddDiscordSourceHandler } from "./routes/projectSources.js";
 import {
+  createListSynthesisSetsHandler,
+  createCreateSynthesisSetHandler,
+  createGetSynthesisSetHandler,
+  createUpdateSynthesisSetHandler,
+  createDeleteSynthesisSetHandler,
+  createAddSourceToSynthesisSetHandler,
+  createRemoveSourceFromSynthesisSetHandler,
+} from "./routes/synthesisSets.js";
+import {
   createAnalyzeProjectSourceHandler,
   createGetProjectSourceAnalysisHandler,
   createRetryProjectSourceAnalysisHandler,
@@ -215,6 +224,25 @@ export function createApp(config: AppConfig): Express {
     "/api/projects/:projectId/sources/:sourceId/retry",
     knoveraAuth,
     createRetryProjectSourceAnalysisHandler(projectSourceAnalysisDeps),
+  );
+
+  // Phase 4J — Synthesis Sets: a persistent, named configuration of which
+  // project_sources should be considered together, and its membership.
+  // Purely a configuration layer — creating a set, or adding/removing a
+  // source, never analyzes anything and never touches the existing
+  // synthesis engine (see http/routes/synthesisSets.ts's doc comments).
+  // Knovera auth only, never requireWhopConnected — same reasoning as
+  // every other project-source route above.
+  app.get("/api/projects/:projectId/synthesis-sets", knoveraAuth, createListSynthesisSetsHandler(projectsDeps));
+  app.post("/api/projects/:projectId/synthesis-sets", knoveraAuth, createCreateSynthesisSetHandler(projectsDeps));
+  app.get("/api/projects/:projectId/synthesis-sets/:setId", knoveraAuth, createGetSynthesisSetHandler(projectsDeps));
+  app.patch("/api/projects/:projectId/synthesis-sets/:setId", knoveraAuth, createUpdateSynthesisSetHandler(projectsDeps));
+  app.delete("/api/projects/:projectId/synthesis-sets/:setId", knoveraAuth, createDeleteSynthesisSetHandler(projectsDeps));
+  app.post("/api/projects/:projectId/synthesis-sets/:setId/sources", knoveraAuth, createAddSourceToSynthesisSetHandler(projectsDeps));
+  app.delete(
+    "/api/projects/:projectId/synthesis-sets/:setId/sources/:sourceId",
+    knoveraAuth,
+    createRemoveSourceFromSynthesisSetHandler(projectsDeps),
   );
 
   // Phase 4E — the project-aware counterpart to /api/course/synthesis*

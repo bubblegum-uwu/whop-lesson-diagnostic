@@ -2629,3 +2629,46 @@ button.kv-topnav-avatar:hover {
     font-size: 1.5rem;
   }
 }
+
+/* ---- Synthesis Sets (Phase 4J) ----------------------------------------- */
+
+.link-button.danger {
+  color: var(--kv-danger, #d9534f);
+}
+
+.knovera-synthesis-set-confirm-delete,
+.knovera-synthesis-set-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--kv-space-3);
+  flex-wrap: wrap;
+}
+
+.knovera-synthesis-set-rename-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kv-space-2);
+  padding: var(--kv-space-4);
+  margin-bottom: var(--kv-space-4);
+}
+
+.knovera-synthesis-set-rename-form label {
+  font-size: 0.78rem;
+  font-weight: 620;
+  color: var(--kv-text-muted);
+}
+
+.knovera-synthesis-set-source-checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--kv-space-3);
+  cursor: pointer;
+  min-width: 0;
+}
+
+.knovera-synthesis-set-source-checkbox input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}

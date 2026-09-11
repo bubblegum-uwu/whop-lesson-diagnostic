@@ -6,6 +6,8 @@ import { LoginPage } from "./pages/LoginPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { SourcesPage } from "./pages/SourcesPage";
 import { SynthesisPage } from "./pages/SynthesisPage";
+import { SynthesisSetsPage } from "./pages/SynthesisSetsPage";
+import { SynthesisSetDetailPage } from "./pages/SynthesisSetDetailPage";
 import { UsagePage } from "./pages/UsagePage";
 import type { FindWhopUserIdState } from "./components/FindWhopUserId";
 import {
@@ -554,6 +556,14 @@ export default function App() {
         <Route
           path="/projects/:projectId/synthesis"
           element={<SynthesisPage backendUrl={backendUrl} knoveraToken={knoveraToken} connected={courseState.connected} />}
+        />
+        <Route
+          path="/projects/:projectId/synthesis-sets"
+          element={<SynthesisSetsPage backendUrl={backendUrl} knoveraToken={knoveraToken} />}
+        />
+        <Route
+          path="/projects/:projectId/synthesis-sets/:setId"
+          element={<SynthesisSetDetailPage backendUrl={backendUrl} knoveraToken={knoveraToken} />}
         />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
