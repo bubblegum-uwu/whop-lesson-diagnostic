@@ -4,3 +4,7 @@ dist
 .env.*
 npm-debug.log
 *.tsbuildinfo
+
+# Manual-validation screenshots (per-phase acceptance testing) — captured
+# and visually inspected locally, deliberately never committed.
+/screenshots/
