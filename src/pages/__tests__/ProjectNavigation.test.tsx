@@ -66,7 +66,7 @@ describe("Project workspace navigation", () => {
   it("lists Whop (Not Connected, since this workspace has no live Whop connection), YouTube (functional, Add YouTube Video), and Discord (functional as of Phase 4I, Add Discord Video) as source providers", () => {
     renderProjectWorkspace("/projects/mastermind/sources");
     expect(screen.getByRole("heading", { name: "Whop" })).toBeInTheDocument();
-    expect(screen.getByText("Not Connected")).toBeInTheDocument();
+    expect(screen.getAllByText("Not Connected")[0]).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "YouTube" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Discord" })).toBeInTheDocument();
     expect(screen.queryByText("Coming Soon")).not.toBeInTheDocument();

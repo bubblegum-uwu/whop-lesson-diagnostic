@@ -249,11 +249,13 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
               </p>
             </div>
             <div className="knovera-synthesis-set-detail-actions">
-              {state.collection.provider === "YOUTUBE" && (
-                <button type="button" className="link-button" disabled={busy} onClick={() => void handleRefreshCollection()}>
-                  {busy ? "Refreshing…" : "Refresh"}
-                </button>
-              )}
+              {/* Phase 4K-B — refresh is now supported for both YouTube and
+                  Discord collections (http/routes/sourceCollections.ts's
+                  DISCORD dispatch branch), so this is no longer gated to
+                  provider === "YOUTUBE". */}
+              <button type="button" className="link-button" disabled={busy} onClick={() => void handleRefreshCollection()}>
+                {busy ? "Refreshing…" : "Refresh"}
+              </button>
               {confirmingDelete ? (
                 <>
                   <span className="hint">Remove this collection?</span>

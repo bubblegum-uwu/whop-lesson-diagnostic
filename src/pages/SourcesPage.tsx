@@ -12,6 +12,7 @@ import { AddYouTubeVideoDialog } from "../components/AddYouTubeVideoDialog";
 import { AddDiscordVideoDialog } from "../components/AddDiscordVideoDialog";
 import { BatchImportDialog } from "../components/BatchImportDialog";
 import { AddYouTubeChannelDialog } from "../components/AddYouTubeChannelDialog";
+import { ImportDiscordChannelsDialog } from "../components/ImportDiscordChannelsDialog";
 import { ConnectWhopCourseDialog } from "../components/ConnectWhopCourseDialog";
 import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysisDrawer";
 import type { AnalysisSummary } from "../lib/courseApi";
@@ -32,7 +33,17 @@ import {
   ProjectSourceAnalysisError,
   type ProjectSourceAnalysisStatus,
 } from "../lib/projectSourceAnalysisApi";
-import { listSourceCollections, listAlaCarteWhopLessons, type CatalogCollectionSummary, type AlaCarteWhopLessonSummary } from "../lib/catalogApi";
+import {
+  listSourceCollections,
+  listAlaCarteWhopLessons,
+  listDiscordGuilds,
+  startDiscordConnect,
+  disconnectDiscordGuild,
+  CatalogApiError,
+  type CatalogCollectionSummary,
+  type AlaCarteWhopLessonSummary,
+  type DiscordGuildSummary,
+} from "../lib/catalogApi";
 import { enqueueAnalysisJobs } from "../lib/courseApi";
 
 /** Phase 4H-B — display labels for the job-status badge on a video source row. Falls back to "Added" for any status this map doesn't recognize (never blank). */
@@ -150,6 +161,11 @@ export function SourcesPage(props: SourcesPageProps) {
   const [showConnectWhopCourseDialog, setShowConnectWhopCourseDialog] = useState(false);
   const [collections, setCollections] = useState<CatalogCollectionSummary[]>([]);
   const [alaCarteWhopLessons, setAlaCarteWhopLessons] = useState<AlaCarteWhopLessonSummary[]>([]);
+  const [discordGuilds, setDiscordGuilds] = useState<DiscordGuildSummary[]>([]);
+  const [discordConnectBusy, setDiscordConnectBusy] = useState(false);
+  const [discordActionError, setDiscordActionError] = useState<string | null>(null);
+  const [discordGuildBusyId, setDiscordGuildBusyId] = useState<number | null>(null);
+  const [importChannelsGuild, setImportChannelsGuild] = useState<DiscordGuildSummary | null>(null);
   const [whopLessonBusyId, setWhopLessonBusyId] = useState<number | null>(null);
   const [whopLessonActionError, setWhopLessonActionError] = useState<string | null>(null);
   const [analysisStatuses, setAnalysisStatuses] = useState<Record<number, ProjectSourceAnalysisStatus>>({});
@@ -200,6 +216,59 @@ export function SourcesPage(props: SourcesPageProps) {
     void loadCollections(props.backendUrl, props.knoveraToken, projectState.project.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
+
+  // Phase 4K-B — the connected-Discord-servers list is deployment-wide (see
+  // db/discordGuildsRepo.ts's doc comment), never project-scoped — but it's
+  // still loaded per Sources page visit, same best-effort convention as
+  // loadCollections above, so a transient failure here never blocks the
+  // rest of the page.
+  async function loadDiscordGuilds(url: string, token: string) {
+    try {
+      setDiscordGuilds(await listDiscordGuilds(url, token));
+    } catch {
+      // Best-effort — see loadCollections's identical rationale above.
+    }
+  }
+
+  useEffect(() => {
+    if (!props.backendUrl || !props.knoveraToken) {
+      setDiscordGuilds([]);
+      return;
+    }
+    void loadDiscordGuilds(props.backendUrl, props.knoveraToken);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.backendUrl, props.knoveraToken]);
+
+  function refreshDiscordGuilds() {
+    if (props.backendUrl && props.knoveraToken) void loadDiscordGuilds(props.backendUrl, props.knoveraToken);
+  }
+
+  async function handleConnectDiscord() {
+    if (!props.backendUrl || !props.knoveraToken || discordConnectBusy) return;
+    setDiscordConnectBusy(true);
+    setDiscordActionError(null);
+    try {
+      const { authorizeUrl } = await startDiscordConnect(props.backendUrl, props.knoveraToken);
+      window.location.href = authorizeUrl;
+    } catch (err) {
+      setDiscordActionError(err instanceof CatalogApiError ? err.message : "Failed to start Discord connection. Please try again.");
+      setDiscordConnectBusy(false);
+    }
+  }
+
+  async function handleDisconnectDiscordGuild(guildId: number) {
+    if (!props.backendUrl || !props.knoveraToken) return;
+    setDiscordGuildBusyId(guildId);
+    setDiscordActionError(null);
+    try {
+      await disconnectDiscordGuild(props.backendUrl, props.knoveraToken, guildId);
+      refreshDiscordGuilds();
+    } catch (err) {
+      setDiscordActionError(err instanceof CatalogApiError ? err.message : "Failed to disconnect this Discord server. Please try again.");
+    } finally {
+      setDiscordGuildBusyId(null);
+    }
+  }
 
   // Phase 4K follow-up — à-la-carte Whop lessons are a genuinely separate
   // catalog concept from both "Whop Courses" (whopSources, below — full
@@ -442,18 +511,64 @@ export function SourcesPage(props: SourcesPageProps) {
             </button>
           </div>
         </div>
-        <div className="kv-card knovera-provider-card">
+        <div className={discordGuilds.length > 0 ? "kv-card knovera-provider-card operational" : "kv-card knovera-provider-card"}>
           <div className="knovera-provider-card-top">
             <div className="knovera-provider-card-icon-row">
               <DiscordIcon className="knovera-provider-icon" />
               <h3>Discord</h3>
             </div>
+            {discordGuilds.length > 0 ? (
+              <span className="kv-badge kv-badge-accent">
+                {discordGuilds.length} Server{discordGuilds.length === 1 ? "" : "s"} Connected
+              </span>
+            ) : (
+              <span className="kv-badge kv-badge-muted">Not Connected</span>
+            )}
           </div>
-          <p className="knovera-provider-desc">Add a video attachment shared in Discord to this project.</p>
+          <p className="knovera-provider-desc">
+            {discordGuilds.length > 0
+              ? "Import channels from a connected server, or add an individual video attachment below."
+              : "Connect Discord to browse and import a server's channels, or add an individual video attachment."}
+          </p>
+          {discordActionError && (
+            <p className="knovera-field-error" role="alert">
+              {discordActionError}
+            </p>
+          )}
+          {discordGuilds.length > 0 && (
+            <ul className="knovera-discord-guild-list">
+              {discordGuilds.map((guild) => (
+                <li key={guild.id} className="knovera-discord-guild-row">
+                  <span className="knovera-discord-guild-name">{guild.guildName}</span>
+                  <div className="knovera-youtube-source-actions">
+                    <button
+                      type="button"
+                      className="link-button"
+                      onClick={() => setImportChannelsGuild(guild)}
+                      disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+                    >
+                      Import Channels
+                    </button>
+                    <button
+                      type="button"
+                      className="link-button"
+                      disabled={discordGuildBusyId === guild.id}
+                      onClick={() => void handleDisconnectDiscordGuild(guild.id)}
+                    >
+                      {discordGuildBusyId === guild.id ? "Disconnecting…" : "Disconnect"}
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
           <div className="knovera-provider-card-actions">
+            <button type="button" className="knovera-provider-connect-button" onClick={() => void handleConnectDiscord()} disabled={!props.backendUrl || !props.knoveraToken || discordConnectBusy}>
+              {discordConnectBusy ? "Connecting…" : discordGuilds.length > 0 ? "+ Connect Another Server" : "Connect Discord"}
+            </button>
             <button
               type="button"
-              className="knovera-provider-connect-button"
+              className="link-button"
               onClick={() => setShowAddDiscordDialog(true)}
               disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
             >
@@ -772,6 +887,21 @@ export function SourcesPage(props: SourcesPageProps) {
             setShowAddYouTubeChannelDialog(false);
             refreshCollections();
             refreshSources();
+          }}
+        />
+      )}
+
+      {importChannelsGuild && props.backendUrl && props.knoveraToken && resolvedProjectId != null && (
+        <ImportDiscordChannelsDialog
+          backendUrl={props.backendUrl}
+          knoveraToken={props.knoveraToken}
+          projectId={resolvedProjectId}
+          guildId={importChannelsGuild.id}
+          guildName={importChannelsGuild.guildName}
+          onClose={() => setImportChannelsGuild(null)}
+          onImported={() => {
+            setImportChannelsGuild(null);
+            refreshCollections();
           }}
         />
       )}

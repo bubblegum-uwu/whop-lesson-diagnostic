@@ -45,6 +45,14 @@ import {
   createDeleteSourceCollectionHandler,
 } from "./routes/sourceCollections.js";
 import {
+  createStartDiscordConnectHandler,
+  createDiscordConnectCallbackHandler,
+  createListDiscordGuildsHandler,
+  createDisconnectDiscordGuildHandler,
+  createListDiscordGuildChannelsHandler,
+} from "./routes/discordConnections.js";
+import { createImportDiscordChannelsHandler } from "./routes/discordChannels.js";
+import {
   createListSynthesisSetsHandler,
   createCreateSynthesisSetHandler,
   createGetSynthesisSetHandler,
@@ -258,12 +266,40 @@ export function createApp(config: AppConfig): Express {
   // has no equivalent route here (a Whop course already IS a
   // project-scoped collection via courses.project_id; see the Whop routes
   // registered further below).
-  const sourceCollectionsDeps = { pool, youtubeApiKey: config.youtubeApiKey };
+  const sourceCollectionsDeps = { pool, youtubeApiKey: config.youtubeApiKey, discordBotToken: config.discordBotToken };
   app.get("/api/projects/:projectId/collections", knoveraAuth, createListSourceCollectionsHandler(sourceCollectionsDeps));
   app.post("/api/projects/:projectId/collections/youtube", knoveraAuth, createAddYouTubeCollectionHandler(sourceCollectionsDeps));
   app.get("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createGetSourceCollectionHandler(sourceCollectionsDeps));
   app.post("/api/projects/:projectId/collections/:collectionId/refresh", knoveraAuth, createRefreshSourceCollectionHandler(sourceCollectionsDeps));
   app.delete("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createDeleteSourceCollectionHandler(sourceCollectionsDeps));
+
+  // Phase 4K-B — authenticated Discord collections: a deployment-wide bot
+  // connection (like Whop's operator session — see
+  // db/discordGuildsRepo.ts's doc comment), never a per-project OAuth
+  // flow. /connect/callback is deliberately NOT behind knoveraAuth — it's
+  // reached by a plain browser redirect from Discord with no Authorization
+  // header possible; the signed, short-lived state token IS its
+  // authorization (see discordOAuthState.ts / discordConnections.ts's doc
+  // comments). Every other Discord route requires an authenticated
+  // Knovera session, same as every other connection-management route.
+  const discordConnectionsDeps = {
+    pool,
+    discordClientId: config.discordClientId,
+    discordBotToken: config.discordBotToken,
+    publicApiBaseUrl: config.publicApiBaseUrl,
+    allowedOrigin: config.allowedOrigin,
+    stateSecret: knoveraAuthConfig.authSecret,
+  };
+  app.post("/api/discord/connect/start", knoveraAuth, createStartDiscordConnectHandler(discordConnectionsDeps));
+  app.get("/api/discord/connect/callback", createDiscordConnectCallbackHandler(discordConnectionsDeps));
+  app.get("/api/discord/guilds", knoveraAuth, createListDiscordGuildsHandler(discordConnectionsDeps));
+  app.post("/api/discord/guilds/:guildId/disconnect", knoveraAuth, createDisconnectDiscordGuildHandler(discordConnectionsDeps));
+  app.get("/api/discord/guilds/:guildId/channels", knoveraAuth, createListDiscordGuildChannelsHandler(discordConnectionsDeps));
+  // Explicit, user-chosen channel import into THIS project's catalog
+  // (spec section 13) — project isolation for the resulting collections
+  // is the existing, unmodified source_collections project-scoping, not
+  // anything new here.
+  app.post("/api/projects/:projectId/collections/discord/import", knoveraAuth, createImportDiscordChannelsHandler(sourceCollectionsDeps));
 
   // Phase 4H-B — project-source analysis (YouTube; Discord as of Phase 4I).
   // Same jobTrigger as lesson-analysis enqueueing (one Cloud Run Job, one

@@ -143,14 +143,14 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     renderSources("/projects/7/sources", { connected: false });
 
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
-    expect(screen.getByText("Not Connected")).toBeInTheDocument();
+    expect(screen.getAllByText("Not Connected")[0]).toBeInTheDocument();
     expect(screen.getByText("Connect Whop, add a YouTube video, or add a Discord video to add content.")).toBeInTheDocument();
   });
 
   it("F/G/H: YouTube and Discord are both functional (Add YouTube Video / Add Discord Video); Whop shows Not Connected (signed out, no live Whop connection) before its source is resolved", () => {
     renderSources("/projects/mastermind/sources", { backendUrl: null, knoveraToken: null, connected: false });
     expect(screen.queryByText("Coming Soon")).not.toBeInTheDocument();
-    expect(screen.getByText("Not Connected")).toBeInTheDocument();
+    expect(screen.getAllByText("Not Connected")[0]).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add Discord Video" })).toBeInTheDocument();
   });
@@ -349,7 +349,7 @@ describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     renderSources("/projects/7/sources", { connected: false });
-    await waitFor(() => expect(screen.getByText("Not Connected")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("Not Connected")[0]).toBeInTheDocument());
     expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));

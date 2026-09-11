@@ -149,7 +149,7 @@ describe("SourcesPage — project-source (YouTube) analysis actions (Phase 4H-B)
     vi.stubGlobal("fetch", fetchMock);
 
     renderSources("/projects/7/sources", { connected: false });
-    await waitFor(() => expect(screen.getByText("Not Connected")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("Not Connected")[0]).toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled());
   });
 

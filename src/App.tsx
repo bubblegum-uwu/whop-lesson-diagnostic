@@ -96,6 +96,13 @@ function getRedirectUri(): string {
   return `${window.location.origin}${base}`;
 }
 
+/** Phase 4K-B — user-facing text for each sanitized error code discordConnections.ts's callback can redirect with. */
+const DISCORD_CONNECT_ERROR_MESSAGES: Record<string, string> = {
+  invalid_state: "Discord authorization expired or was invalid. Please try connecting again.",
+  missing_guild: "No Discord server was selected. Please try again and choose a server to add the bot to.",
+  guild_lookup_failed: "Could not verify the connected Discord server. Please try again.",
+};
+
 export default function App() {
   const redirectUri = useMemo(getRedirectUri, []);
   const clientId = useMemo(getWhopClientId, []);
@@ -124,6 +131,13 @@ export default function App() {
   // check the effect below already performs to validate the held token;
   // no new backend call.
   const [knoveraEmail, setKnoveraEmail] = useState<string | null>(null);
+  // Phase 4K-B — result of the Discord bot-install OAuth round trip (see the
+  // hash-parsing effect below). Unlike Whop's callback, this is never a
+  // fatal/blocking flow state — just a dismissible notice, since the
+  // backend's callback (http/routes/discordConnections.ts) has already
+  // fully applied (or rejected) the connection server-side by the time the
+  // browser lands back here.
+  const [discordConnectNotice, setDiscordConnectNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
 
   // Phase 4D — verifies a held Knovera token (whether just restored from
   // sessionStorage on page load, or freshly issued by handleKnoveraLogin)
@@ -240,6 +254,33 @@ export default function App() {
     } else {
       void runDiagnosticCallbackFlow(config.lessonUrl, search);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Phase 4K-B — lands the Discord bot-install OAuth round trip
+  // (discordConnections.ts's callback redirects the browser to
+  // `${allowedOrigin}/#/?discordConnected=1` or `?discordConnectError=...`,
+  // a FIXED path — never project-scoped, since the Discord connection
+  // itself is deployment-wide, not tied to whichever project's Sources page
+  // the user started from). Unlike the Whop callback above, this query
+  // string lives INSIDE the hash (HashRouter's territory), never in
+  // window.location.search, so it's parsed directly off window.location.hash.
+  useEffect(() => {
+    const hash = window.location.hash; // e.g. "#/?discordConnected=1"
+    const queryIndex = hash.indexOf("?");
+    if (queryIndex === -1) return;
+    const params = new URLSearchParams(hash.slice(queryIndex + 1));
+    const connected = params.get("discordConnected");
+    const errorCode = params.get("discordConnectError");
+    if (!connected && !errorCode) return;
+
+    if (connected) {
+      setDiscordConnectNotice({ kind: "success", message: "Discord connected. Choose a server's channels to import from the Sources page." });
+    } else {
+      setDiscordConnectNotice({ kind: "error", message: DISCORD_CONNECT_ERROR_MESSAGES[errorCode!] ?? "Could not connect Discord. Please try again." });
+    }
+    // Land somewhere useful (never the marketing landing page) with a clean URL — replace, not push, so Back doesn't return to the raw callback params.
+    navigate("/projects", { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -504,8 +545,20 @@ export default function App() {
   // token exchange) — this return only decides WHERE state renders and
   // which routes require being logged into Knovera first.
   return (
-    <Routes>
-      <Route path="/" element={<LandingPage />} />
+    <>
+      {discordConnectNotice && (
+        <div
+          className={discordConnectNotice.kind === "error" ? "knovera-connect-notice knovera-connect-notice-error" : "knovera-connect-notice knovera-connect-notice-success"}
+          role={discordConnectNotice.kind === "error" ? "alert" : "status"}
+        >
+          <span>{discordConnectNotice.message}</span>
+          <button type="button" className="link-button" onClick={() => setDiscordConnectNotice(null)} aria-label="Dismiss">
+            ×
+          </button>
+        </div>
+      )}
+      <Routes>
+        <Route path="/" element={<LandingPage />} />
       <Route
         path="/login"
         element={
@@ -577,6 +630,7 @@ export default function App() {
         />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+      </Routes>
+    </>
   );
 }

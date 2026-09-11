@@ -16,8 +16,9 @@ import { parseYouTubeChannelRef, YouTubeChannelUrlParseError } from "../../lib/y
 import { resolveYouTubeChannelId, YouTubeChannelResolveError } from "../../youtube/resolveYoutubeChannel.js";
 import { getChannelUploadsPlaylistId, discoverYoutubeChannelVideosPage, YouTubeChannelDiscoveryError } from "../../youtube/discoverYoutubeChannelVideos.js";
 import { YouTubeApiNotConfiguredError } from "../../youtube/youtubeDataApiClient.js";
+import { refreshDiscordCollection, type DiscordChannelsRouteDeps } from "./discordChannels.js";
 
-export interface SourceCollectionsRouteDeps {
+export interface SourceCollectionsRouteDeps extends DiscordChannelsRouteDeps {
   pool: Pool;
   /** Phase 4K follow-up — undefined when YOUTUBE_API_KEY isn't configured; YouTube collection add/refresh routes then fail closed with a 501 (see YOUTUBE_API_NOT_CONFIGURED below) instead of silently using a permanently-limited discovery mechanism. */
   youtubeApiKey?: string;
@@ -66,7 +67,8 @@ export interface CatalogCollectionSummary {
 }
 
 /** Batch-computes itemCount/analyzedCount for every collection in one round trip each — never N+1 per collection (spec section 46/63). */
-async function summarizeCollections(pool: Pool, collections: SourceCollectionRow[]): Promise<CatalogCollectionSummary[]> {
+/** Exported for reuse by http/routes/discordChannels.ts's refreshDiscordCollection — same batched, non-N+1 summary shape every collection response (YouTube or Discord) uses. */
+export async function summarizeCollections(pool: Pool, collections: SourceCollectionRow[]): Promise<CatalogCollectionSummary[]> {
   if (collections.length === 0) return [];
   const collectionIds = collections.map((c) => c.id);
   const memberResult = await pool.query<{ collection_id: string; project_source_id: string }>(
@@ -382,24 +384,27 @@ export function createAddYouTubeCollectionHandler(deps: SourceCollectionsRouteDe
 
 /**
  * POST /api/projects/:projectId/collections/:collectionId/refresh —
- * Phase 4K. Re-runs discovery for a YouTube collection. Adaptive cursor
- * behavior (see the migration's discoveryCursor doc comment):
+ * Phase 4K. Re-runs discovery for a YouTube OR (Phase 4K-B) Discord
+ * collection — dispatched by provider near the top of this handler, see
+ * the DISCORD branch below, which delegates to
+ * discord/discordChannels.ts's refreshDiscordCollection. The YouTube path
+ * below is unchanged from before Phase 4K-B. Adaptive cursor behavior
+ * (see the migration's discoveryCursor doc comment), same for both
+ * providers:
  *   - If a previous pass left older history undiscovered (discoveryCursor
  *     is set), this call CONTINUES from that cursor, walking deeper into
- *     the channel's history rather than restarting at the newest video —
- *     this is what eventually reaches a channel's full catalog across
- *     repeated refreshes for a channel bigger than one pass can cover.
- *   - Otherwise (fully caught up already) this checks the FRONT of the
- *     playlist for new uploads since the last pass, stopping as soon as a
- *     page is entirely already-known (see discoverAndImportYouTubeChannelPages's
+ *     history rather than restarting at the newest item — this is what
+ *     eventually reaches a channel's/collection's full catalog across
+ *     repeated refreshes for one bigger than a single pass can cover.
+ *   - Otherwise (fully caught up already) this checks the FRONT for new
+ *     items since the last pass, stopping as soon as a page is entirely
+ *     already-known (see discoverAndImportYouTubeChannelPages's
  *     earlyStopOnFullyKnownPage doc comment) — cheap and idempotent.
- * Either way: newly-seen videos are imported (never analyzed — section
- * 4/25), already-known videos are left completely untouched (their
+ * Either way: newly-seen items are imported (never analyzed — section
+ * 4/25/53), already-known items are left completely untouched (their
  * project_sources row, and therefore every analysis attached to it, is
- * never modified — section 26/51). No refresh mechanism exists for
- * Discord collections (none can be created today — see the PR
- * description's Discord section), so this 400s for any non-YOUTUBE
- * collection rather than silently no-op'ing.
+ * never modified — section 26/51/23). Any other provider 400s rather than
+ * silently no-op'ing.
  */
 export function createRefreshSourceCollectionHandler(deps: SourceCollectionsRouteDeps) {
   return async function refreshSourceCollectionHandler(req: Request, res: Response): Promise<void> {
@@ -410,8 +415,29 @@ export function createRefreshSourceCollectionHandler(deps: SourceCollectionsRout
     }
     const { project, collection } = resolved;
 
+    // Phase 4K-B — Discord channel collections now support refresh too;
+    // dispatched to a separate module (discord/discordChannels.ts) rather
+    // than inlined here, so the YOUTUBE branch below is untouched byte for
+    // byte (spec section 60).
+    if (collection.provider === "DISCORD") {
+      const outcome = await refreshDiscordCollection(deps.pool, project, collection, deps);
+      if (!outcome.ok) {
+        res.status(outcome.status).json(outcome.body);
+        return;
+      }
+      const refreshedCollection = await getSourceCollectionById(deps.pool, collection.id);
+      res.status(200).json({
+        collection: (await summarizeCollections(deps.pool, [refreshedCollection!]))[0],
+        discoveredCount: outcome.result.discoveredCount,
+        importedCount: outcome.result.importedCount,
+        adoptedCount: outcome.result.adoptedCount,
+        failedCount: outcome.result.failedCount,
+        hasMoreHistory: outcome.result.nextBeforeMessageId !== null,
+      });
+      return;
+    }
     if (collection.provider !== "YOUTUBE") {
-      res.status(400).json({ error: { message: "Refresh is only supported for YouTube collections today.", type: "refresh_not_supported" } });
+      res.status(400).json({ error: { message: "Refresh is only supported for YouTube and Discord collections today.", type: "refresh_not_supported" } });
       return;
     }
     if (!deps.youtubeApiKey) {

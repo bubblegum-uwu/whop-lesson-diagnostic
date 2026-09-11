@@ -59,6 +59,10 @@ export interface CreateDiscordSourceInput {
   projectId: number;
   externalId: string;
   sourceUrl: string;
+  /** Phase 4K-B — set when created via channel discovery (see discord/discordChannels.ts); omitted/null for an à-la-carte add, exactly like before. */
+  collectionId?: number | null;
+  /** Phase 4K-B — channel discovery knows the attachment's filename; à-la-carte add still never fetches one. */
+  title?: string | null;
 }
 
 interface ProjectSourceDbRow {
@@ -149,36 +153,39 @@ export async function createYouTubeSource(
 
 /**
  * Phase 4I — the second project_sources writer, mirroring
- * createYouTubeSource exactly (same NULL title/duration, same READY
- * status, same ON CONFLICT DO NOTHING race-safety). `sourceUrl` here is
- * the exact, verbatim Discord CDN URL (signature included) — see
- * lib/discordUrl.ts's doc comment on why it can't be normalized down to
- * an id the way YouTube's can. This URL is used ONLY once, immediately
- * after this call, to durably capture the video's bytes (see
- * discord/downloadDiscordAttachment.ts /
- * db/projectSourceMediaRepo.ts) — it is never relied on again afterward,
- * since its signature expires and cannot be reconstructed later.
+ * createYouTubeSource's shape (same READY status; since Phase 4K-B, the
+ * same ON CONFLICT DO UPDATE + xmax=0 adopt-vs-create dedup for
+ * collection_id/title — an attachment imported à la carte and later
+ * discovered via channel sync, or vice versa, stays ONE row, never
+ * duplicated — spec section 16/35/36). `sourceUrl` here is the exact,
+ * verbatim Discord CDN URL (signature included) — see lib/discordUrl.ts's
+ * doc comment on why it can't be normalized down to an id the way
+ * YouTube's can. This URL is used ONLY once, immediately after the row
+ * that first captures it is created, to durably capture the video's bytes
+ * (see discord/downloadDiscordAttachment.ts / db/projectSourceMediaRepo.ts)
+ * — it is never relied on again afterward (never overwritten on conflict
+ * either — a later, possibly-fresher signed URL for an already-captured
+ * attachment is simply never needed again), since its signature expires
+ * and cannot be reconstructed later.
  */
 export async function createDiscordSource(
   pool: Pool,
   input: CreateDiscordSourceInput,
 ): Promise<{ source: ProjectSourceRow; created: boolean }> {
+  const collectionId = input.collectionId ?? null;
+  const title = input.title ?? null;
   const inserted = await pool.query<ProjectSourceDbRow>(
-    `INSERT INTO project_sources (project_id, provider, external_id, source_url, title, duration_seconds, status)
-     VALUES ($1, 'DISCORD', $2, $3, NULL, NULL, 'READY')
-     ON CONFLICT (project_id, provider, external_id) DO NOTHING
-     RETURNING ${COLUMNS}`,
-    [input.projectId, input.externalId, input.sourceUrl],
+    `INSERT INTO project_sources (project_id, provider, external_id, source_url, title, duration_seconds, status, collection_id)
+     VALUES ($1, 'DISCORD', $2, $3, $4, NULL, 'READY', $5)
+     ON CONFLICT (project_id, provider, external_id) DO UPDATE SET
+       collection_id = COALESCE(project_sources.collection_id, EXCLUDED.collection_id),
+       title = COALESCE(project_sources.title, EXCLUDED.title),
+       updated_at = now()
+     RETURNING ${COLUMNS}, (xmax = 0) AS inserted`,
+    [input.projectId, input.externalId, input.sourceUrl, title, collectionId],
   );
-  if (inserted.rows[0]) {
-    return { source: mapRow(inserted.rows[0]), created: true };
-  }
-
-  const existing = await pool.query<ProjectSourceDbRow>(
-    `SELECT ${COLUMNS} FROM project_sources WHERE project_id = $1 AND provider = 'DISCORD' AND external_id = $2`,
-    [input.projectId, input.externalId],
-  );
-  return { source: mapRow(existing.rows[0]), created: false };
+  const row = inserted.rows[0] as ProjectSourceDbRow & { inserted: boolean };
+  return { source: mapRow(row), created: row.inserted };
 }
 
 /** Every source this project owns, across all providers — scoped by project_id alone, never a global fallback. */

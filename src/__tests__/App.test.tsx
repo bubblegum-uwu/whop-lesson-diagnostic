@@ -256,3 +256,71 @@ describe("App — Phase 4D Knovera login/logout", () => {
     expect(sessionStorage.getItem(KNOVERA_TOKEN_STORAGE_KEY)).toBeNull();
   });
 });
+
+/**
+ * Phase 4K-B — the Discord bot-install OAuth round trip's callback
+ * (backend's discordConnections.ts) redirects the browser to a FIXED,
+ * hash-based URL: `${allowedOrigin}/#/?discordConnected=1` (or
+ * `?discordConnectError=...`). Unlike the Whop callback above, this query
+ * string lives INSIDE the hash — HashRouter/MemoryRouter territory, never
+ * window.location.search — so App.tsx parses window.location.hash
+ * directly. Landing path is always "/" (never project-scoped, since the
+ * Discord connection itself is deployment-wide), so a signed-in operator
+ * is bounced to /projects with a dismissible notice.
+ */
+describe("App — Discord OAuth callback landing (Phase 4K-B)", () => {
+  beforeEach(() => {
+    import.meta.env.VITE_WHOP_CLIENT_ID = "test_client_id";
+    sessionStorage.clear();
+    window.history.pushState({}, "", "/");
+  });
+
+  afterEach(() => {
+    import.meta.env.VITE_WHOP_CLIENT_ID = ORIGINAL_CLIENT_ID;
+    vi.unstubAllGlobals();
+    sessionStorage.clear();
+    window.history.pushState({}, "", "/");
+  });
+
+  it("a successful connection shows a success notice and lands on /projects, not the marketing landing page", async () => {
+    seedKnoveraSession();
+    window.history.pushState({}, "", "/#/?discordConnected=1");
+    renderApp("/");
+
+    await waitFor(() => expect(screen.getByText(/Discord connected/)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Enter Knovera" })).not.toBeInTheDocument();
+  });
+
+  it("a connect error shows the mapped error message, not a raw error code", async () => {
+    seedKnoveraSession();
+    window.history.pushState({}, "", "/#/?discordConnectError=invalid_state");
+    renderApp("/");
+
+    await waitFor(() => expect(screen.getByText(/Discord authorization expired or was invalid/)).toBeInTheDocument());
+    expect(screen.queryByText("invalid_state")).not.toBeInTheDocument();
+  });
+
+  it("an unrecognized error code still shows a generic, non-crashing notice", async () => {
+    seedKnoveraSession();
+    window.history.pushState({}, "", "/#/?discordConnectError=something_new");
+    renderApp("/");
+
+    await waitFor(() => expect(screen.getByText(/Could not connect Discord/)).toBeInTheDocument());
+  });
+
+  it("the notice is dismissible", async () => {
+    seedKnoveraSession();
+    window.history.pushState({}, "", "/#/?discordConnected=1");
+    renderApp("/");
+
+    await waitFor(() => expect(screen.getByText(/Discord connected/)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText(/Discord connected/)).not.toBeInTheDocument();
+  });
+
+  it("a plain landing at / with no callback params never shows a Discord notice", () => {
+    renderApp("/");
+    expect(screen.queryByText(/Discord connected/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Could not connect Discord/)).not.toBeInTheDocument();
+  });
+});

@@ -298,3 +298,89 @@ export async function listWhopCourseLessons(
   await throwOnError(res, `Failed to load course lessons (${res.status}).`);
   return await res.json();
 }
+
+/**
+ * Phase 4K-B — authenticated Discord server/channel connection clients.
+ * The connection itself is deployment-wide (one shared bot identity, not
+ * per-project — see backend/src/db/discordGuildsRepo.ts's doc comment), so
+ * these calls (unlike everything else in this file) never take a
+ * projectId — only channel IMPORT does, since that's where per-project
+ * catalog membership actually lives.
+ */
+export interface DiscordGuildSummary {
+  id: number;
+  guildId: string;
+  guildName: string;
+  status: "CONNECTED" | "DISCONNECTED";
+  connectedAt: string;
+}
+
+/** POST /api/discord/connect/start — returns the Discord bot-install authorize URL to navigate the browser to. */
+export async function startDiscordConnect(backendUrl: string, knoveraToken: string): Promise<{ authorizeUrl: string }> {
+  const res = await fetch(`${backendUrl}/api/discord/connect/start`, { method: "POST", headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to start Discord connection (${res.status}).`);
+  return await res.json();
+}
+
+/** GET /api/discord/guilds — every guild the bot is currently connected to (CONNECTED only). */
+export async function listDiscordGuilds(backendUrl: string, knoveraToken: string): Promise<DiscordGuildSummary[]> {
+  const res = await fetch(`${backendUrl}/api/discord/guilds`, { headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to load connected Discord servers (${res.status}).`);
+  const body = (await res.json()) as { guilds: DiscordGuildSummary[] };
+  return body.guilds;
+}
+
+/** POST /api/discord/guilds/:guildId/disconnect — best-effort leaves the guild; never touches already-imported collections/items/analyses. */
+export async function disconnectDiscordGuild(backendUrl: string, knoveraToken: string, guildId: number): Promise<void> {
+  const res = await fetch(`${backendUrl}/api/discord/guilds/${guildId}/disconnect`, { method: "POST", headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to disconnect this Discord server (${res.status}).`);
+}
+
+export interface DiscordChannelSummary {
+  id: string;
+  name: string;
+  type: number;
+  parentId: string | null;
+  /** false for a channel type this integration can never read (voice/category/etc.), or one the bot currently lacks access to — never presented as importable either way. */
+  readable: boolean;
+}
+
+/** GET /api/discord/guilds/:guildId/channels — text-capable channels in this guild, each with a live readability probe. */
+export async function listDiscordGuildChannels(
+  backendUrl: string,
+  knoveraToken: string,
+  guildId: number,
+): Promise<{ guildId: string; guildName: string; channels: DiscordChannelSummary[] }> {
+  const res = await fetch(`${backendUrl}/api/discord/guilds/${guildId}/channels`, { headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to load this server's channels (${res.status}).`);
+  return await res.json();
+}
+
+export interface DiscordChannelImportResultEntry {
+  channelId: string;
+  kind: "imported" | "invalid";
+  collection?: { id: number; title: string };
+  discoveredCount?: number;
+  importedCount?: number;
+  adoptedCount?: number;
+  failedCount?: number;
+  hasMoreHistory?: boolean;
+  message?: string;
+}
+
+/** POST /api/projects/:projectId/collections/discord/import — the user's explicitly-selected channels only; never every channel in the guild. */
+export async function importDiscordChannels(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  guildId: number,
+  channelIds: string[],
+): Promise<{ results: DiscordChannelImportResultEntry[] }> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/discord/import`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ guildId, channelIds }),
+  });
+  await throwOnError(res, `Failed to import Discord channels (${res.status}).`);
+  return await res.json();
+}

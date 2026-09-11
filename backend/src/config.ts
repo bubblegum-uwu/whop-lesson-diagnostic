@@ -98,6 +98,23 @@ export interface AppConfig {
    * À-la-carte single-video add/import is entirely unaffected either way.
    */
   youtubeApiKey: string | undefined;
+  /**
+   * Phase 4K-B — optional, both required together for authenticated
+   * Discord collection discovery (guild/channel listing, channel content
+   * discovery). `discordClientId` is public (embedded in the bot-install
+   * authorize URL the frontend redirects to); `discordBotToken` is a
+   * secret, used server-side only for every Discord REST call (never sent
+   * to the frontend, never logged — see server.ts's redactor
+   * registration). This is a single, deployment-wide bot identity — like
+   * Whop's operator connection, not a per-project or per-user credential
+   * (see discord/discordApiClient.ts's doc comment for why a static bot
+   * token, not a refreshable user OAuth token, is the correct mechanism
+   * here). When either is unset, Discord connect/discovery routes fail
+   * closed with a clear "not configured" error; existing à-la-carte
+   * Discord attachment import is entirely unaffected either way.
+   */
+  discordClientId: string | undefined;
+  discordBotToken: string | undefined;
 }
 
 function requireEnv(name: string): string {
@@ -181,6 +198,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
           }
         : undefined,
     youtubeApiKey: env.YOUTUBE_API_KEY,
+    discordClientId: env.DISCORD_CLIENT_ID,
+    discordBotToken: env.DISCORD_BOT_TOKEN,
   };
 }
 

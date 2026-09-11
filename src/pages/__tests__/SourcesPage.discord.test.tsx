@@ -174,7 +174,7 @@ describe("SourcesPage — Discord project sources (Phase 4I)", () => {
     );
 
     renderSources("/projects/7/sources", { connected: false });
-    await waitFor(() => expect(screen.getByText("Not Connected")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("Not Connected")[0]).toBeInTheDocument());
     await waitFor(() => expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled());
   });
 

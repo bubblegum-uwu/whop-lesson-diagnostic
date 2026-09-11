@@ -1857,6 +1857,27 @@ button.kv-topnav-avatar:hover {
   gap: var(--kv-space-4);
 }
 
+/* Phase 4K-B — a dismissible, top-of-page notice for the Discord
+   bot-install OAuth round trip landing back in the app (App.tsx). */
+.knovera-connect-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kv-space-4);
+  padding: var(--kv-space-3) var(--kv-space-5);
+  font-size: 0.9rem;
+}
+
+.knovera-connect-notice-success {
+  color: var(--kv-success);
+  background: var(--kv-success-soft);
+}
+
+.knovera-connect-notice-error {
+  color: var(--kv-error);
+  background: var(--kv-error-soft);
+}
+
 .knovera-empty-state {
   padding: var(--kv-space-6) var(--kv-space-5);
   color: var(--kv-text-muted);
@@ -2391,6 +2412,67 @@ button.kv-topnav-avatar:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Phase 4K-B — the connected-servers list inside the Discord provider card. */
+.knovera-discord-guild-list {
+  list-style: none;
+  margin: 0 0 var(--kv-space-3);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kv-space-2);
+}
+
+.knovera-discord-guild-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kv-space-3);
+  padding: var(--kv-space-2) 0;
+  border-bottom: 1px solid var(--kv-border);
+}
+
+.knovera-discord-guild-row:last-child {
+  border-bottom: none;
+}
+
+.knovera-discord-guild-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Phase 4K-B — the explicit checkbox channel picker in ImportDiscordChannelsDialog. */
+.knovera-discord-channel-list {
+  list-style: none;
+  margin: 0 0 var(--kv-space-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--kv-space-2);
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+.knovera-discord-channel-row {
+  padding: var(--kv-space-2) var(--kv-space-3);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kv-space-3);
+  border: 1px solid var(--kv-border);
+  border-radius: var(--kv-radius-md);
+}
+
+.knovera-discord-channel-row label {
+  display: flex;
+  align-items: center;
+  gap: var(--kv-space-2);
+  font-size: 0.9rem;
+  min-width: 0;
 }
 
 .knovera-diagnostic-tools {
