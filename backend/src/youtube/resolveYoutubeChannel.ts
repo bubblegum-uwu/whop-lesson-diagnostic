@@ -1,4 +1,5 @@
 import type { ParsedYouTubeChannelRef } from "../lib/youtubeChannelUrl.js";
+import { fetchYouTubeDataApi, YouTubeApiRequestError, YouTubeApiNotConfiguredError } from "./youtubeDataApiClient.js";
 
 export class YouTubeChannelResolveError extends Error {
   constructor(message: string) {
@@ -7,71 +8,45 @@ export class YouTubeChannelResolveError extends Error {
   }
 }
 
-const FETCH_TIMEOUT_MS = 10_000;
-// A channel "about" page is a small HTML document — well under 2MB even
-// with YouTube's heavy inline bundle; this is a safety bound against a
-// misbehaving/oversized response, not an expected-to-bind limit.
-const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+interface ChannelsForHandleResponse {
+  items?: Array<{ id?: string }>;
+}
 
 /**
- * Resolves a "handle"-form channel reference (an @handle, /c/CustomName,
- * or /user/LegacyName — see youtubeChannelUrl.ts) to YouTube's own stable
- * "UCxxxx..." channel id, via ONE bounded fetch of the channel's own page
- * and a read of its own declared canonical link
- * (`<link rel="canonical" href="https://www.youtube.com/channel/UC...">`)
- * — a standard, stable piece of metadata essentially every channel page
- * declares, not a parse of rendered video-list content. This is identity
- * resolution only ("which channel is this handle?"), never content
- * discovery ("what videos does this channel have?" — see
- * discoverYoutubeChannelVideos.ts, which uses the official RSS feed and
- * never touches this function).
+ * Resolves a "handle"-form channel reference (an @handle, /c/CustomName, or
+ * /user/LegacyName — see youtubeChannelUrl.ts) to YouTube's own stable
+ * "UCxxxx..." channel id, via the YouTube Data API's `channels.list`
+ * `forHandle` parameter — the documented, provider-supported mechanism for
+ * exactly this lookup (added specifically to replace the deprecated
+ * `forUsername` param for @handle resolution). Requires YOUTUBE_API_KEY;
+ * throws YouTubeApiNotConfiguredError if it isn't set (see config.ts).
  *
- * Same bounded-fetch shape as discord/downloadDiscordAttachment.ts
- * (AbortController timeout + a byte ceiling enforced while streaming) —
- * this is metadata-sized, so both bounds are far smaller.
+ * Honest limitation: `/c/CustomName` and `/user/LegacyName` are LEGACY
+ * custom-URL forms that predate @handles. For most channels YouTube
+ * migrated these to an equivalent @handle and `forHandle` resolves them
+ * correctly, but a channel whose legacy custom URL genuinely differs from
+ * its current @handle will fail to resolve here — the fix is to paste the
+ * channel's `/channel/UC...` URL or its current @handle instead, not to
+ * build a second, scraping-based resolution path for this edge case.
+ *
+ * This is identity resolution only ("which channel is this handle?"),
+ * never content discovery ("what videos does this channel have?" — see
+ * discoverYoutubeChannelVideos.ts).
  */
-export async function resolveYouTubeChannelId(ref: ParsedYouTubeChannelRef): Promise<string> {
+export async function resolveYouTubeChannelId(ref: ParsedYouTubeChannelRef, apiKey: string | undefined): Promise<string> {
   if (ref.kind === "channel_id") return ref.channelId;
+  if (!apiKey) throw new YouTubeApiNotConfiguredError();
 
-  const pageUrl = `https://www.youtube.com/@${encodeURIComponent(ref.handle)}`;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  let res: Response;
+  let data: ChannelsForHandleResponse;
   try {
-    res = await fetch(pageUrl, { signal: controller.signal, headers: { Accept: "text/html" } });
+    data = await fetchYouTubeDataApi<ChannelsForHandleResponse>("channels", { part: "id", forHandle: `@${ref.handle}` }, apiKey);
   } catch (err) {
-    throw new YouTubeChannelResolveError(
-      `Could not resolve this YouTube channel (${err instanceof Error ? err.name : "network error"}). Double-check the handle/URL.`,
-    );
-  } finally {
-    clearTimeout(timeout);
+    throw new YouTubeChannelResolveError(err instanceof YouTubeApiRequestError ? err.message : "Could not resolve this YouTube channel.");
   }
 
-  if (!res.ok) {
-    throw new YouTubeChannelResolveError(`Could not find a YouTube channel for "@${ref.handle}" (HTTP ${res.status}).`);
+  const channelId = data.items?.[0]?.id;
+  if (typeof channelId !== "string" || channelId.length === 0) {
+    throw new YouTubeChannelResolveError(`Could not resolve "@${ref.handle}" to a YouTube channel — the channel may not exist, or this is a legacy custom URL that differs from the channel's current @handle.`);
   }
-  if (!res.body) {
-    throw new YouTubeChannelResolveError("YouTube returned an empty response while resolving this channel.");
-  }
-
-  const chunks: Buffer[] = [];
-  let total = 0;
-  const reader = res.body.getReader();
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > MAX_RESPONSE_BYTES) {
-      await reader.cancel();
-      throw new YouTubeChannelResolveError("YouTube's response while resolving this channel was unexpectedly large.");
-    }
-    chunks.push(Buffer.from(value));
-  }
-  const html = Buffer.concat(chunks).toString("utf-8");
-
-  const match = html.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/channel\/(UC[A-Za-z0-9_-]{22})">/);
-  if (!match) {
-    throw new YouTubeChannelResolveError(`Could not resolve "@${ref.handle}" to a YouTube channel ID — the channel may not exist.`);
-  }
-  return match[1];
+  return channelId;
 }

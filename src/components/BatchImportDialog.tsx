@@ -1,25 +1,36 @@
 import { useState, type FormEvent } from "react";
-import { batchAddYouTubeSources, batchAddDiscordSources, CatalogApiError, type BatchImportResponse } from "../lib/catalogApi";
+import { batchAddYouTubeSources, batchAddDiscordSources, batchAddWhopLessons, CatalogApiError, type BatchImportResponse, type WhopLessonBatchResponse } from "../lib/catalogApi";
 
 export interface BatchImportDialogProps {
   backendUrl: string;
   knoveraToken: string;
   projectId: number;
-  provider: "YOUTUBE" | "DISCORD";
+  provider: "YOUTUBE" | "DISCORD" | "WHOP_LESSON";
   onClose: () => void;
   /** Called once the batch call completes (even a partial success) — the caller refreshes the sources list. */
   onImported: () => void;
 }
 
-type SubmitState = { phase: "idle" } | { phase: "submitting" } | { phase: "error"; message: string } | { phase: "done"; result: BatchImportResponse };
+type SubmitState = { phase: "idle" } | { phase: "submitting" } | { phase: "error"; message: string } | { phase: "done"; result: BatchImportResponse | WhopLessonBatchResponse };
 
-const LABELS = { YOUTUBE: { title: "Bulk Import YouTube Videos", placeholder: "https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=..." }, DISCORD: { title: "Bulk Import Discord Attachments", placeholder: "https://cdn.discordapp.com/attachments/...\nhttps://cdn.discordapp.com/attachments/..." } } as const;
+const LABELS = {
+  YOUTUBE: { title: "Bulk Import YouTube Videos", placeholder: "https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=..." },
+  DISCORD: { title: "Bulk Import Discord Attachments", placeholder: "https://cdn.discordapp.com/attachments/...\nhttps://cdn.discordapp.com/attachments/..." },
+  WHOP_LESSON: {
+    title: "Bulk Import Whop Lessons",
+    placeholder: "https://whop.com/company/exp_.../app/courses/cors_.../lessons/lesn_.../\nhttps://whop.com/company/exp_.../app/courses/cors_.../lessons/lesn_.../",
+  },
+} as const;
 
 /**
  * Phase 4K — one URL per line, each independently validated/deduped/
  * imported by the backend batch endpoint; never fails the whole paste
  * because one line is malformed, and never analyzes anything. Cancel
- * (including the backdrop) never calls the API.
+ * (including the backdrop) never calls the API. WHOP_LESSON reuses this
+ * same generic dialog shape — see whopCourses.ts's
+ * createBatchAddWhopLessonsHandler doc comment for why importing an
+ * individual Whop lesson still means syncing its course under the hood
+ * (the native course -> lesson relational model, never flattened).
  */
 export function BatchImportDialog({ backendUrl, knoveraToken, projectId, provider, onClose, onImported }: BatchImportDialogProps) {
   const [text, setText] = useState("");
@@ -33,7 +44,12 @@ export function BatchImportDialog({ backendUrl, knoveraToken, projectId, provide
     if (submitting || urls.length === 0) return;
     setState({ phase: "submitting" });
     try {
-      const result = provider === "YOUTUBE" ? await batchAddYouTubeSources(backendUrl, knoveraToken, projectId, urls) : await batchAddDiscordSources(backendUrl, knoveraToken, projectId, urls);
+      const result =
+        provider === "YOUTUBE"
+          ? await batchAddYouTubeSources(backendUrl, knoveraToken, projectId, urls)
+          : provider === "DISCORD"
+            ? await batchAddDiscordSources(backendUrl, knoveraToken, projectId, urls)
+            : await batchAddWhopLessons(backendUrl, knoveraToken, projectId, urls);
       setState({ phase: "done", result });
       onImported();
     } catch (err) {

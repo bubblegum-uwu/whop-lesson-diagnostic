@@ -190,4 +190,19 @@ describe("SourcesPage — multi-course Whop + collections catalog (Phase 4K)", (
     fireEvent.click(screen.getAllByRole("button", { name: "Bulk Import" })[0]);
     expect(screen.getByRole("heading", { name: "Bulk Import YouTube Videos" })).toBeInTheDocument();
   });
+
+  it("Bulk Import Lessons opens the WHOP_LESSON batch dialog when Whop is connected", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/sources")) return jsonResponse(200, { projectId: 7, sources: [] });
+      if (url.endsWith("/collections")) return jsonResponse(200, { projectId: 7, collections: [] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSources({ connected: true });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Bulk Import Lessons" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Bulk Import Lessons" }));
+    expect(screen.getByRole("heading", { name: "Bulk Import Whop Lessons" })).toBeInTheDocument();
+  });
 });

@@ -40,6 +40,20 @@ CREATE TABLE source_collections (
   status          source_collection_status NOT NULL DEFAULT 'READY',
   sanitized_error TEXT,
   last_synced_at  TIMESTAMPTZ,
+  -- Phase 4K follow-up (full-catalog YouTube discovery): an opaque
+  -- provider pagination cursor (YouTube Data API's playlistItems
+  -- `nextPageToken`) marking how deep into the channel's upload history
+  -- discovery has walked so far. NULL means "fully caught up" — either the
+  -- channel's entire history has been discovered, or discovery hasn't run
+  -- yet. Non-NULL means a discovery/refresh pass stopped partway through
+  -- (hit its per-call page cap) with more, older videos still undiscovered
+  -- — the next refresh resumes from here instead of restarting at the
+  -- newest video, which is what lets a channel with hundreds/thousands of
+  -- uploads eventually have its full catalog discovered across repeated
+  -- refreshes without any one HTTP request running unbounded. Meaningless
+  -- for DISCORD collections (no discovery mechanism exists for Discord —
+  -- see the PR description's Discord section), always NULL there.
+  discovery_cursor TEXT,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- Provider identity uniqueness is project-scoped (section 49): the same

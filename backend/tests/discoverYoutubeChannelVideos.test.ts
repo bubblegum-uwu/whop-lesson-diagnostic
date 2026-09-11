@@ -1,60 +1,121 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { discoverYoutubeChannelVideos, YouTubeChannelDiscoveryError } from "../src/youtube/discoverYoutubeChannelVideos.js";
+import {
+  getChannelUploadsPlaylistId,
+  discoverYoutubeChannelVideosPage,
+  YouTubeChannelDiscoveryError,
+} from "../src/youtube/discoverYoutubeChannelVideos.js";
+import { YouTubeApiNotConfiguredError } from "../src/youtube/youtubeDataApiClient.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function xmlResponse(status: number, body: string): Response {
-  return new Response(body, { status });
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-const SAMPLE_FEED = `<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015">
-  <title>SMB Capital</title>
-  <entry>
-    <yt:videoId>aaaaaaaaaaa</yt:videoId>
-    <title>Opening Range Breakout</title>
-    <published>2026-01-01T00:00:00+00:00</published>
-  </entry>
-  <entry>
-    <yt:videoId>bbbbbbbbbbb</yt:videoId>
-    <title>Risk &amp; Reward Basics</title>
-    <published>2026-01-02T00:00:00+00:00</published>
-  </entry>
-</feed>`;
+const CHANNEL_ID = "UC_x5XG1OV2P6uZZ5FSM9Ttw";
 
-describe("discoverYoutubeChannelVideos", () => {
-  it("fetches the official Atom feed URL for the given channel ID", async () => {
+describe("getChannelUploadsPlaylistId", () => {
+  it("throws YouTubeApiNotConfiguredError when no API key is given, without ever calling fetch", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(getChannelUploadsPlaylistId(CHANNEL_ID, undefined)).rejects.toThrow(YouTubeApiNotConfiguredError);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("calls channels.list with contentDetails+snippet and extracts the uploads playlist id + title", async () => {
     const fetchMock = vi.fn(async (url: string) => {
-      expect(url).toBe("https://www.youtube.com/feeds/videos.xml?channel_id=UC_x5XG1OV2P6uZZ5FSM9Ttw");
-      return xmlResponse(200, SAMPLE_FEED);
+      const parsed = new URL(url);
+      expect(parsed.pathname).toBe("/youtube/v3/channels");
+      expect(parsed.searchParams.get("part")).toBe("contentDetails,snippet");
+      expect(parsed.searchParams.get("id")).toBe(CHANNEL_ID);
+      expect(parsed.searchParams.get("key")).toBe("test-api-key");
+      return jsonResponse(200, {
+        items: [{ snippet: { title: "SMB Capital" }, contentDetails: { relatedPlaylists: { uploads: "UU_x5XG1OV2P6uZZ5FSM9Ttw" } } }],
+      });
     });
     vi.stubGlobal("fetch", fetchMock);
-    await discoverYoutubeChannelVideos("UC_x5XG1OV2P6uZZ5FSM9Ttw");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const result = await getChannelUploadsPlaylistId(CHANNEL_ID, "test-api-key");
+    expect(result).toEqual({ uploadsPlaylistId: "UU_x5XG1OV2P6uZZ5FSM9Ttw", channelTitle: "SMB Capital" });
   });
 
-  it("parses every entry into a DiscoveredYouTubeVideo, decoding XML entities in titles", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => xmlResponse(200, SAMPLE_FEED)));
-    const { videos, channelTitle } = await discoverYoutubeChannelVideos("UC_x5XG1OV2P6uZZ5FSM9Ttw");
-    expect(channelTitle).toBe("SMB Capital");
-    expect(videos).toEqual([
-      { videoId: "aaaaaaaaaaa", title: "Opening Range Breakout", publishedAt: "2026-01-01T00:00:00+00:00", sourceUrl: "https://www.youtube.com/watch?v=aaaaaaaaaaa" },
-      { videoId: "bbbbbbbbbbb", title: "Risk & Reward Basics", publishedAt: "2026-01-02T00:00:00+00:00", sourceUrl: "https://www.youtube.com/watch?v=bbbbbbbbbbb" },
-    ]);
+  it("throws a clear error when the channel doesn't exist (empty items)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { items: [] })));
+    await expect(getChannelUploadsPlaylistId(CHANNEL_ID, "test-api-key")).rejects.toThrow(YouTubeChannelDiscoveryError);
   });
 
-  it("returns an empty video list for a channel with no uploads, without erroring", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => xmlResponse(200, `<feed><title>Empty Channel</title></feed>`)));
-    const { videos, channelTitle } = await discoverYoutubeChannelVideos("UC_x5XG1OV2P6uZZ5FSM9Ttw");
-    expect(videos).toEqual([]);
-    expect(channelTitle).toBe("Empty Channel");
+  it("throws a clear error on an API error response, without ever including the API key in the message", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(403, { error: { message: "API key not valid." } })));
+    await expect(getChannelUploadsPlaylistId(CHANNEL_ID, "test-api-key")).rejects.toThrow(/API key not valid/);
+    try {
+      await getChannelUploadsPlaylistId(CHANNEL_ID, "test-api-key");
+    } catch (err) {
+      expect((err as Error).message).not.toContain("test-api-key");
+    }
+  });
+});
+
+describe("discoverYoutubeChannelVideosPage", () => {
+  it("throws YouTubeApiNotConfiguredError when no API key is given", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(discoverYoutubeChannelVideosPage("UU_x5XG1OV2P6uZZ5FSM9Ttw", undefined)).rejects.toThrow(YouTubeApiNotConfiguredError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("throws a clear error for an unknown channel (404)", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => xmlResponse(404, "")));
-    await expect(discoverYoutubeChannelVideos("UCdoesnotexist00000000")).rejects.toThrow(YouTubeChannelDiscoveryError);
+  it("calls playlistItems.list with the playlist id and page size, parses videos, and returns nextPageToken", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      const parsed = new URL(url);
+      expect(parsed.pathname).toBe("/youtube/v3/playlistItems");
+      expect(parsed.searchParams.get("playlistId")).toBe("UU_x5XG1OV2P6uZZ5FSM9Ttw");
+      expect(parsed.searchParams.get("maxResults")).toBe("50");
+      expect(parsed.searchParams.has("pageToken")).toBe(false);
+      return jsonResponse(200, {
+        items: [
+          { snippet: { title: "Opening Range Breakout", publishedAt: "2026-01-01T00:00:00Z", resourceId: { videoId: "aaaaaaaaaaa" } } },
+          { snippet: { title: "Risk & Reward Basics", publishedAt: "2026-01-02T00:00:00Z", resourceId: { videoId: "bbbbbbbbbbb" } } },
+        ],
+        nextPageToken: "CAUQAA",
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const result = await discoverYoutubeChannelVideosPage("UU_x5XG1OV2P6uZZ5FSM9Ttw", "test-api-key");
+    expect(result).toEqual({
+      videos: [
+        { videoId: "aaaaaaaaaaa", title: "Opening Range Breakout", publishedAt: "2026-01-01T00:00:00Z", sourceUrl: "https://www.youtube.com/watch?v=aaaaaaaaaaa" },
+        { videoId: "bbbbbbbbbbb", title: "Risk & Reward Basics", publishedAt: "2026-01-02T00:00:00Z", sourceUrl: "https://www.youtube.com/watch?v=bbbbbbbbbbb" },
+      ],
+      nextPageToken: "CAUQAA",
+    });
+  });
+
+  it("passes pageToken through when continuing a previous page", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      expect(new URL(url).searchParams.get("pageToken")).toBe("CAUQAA");
+      return jsonResponse(200, { items: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await discoverYoutubeChannelVideosPage("UU_x5XG1OV2P6uZZ5FSM9Ttw", "test-api-key", "CAUQAA");
+  });
+
+  it("returns nextPageToken: null on the last page (API omits the field)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { items: [] })));
+    const result = await discoverYoutubeChannelVideosPage("UU_x5XG1OV2P6uZZ5FSM9Ttw", "test-api-key");
+    expect(result.nextPageToken).toBeNull();
+  });
+
+  it("skips malformed entries (missing videoId/title) rather than crashing", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse(200, {
+          items: [{ snippet: { title: "Has no videoId" } }, { snippet: { resourceId: { videoId: "hasnotitle00" } } }, { snippet: { title: "Valid", resourceId: { videoId: "validvideoid" } } }],
+        }),
+      ),
+    );
+    const result = await discoverYoutubeChannelVideosPage("UU_x5XG1OV2P6uZZ5FSM9Ttw", "test-api-key");
+    expect(result.videos).toEqual([{ videoId: "validvideoid", title: "Valid", publishedAt: null, sourceUrl: "https://www.youtube.com/watch?v=validvideoid" }]);
   });
 
   it("throws a clear error on a network failure", async () => {
@@ -64,6 +125,6 @@ describe("discoverYoutubeChannelVideos", () => {
         throw new Error("network down");
       }),
     );
-    await expect(discoverYoutubeChannelVideos("UC_x5XG1OV2P6uZZ5FSM9Ttw")).rejects.toThrow(YouTubeChannelDiscoveryError);
+    await expect(discoverYoutubeChannelVideosPage("UU_x5XG1OV2P6uZZ5FSM9Ttw", "test-api-key")).rejects.toThrow(YouTubeChannelDiscoveryError);
   });
 });

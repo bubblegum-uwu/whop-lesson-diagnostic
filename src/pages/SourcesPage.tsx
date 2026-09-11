@@ -128,7 +128,7 @@ export function SourcesPage(props: SourcesPageProps) {
   const [sourcesState, setSourcesState] = useState<SourcesLoadState>({ phase: "idle" });
   const [showAddYouTubeDialog, setShowAddYouTubeDialog] = useState(false);
   const [showAddDiscordDialog, setShowAddDiscordDialog] = useState(false);
-  const [batchImportProvider, setBatchImportProvider] = useState<"YOUTUBE" | "DISCORD" | null>(null);
+  const [batchImportProvider, setBatchImportProvider] = useState<"YOUTUBE" | "DISCORD" | "WHOP_LESSON" | null>(null);
   const [showAddYouTubeChannelDialog, setShowAddYouTubeChannelDialog] = useState(false);
   const [showConnectWhopCourseDialog, setShowConnectWhopCourseDialog] = useState(false);
   const [collections, setCollections] = useState<CatalogCollectionSummary[]>([]);
@@ -326,14 +326,24 @@ export function SourcesPage(props: SourcesPageProps) {
               Connect Whop
             </button>
           ) : (
-            <button
-              type="button"
-              className="knovera-provider-connect-button"
-              onClick={() => setShowConnectWhopCourseDialog(true)}
-              disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
-            >
-              + Connect Another Course
-            </button>
+            <div className="knovera-provider-card-actions">
+              <button
+                type="button"
+                className="knovera-provider-connect-button"
+                onClick={() => setShowConnectWhopCourseDialog(true)}
+                disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+              >
+                + Connect Another Course
+              </button>
+              <button
+                type="button"
+                className="link-button"
+                onClick={() => setBatchImportProvider("WHOP_LESSON")}
+                disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+              >
+                Bulk Import Lessons
+              </button>
+            </div>
           )}
         </div>
         <div className="kv-card knovera-provider-card">

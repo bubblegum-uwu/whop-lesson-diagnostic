@@ -20,6 +20,7 @@ import {
   createListWhopCoursesHandler,
   createRefreshWhopCourseHandler,
   createListWhopCourseLessonsHandler,
+  createBatchAddWhopLessonsHandler,
 } from "./routes/whopCourses.js";
 import { createCourseLessonsHandler } from "./routes/courseLessons.js";
 import { createEnqueueJobsHandler, createRetryJobHandler, createCancelJobHandler, createGetJobHandler } from "./routes/analysisJobs.js";
@@ -169,6 +170,11 @@ export function createApp(config: AppConfig): Express {
   app.get("/api/projects/:projectId/whop-courses", knoveraAuth, createListWhopCoursesHandler(whopCoursesDeps));
   app.post("/api/projects/:projectId/whop-courses/:courseId/refresh", knoveraAuth, whopConnected, createRefreshWhopCourseHandler(whopCoursesDeps));
   app.get("/api/projects/:projectId/whop-courses/:courseId/lessons", knoveraAuth, createListWhopCourseLessonsHandler(whopCoursesDeps));
+  // Phase 4K follow-up — à-la-carte Whop lesson import; calls the live
+  // Whop API to sync each URL's course (see whopCourses.ts's doc comment
+  // on createBatchAddWhopLessonsHandler), so it needs the same
+  // whopConnected gate as connect/refresh above.
+  app.post("/api/projects/:projectId/whop-lessons/batch", knoveraAuth, whopConnected, createBatchAddWhopLessonsHandler(whopCoursesDeps));
   // Reads of already-persisted course/lesson data — never call Whop (see
   // courseLessons.ts / lessonAnalysisDetail.ts: both read Postgres only).
   // Whop being disconnected must never hide content that already exists.
@@ -248,7 +254,7 @@ export function createApp(config: AppConfig): Express {
   // has no equivalent route here (a Whop course already IS a
   // project-scoped collection via courses.project_id; see the Whop routes
   // registered further below).
-  const sourceCollectionsDeps = { pool };
+  const sourceCollectionsDeps = { pool, youtubeApiKey: config.youtubeApiKey };
   app.get("/api/projects/:projectId/collections", knoveraAuth, createListSourceCollectionsHandler(sourceCollectionsDeps));
   app.post("/api/projects/:projectId/collections/youtube", knoveraAuth, createAddYouTubeCollectionHandler(sourceCollectionsDeps));
   app.get("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createGetSourceCollectionHandler(sourceCollectionsDeps));

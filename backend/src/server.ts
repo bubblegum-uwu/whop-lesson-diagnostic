@@ -14,6 +14,7 @@ const config = loadConfig();
 globalRedactor.register(config.geminiApiKey);
 globalRedactor.register(config.db.password);
 globalRedactor.register(config.refreshTokenEncryptionKey);
+if (config.youtubeApiKey) globalRedactor.register(config.youtubeApiKey);
 
 /**
  * One entrypoint, two roles, same container image — see config.ts. The

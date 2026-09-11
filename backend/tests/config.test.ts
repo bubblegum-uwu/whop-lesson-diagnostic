@@ -47,6 +47,18 @@ describe("loadConfig — WHOP_OPERATOR_USER_ID", () => {
   });
 });
 
+describe("loadConfig — Phase 4K YOUTUBE_API_KEY", () => {
+  it("is undefined when YOUTUBE_API_KEY is not set — channel discovery fails closed, never a silent degraded mode", () => {
+    const config = loadConfig(baseEnv());
+    expect(config.youtubeApiKey).toBeUndefined();
+  });
+
+  it("is populated when YOUTUBE_API_KEY is set", () => {
+    const config = loadConfig(baseEnv({ YOUTUBE_API_KEY: "yt-key-123" }));
+    expect(config.youtubeApiKey).toBe("yt-key-123");
+  });
+});
+
 describe("loadConfig — Phase 4D Knovera auth config", () => {
   it("knoveraAuth is undefined when none of the KNOVERA_* vars are set (worker role never needs it)", () => {
     const config = loadConfig(baseEnv());

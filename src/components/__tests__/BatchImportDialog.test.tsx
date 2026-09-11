@@ -47,6 +47,38 @@ describe("BatchImportDialog (Phase 4K)", () => {
     expect(screen.getByRole("button", { name: "Import 2 URLs" })).toBeInTheDocument();
   });
 
+  it("WHOP_LESSON provider posts to the whop-lessons/batch endpoint and shows per-URL results, including invalid/unsupported entries", async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("https://backend.example.com/api/projects/7/whop-lessons/batch");
+      const body = JSON.parse(init!.body as string);
+      expect(body.urls).toEqual(["https://whop.com/co/exp_x/app/courses/cors_x/lessons/lesn_a/", "https://whop.com/co/exp_x/app/courses/cors_x/lessons/lesn_b/", "not a whop url"]);
+      return jsonResponse(200, {
+        results: [
+          { url: "https://whop.com/co/exp_x/app/courses/cors_x/lessons/lesn_a/", kind: "added", lesson: { id: 1, title: "Lesson A", courseId: 5, courseTitle: "Course X", sourceUrl: "https://whop.com/x" } },
+          { url: "https://whop.com/co/exp_x/app/courses/cors_x/lessons/lesn_b/", kind: "duplicate", lesson: { id: 2, title: "Lesson B", courseId: 5, courseTitle: "Course X", sourceUrl: "https://whop.com/y" } },
+          { url: "not a whop url", kind: "invalid", message: "The provided value is not a valid URL." },
+        ],
+        addedCount: 1,
+        duplicateCount: 1,
+        invalidCount: 1,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<BatchImportDialog backendUrl="https://backend.example.com" knoveraToken="token" projectId={7} provider="WHOP_LESSON" onClose={() => {}} onImported={() => {}} />);
+
+    expect(screen.getByRole("heading", { name: "Bulk Import Whop Lessons" })).toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText(/whop.com/), {
+      target: {
+        value:
+          "https://whop.com/co/exp_x/app/courses/cors_x/lessons/lesn_a/\nhttps://whop.com/co/exp_x/app/courses/cors_x/lessons/lesn_b/\nnot a whop url",
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Import 3 URLs/ }));
+
+    await waitFor(() => expect(screen.getByText("1 added · 1 duplicate · 1 invalid")).toBeInTheDocument());
+    expect(screen.getByText("The provided value is not a valid URL.")).toBeInTheDocument();
+  });
+
   it("Cancel never calls the API", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

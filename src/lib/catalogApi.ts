@@ -42,6 +42,8 @@ export interface CatalogCollectionSummary {
   lastSyncedAt: string | null;
   itemCount: number;
   analyzedCount: number;
+  /** Phase 4K follow-up — true when this channel's upload history is bigger than one discovery pass can cover; Refresh continues deeper into it rather than restarting at the newest video. */
+  hasMoreHistory: boolean;
 }
 
 export type CatalogItemStatus = "NOT_ANALYZED" | "QUEUED" | "ANALYZING" | "VALIDATING" | "ANALYZED" | "FAILED" | "CANCELLED";
@@ -94,7 +96,7 @@ export async function addYouTubeCollection(
   knoveraToken: string,
   projectId: number,
   channelRef: string,
-): Promise<{ collection: CatalogCollectionSummary; discoveredCount: number; importedCount: number; adoptedCount: number }> {
+): Promise<{ collection: CatalogCollectionSummary; discoveredCount: number; importedCount: number; adoptedCount: number; hasMoreHistory: boolean }> {
   const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/youtube`, {
     method: "POST",
     headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
@@ -110,7 +112,7 @@ export async function refreshSourceCollection(
   knoveraToken: string,
   projectId: number,
   collectionId: number,
-): Promise<{ collection: CatalogCollectionSummary; discoveredCount: number; importedCount: number; adoptedCount: number }> {
+): Promise<{ collection: CatalogCollectionSummary; discoveredCount: number; importedCount: number; adoptedCount: number; hasMoreHistory: boolean }> {
   const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${collectionId}/refresh`, {
     method: "POST",
     headers: authHeaders(knoveraToken),
@@ -226,6 +228,35 @@ export interface WhopLessonItemSummary {
   durationSeconds: number | null;
   status: CatalogItemStatus;
   eligibleForSynthesis: boolean;
+}
+
+export interface WhopLessonBatchResultEntry {
+  url: string;
+  kind: "added" | "duplicate" | "invalid";
+  lesson?: { id: number; title: string; courseId: number; courseTitle: string; sourceUrl: string };
+  message?: string;
+}
+export interface WhopLessonBatchResponse {
+  results: WhopLessonBatchResultEntry[];
+  addedCount: number;
+  duplicateCount: number;
+  invalidCount: number;
+}
+
+/**
+ * POST /api/projects/:projectId/whop-lessons/batch — Phase 4K follow-up.
+ * à-la-carte Whop lesson import: each URL is validated/resolved
+ * independently (the underlying course is synced once per distinct
+ * course, never once per URL), never analyzes anything.
+ */
+export async function batchAddWhopLessons(backendUrl: string, knoveraToken: string, projectId: number, urls: string[]): Promise<WhopLessonBatchResponse> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/whop-lessons/batch`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ urls }),
+  });
+  await throwOnError(res, `Failed to import Whop lessons (${res.status}).`);
+  return await res.json();
 }
 
 /** GET /api/projects/:projectId/whop-courses/:courseId/lessons */

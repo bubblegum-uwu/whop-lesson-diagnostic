@@ -23,6 +23,8 @@ export interface SourceCollectionRow {
   status: SourceCollectionStatus;
   sanitizedError: string | null;
   lastSyncedAt: Date | null;
+  /** Phase 4K follow-up — see the migration's doc comment. Non-null means a deeper discovery pass is still pending (more, older videos exist beyond the last discovery/refresh call's page cap). Always null for DISCORD. */
+  discoveryCursor: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -37,6 +39,7 @@ interface CollectionDbRow {
   status: SourceCollectionStatus;
   sanitized_error: string | null;
   last_synced_at: Date | null;
+  discovery_cursor: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -52,12 +55,13 @@ function mapRow(row: CollectionDbRow): SourceCollectionRow {
     status: row.status,
     sanitizedError: row.sanitized_error,
     lastSyncedAt: row.last_synced_at,
+    discoveryCursor: row.discovery_cursor,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-const COLUMNS = "id, project_id, provider, external_id, title, source_url, status, sanitized_error, last_synced_at, created_at, updated_at";
+const COLUMNS = "id, project_id, provider, external_id, title, source_url, status, sanitized_error, last_synced_at, discovery_cursor, created_at, updated_at";
 
 export interface CreateSourceCollectionInput {
   projectId: number;
@@ -105,11 +109,19 @@ export async function listSourceCollectionsByProjectId(pool: Pool, projectId: nu
   return result.rows.map(mapRow);
 }
 
-/** Refresh bookkeeping: updates title (a channel may have been renamed) and last_synced_at/status on every successful refresh — never touches membership (project_sources.collection_id) or any existing item's analysis. */
-export async function markCollectionSynced(pool: Pool, id: number, title: string): Promise<void> {
+/**
+ * Refresh bookkeeping: updates title (a channel may have been renamed),
+ * the discovery pagination cursor (see the migration's doc comment — null
+ * once a discovery pass reaches the end of the channel's history, or has
+ * caught up to previously-known videos; non-null when a deeper pass is
+ * still pending), and last_synced_at/status on every successful
+ * discovery/refresh pass — never touches membership
+ * (project_sources.collection_id) or any existing item's analysis.
+ */
+export async function markCollectionSynced(pool: Pool, id: number, title: string, discoveryCursor: string | null = null): Promise<void> {
   await pool.query(
-    `UPDATE source_collections SET title = $2, status = 'READY', sanitized_error = NULL, last_synced_at = now(), updated_at = now() WHERE id = $1`,
-    [id, title],
+    `UPDATE source_collections SET title = $2, status = 'READY', sanitized_error = NULL, discovery_cursor = $3, last_synced_at = now(), updated_at = now() WHERE id = $1`,
+    [id, title, discoveryCursor],
   );
 }
 

@@ -85,6 +85,19 @@ export interface AppConfig {
    * from http/app.ts, mirroring requireApiRoleEnv's existing pattern below.
    */
   knoveraAuth: KnoveraAuthConfig | undefined;
+  /**
+   * Phase 4K — optional. Required for YouTube channel catalog discovery
+   * (resolving @handles and enumerating a channel's uploads via the
+   * YouTube Data API v3 — see youtube/youtubeDataApiClient.ts). When unset,
+   * channel discovery/refresh routes fail closed with a clear
+   * "not configured" error rather than silently degrading to a
+   * permanently-limited discovery mechanism — see
+   * youtube/discoverYoutubeChannelVideos.ts's doc comment for why the
+   * previous RSS-feed-only approach (capped at ~15 most recent uploads)
+   * was replaced. Never logged — see lib/logger.ts's redaction.
+   * À-la-carte single-video add/import is entirely unaffected either way.
+   */
+  youtubeApiKey: string | undefined;
 }
 
 function requireEnv(name: string): string {
@@ -167,6 +180,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
             authSecret: env.KNOVERA_AUTH_SECRET,
           }
         : undefined,
+    youtubeApiKey: env.YOUTUBE_API_KEY,
   };
 }
 
