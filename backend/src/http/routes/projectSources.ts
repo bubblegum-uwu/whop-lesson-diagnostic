@@ -8,14 +8,23 @@ import { getCourseSpendSummary } from "../../db/lessonAnalysesRepo.js";
 import {
   createYouTubeSource,
   createDiscordSource,
+  deleteProjectSource,
   listProjectSourcesByProjectId,
   type ProjectSourceRow,
 } from "../../db/projectSourcesRepo.js";
+import { saveProjectSourceMedia } from "../../db/projectSourceMediaRepo.js";
 import { parseYouTubeVideoUrl, YouTubeUrlParseError } from "../../lib/youtubeUrl.js";
 import { parseDiscordVideoUrl, DiscordUrlParseError } from "../../lib/discordUrl.js";
+import {
+  downloadDiscordAttachment as defaultDownloadDiscordAttachment,
+  DiscordAttachmentDownloadError,
+  type DownloadedDiscordAttachment,
+} from "../../discord/downloadDiscordAttachment.js";
 
 export interface ProjectSourcesRouteDeps {
   pool: Pool;
+  /** Overridable only for tests — production always uses the real HTTP downloader. */
+  downloadDiscordAttachment?: (sourceUrl: string) => Promise<DownloadedDiscordAttachment>;
 }
 
 export type SourceProvider = "WHOP" | "YOUTUBE" | "DISCORD";
@@ -246,15 +255,34 @@ interface AddDiscordSourceBody {
 
 /**
  * POST /api/projects/:projectId/sources/discord — Phase 4I. Stores the
- * identity of a Discord video attachment as a project source; never
- * fetches the attachment itself here (that happens later, at Analyze time
- * — see discord/acquireDiscordVideo.ts). `parseDiscordVideoUrl` is a pure
- * parser — no network call is made before or during this handler.
+ * identity of a Discord video attachment as a project source AND, for a
+ * brand-new (non-duplicate) source, durably captures its video bytes
+ * immediately — while the just-pasted signed URL is still guaranteed
+ * valid. `parseDiscordVideoUrl` is a pure parser, so URL validation itself
+ * makes no network call; the actual download happens only after that
+ * validation and only for a genuinely new source.
  *
- * Same auth/duplicate/isolation conventions as
- * createAddYouTubeSourceHandler above: Knovera auth only (never
- * requireWhopConnected), race-safe duplicate handling via
- * projectSourcesRepo.createDiscordSource's ON CONFLICT.
+ * WHY: a Discord CDN URL's signature expires and cannot be reconstructed
+ * later (no bot/API access to re-request one) — see the
+ * 1789600000000_project-source-media.sql migration's comment. Capturing
+ * the durable copy at ANY later point (e.g. lazily on first Analyze) would
+ * not fix this: the user could wait hours or days before ever clicking
+ * Analyze, by which time the pasted URL may already be dead. This is the
+ * only moment durability can be guaranteed, so it happens here,
+ * synchronously, before responding.
+ *
+ * On a download failure, the just-created project_sources row is deleted
+ * (compensating cleanup — see projectSourcesRepo.deleteProjectSource's doc
+ * comment) and a clear, retryable error is returned; no broken,
+ * un-analyzable source is ever left behind. A duplicate add (the video was
+ * already a source of this project) skips the download entirely — by
+ * invariant, any existing DISCORD project_source already has its media
+ * captured, since a row only survives creation when that capture
+ * succeeded.
+ *
+ * Same auth/isolation conventions as createAddYouTubeSourceHandler above:
+ * Knovera auth only (never requireWhopConnected), race-safe duplicate
+ * handling via projectSourcesRepo.createDiscordSource's ON CONFLICT.
  */
 export function createAddDiscordSourceHandler(deps: ProjectSourcesRouteDeps) {
   return async function addDiscordSourceHandler(req: Request, res: Response): Promise<void> {
@@ -294,6 +322,28 @@ export function createAddDiscordSourceHandler(deps: ProjectSourcesRouteDeps) {
       externalId: parsed.externalId,
       sourceUrl: parsed.sourceUrl,
     });
+
+    if (created) {
+      try {
+        const downloadDiscordAttachment = deps.downloadDiscordAttachment ?? defaultDownloadDiscordAttachment;
+        const media = await downloadDiscordAttachment(parsed.sourceUrl);
+        await saveProjectSourceMedia(deps.pool, {
+          projectSourceId: source.id,
+          content: media.content,
+          contentType: media.contentType,
+          byteSize: media.byteSize,
+        });
+      } catch (err) {
+        await deleteProjectSource(deps.pool, source.id);
+        res.status(502).json({
+          error: {
+            message: err instanceof DiscordAttachmentDownloadError ? err.message : "Could not download this Discord attachment. Please try again.",
+            type: "discord_media_unavailable",
+          },
+        });
+        return;
+      }
+    }
 
     res.status(created ? 201 : 200).json({ source: toDiscordProjectSource(source), duplicate: !created });
   };

@@ -23,7 +23,9 @@
  * cannot be regenerated from the attachment id alone — Discord signs and
  * expires these links server-side, and refreshing an expired link would
  * require a bot re-fetching the original message (out of scope for this
- * phase). See acquireDiscordVideo.ts for how this constrains acquisition.
+ * phase). This is why Phase 4I durably persists the downloaded bytes
+ * rather than relying on this URL again later — see
+ * discord/downloadDiscordAttachment.ts and db/projectSourceMediaRepo.ts.
  */
 
 export class DiscordUrlParseError extends Error {

@@ -3,6 +3,7 @@ import { runProjectSourceAnalysisLoop, type ProjectSourceAnalysisWorkerDeps } fr
 import { createJob, getJob } from "../src/db/projectSourceAnalysisJobsRepo.js";
 import { getLatestByProjectSource } from "../src/db/projectSourceAnalysesRepo.js";
 import { createYouTubeSource, createDiscordSource } from "../src/db/projectSourcesRepo.js";
+import { saveProjectSourceMedia, getProjectSourceMedia } from "../src/db/projectSourceMediaRepo.js";
 import { computeProjectSourceAnalysisFingerprint } from "../src/pipeline/fingerprint.js";
 import { estimateCost } from "../src/pricing/geminiPricing.js";
 import {
@@ -49,12 +50,26 @@ async function makeSource(projectId: number, overrides: { title?: string | null;
 
 const DISCORD_URL = "https://cdn.discordapp.com/attachments/123456789012345678/987654321098765432/clip.mp4?ex=1&is=2&hm=3";
 
-async function makeDiscordSource(projectId: number) {
+/**
+ * Mirrors what createAddDiscordSourceHandler now does at add-time: create
+ * the source, then immediately persist its video bytes durably (Phase 4I
+ * durability fix) — so every test below reflects the source as it actually
+ * exists once successfully added, not the pre-fix shape.
+ */
+async function makeDiscordSource(projectId: number, opts: { skipMedia?: boolean } = {}) {
   const { source } = await createDiscordSource(pool, {
     projectId,
     externalId: "987654321098765432",
     sourceUrl: DISCORD_URL,
   });
+  if (!opts.skipMedia) {
+    await saveProjectSourceMedia(pool, {
+      projectSourceId: source.id,
+      content: Buffer.from("fake-discord-video-bytes"),
+      contentType: "video/mp4",
+      byteSize: 24,
+    });
+  }
   return source;
 }
 
@@ -194,7 +209,7 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
     }
   });
 
-  describe("Discord project sources (Phase 4I)", () => {
+  describe("Discord project sources (Phase 4I + durability fix)", () => {
     it("O: claims a QUEUED Discord job and persists a COMPLETED analysis — the SAME generic pipeline as YouTube", async () => {
       const project = await makeProject();
       const source = await makeDiscordSource(project.id);
@@ -211,7 +226,7 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
       expect(analysis?.strategyFound).toBe(true);
     });
 
-    it("acquisition dispatch: analyzeVideo is called with the Discord attachment's exact stored URL, never a YouTube-style reconstruction", async () => {
+    it("durability fix: acquisition uploads the PERSISTED media bytes to Gemini Files and analyzes the resulting file — never the raw Discord CDN URL directly", async () => {
       const project = await makeProject();
       const source = await makeDiscordSource(project.id);
       await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
@@ -219,24 +234,51 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
       const { deps, gemini } = makeDeps();
       await runProjectSourceAnalysisLoop(deps);
 
+      expect(gemini.uploadFile).toHaveBeenCalledTimes(1);
+      expect(gemini.waitUntilActive).toHaveBeenCalledTimes(1);
+      expect(gemini.deleteFile).toHaveBeenCalledTimes(1);
+
       const calls = (gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls;
-      expect(calls.length).toBe(2);
+      expect(calls.length).toBe(2); // strategy pass + knowledge pass
       for (const call of calls) {
-        expect(call[0]).toEqual({ uri: DISCORD_URL });
+        expect(call[0]).toEqual({ uri: "https://unused/files/x", mimeType: "video/mp4" }); // fakeFile()'s uri — NOT DISCORD_URL
       }
     });
 
-    it("N/Q: no uploadFile/waitUntilActive/deleteFile/ffmpeg step is ever used for Discord analysis either", async () => {
+    it("THE KEY ACCEPTANCE TEST — Re-analyze succeeds using the durably persisted media even after the original signed Discord URL has become unusable, without ever re-reading source_url", async () => {
       const project = await makeProject();
       const source = await makeDiscordSource(project.id);
-      await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
 
-      const { deps, gemini } = makeDeps();
-      await runProjectSourceAnalysisLoop(deps);
+      // Simulate the original signed URL having expired/become invalid —
+      // exactly the scenario the durability fix exists for. If acquisition
+      // still read source_url at analysis time, this corruption would
+      // surface as a failure; it must not, because analysis never touches
+      // source_url anymore.
+      await pool.query(`UPDATE project_sources SET source_url = 'https://cdn.discordapp.com/attachments/1/2/expired.mp4?ex=0&is=0&hm=0' WHERE id = $1`, [
+        source.id,
+      ]);
 
-      expect(gemini.uploadFile).not.toHaveBeenCalled();
-      expect(gemini.waitUntilActive).not.toHaveBeenCalled();
-      expect(gemini.deleteFile).not.toHaveBeenCalled();
+      // First analysis.
+      const job1 = await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+      const { deps: deps1 } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps1);
+      expect((await getJob(pool, job1.jobId))?.status).toBe("COMPLETED");
+
+      // Re-analyze (force — a brand new job/episode), simulating a
+      // Re-analyze click arbitrarily later, with the corrupted/expired URL
+      // still sitting in source_url.
+      const job2 = await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }) + "-reanalyze");
+      const { deps: deps2, gemini: gemini2 } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps2);
+
+      expect((await getJob(pool, job2.jobId))?.status).toBe("COMPLETED");
+      // Proof the stale URL was never even read for acquisition: the only
+      // uri ever handed to analyzeVideo is the Gemini Files uri, never the
+      // (corrupted) source_url column's value.
+      const calls = (gemini2.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls;
+      for (const call of calls) {
+        expect(call[0].uri).not.toContain("expired.mp4");
+      }
     });
 
     it("R: never calls getValidAccessToken for a Discord job either — zero Whop OAuth involvement regardless of provider", async () => {
@@ -254,13 +296,9 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
       spy.mockRestore();
     });
 
-    it("Z: a Discord acquisition failure (e.g. an expired signed URL or tampered source_url) results in a clean FAILED job, never a crash", async () => {
+    it("Z: a Discord source whose media was never captured (should be unreachable in practice — see createAddDiscordSourceHandler's compensating cleanup) fails cleanly, never a crash", async () => {
       const project = await makeProject();
-      // A source_url that no longer matches its own externalId — simulates
-      // a corrupted row; acquireDiscordVideo refuses to acquire it (see
-      // acquireDiscordVideo.test.ts), and that refusal must surface as an
-      // ordinary FAILED job, not an unhandled rejection.
-      const { source } = await createDiscordSource(pool, { projectId: project.id, externalId: "mismatched-id", sourceUrl: DISCORD_URL });
+      const source = await makeDiscordSource(project.id, { skipMedia: true });
       const job = await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
 
       const { deps } = makeDeps();
@@ -269,6 +307,18 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
       const row = await getJob(pool, job.jobId);
       expect(row?.status).toBe("FAILED");
       expect(row?.sanitizedError).toBeTruthy();
+    });
+
+    it("a Gemini upload failure for a Discord source (e.g. bad/corrupted persisted bytes) results in a clean FAILED job, never a crash, and still cleans up the temp file", async () => {
+      const project = await makeProject();
+      const source = await makeDiscordSource(project.id);
+      const job = await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps } = makeDeps({ uploadFile: vi.fn(async () => { throw new Error("Gemini rejected this file."); }) });
+      await runProjectSourceAnalysisLoop(deps);
+
+      const row = await getJob(pool, job.jobId);
+      expect(row?.status).toBe("FAILED");
     });
 
     it("T/U: uses the SAME frozen Phase 3.5A strategy + knowledge prompts/schemas as YouTube — no Discord-specific prompt fork", async () => {
@@ -304,6 +354,19 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
         estimateCost({ inputTokens: analysis!.inputTokens, outputTokens: analysis!.outputTokens, thinkingTokens: analysis!.thinkingTokens })!,
         6,
       );
+    });
+
+    it("the persisted media itself is never deleted by analysis or re-analysis — only the transient Gemini File is cleaned up", async () => {
+      const project = await makeProject();
+      const source = await makeDiscordSource(project.id);
+      await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      const media = await getProjectSourceMedia(pool, source.id);
+      expect(media).not.toBeNull();
+      expect(media?.content.toString()).toBe("fake-discord-video-bytes");
     });
   });
 

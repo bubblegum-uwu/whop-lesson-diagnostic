@@ -2,6 +2,8 @@ import { describe, it, expect, afterAll } from "vitest";
 import {
   createYouTubeSource,
   createDiscordSource,
+  deleteProjectSource,
+  getProjectSourceById,
   listProjectSourcesByProjectId,
   SUPPORTED_PROJECT_SOURCE_PROVIDERS,
 } from "../src/db/projectSourcesRepo.js";
@@ -194,5 +196,29 @@ describe("createDiscordSource (Phase 4I)", () => {
     const sources = await listProjectSourcesByProjectId(pool, project.id);
     expect(sources).toHaveLength(2);
     expect(sources.map((s) => s.provider).sort()).toEqual(["DISCORD", "YOUTUBE"]);
+  });
+});
+
+describe("deleteProjectSource (Phase 4I durability fix — compensating cleanup)", () => {
+  it("removes the source so it never appears again", async () => {
+    const project = await makeProject();
+    const { source } = await createDiscordSource(pool, { projectId: project.id, externalId: "toDelete1", sourceUrl: DISCORD_URL });
+
+    await deleteProjectSource(pool, source.id);
+
+    expect(await getProjectSourceById(pool, source.id)).toBeNull();
+    expect(await listProjectSourcesByProjectId(pool, project.id)).toEqual([]);
+  });
+
+  it("deleting one project's source never affects another project's sources", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    const { source: sourceA } = await createDiscordSource(pool, { projectId: projectA.id, externalId: "toDelete2", sourceUrl: DISCORD_URL });
+    await createDiscordSource(pool, { projectId: projectB.id, externalId: "keepThis1", sourceUrl: DISCORD_URL });
+
+    await deleteProjectSource(pool, sourceA.id);
+
+    expect(await listProjectSourcesByProjectId(pool, projectA.id)).toEqual([]);
+    expect(await listProjectSourcesByProjectId(pool, projectB.id)).toHaveLength(1);
   });
 });

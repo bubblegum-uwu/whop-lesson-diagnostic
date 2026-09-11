@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, afterAll } from "vitest";
+import { describe, it, expect, afterEach, afterAll, vi } from "vitest";
 import type { Server } from "node:http";
 import express from "express";
 import { requireKnoveraAuth } from "../src/http/middleware/knoveraAuth.js";
@@ -27,10 +27,16 @@ async function startTestApp(): Promise<TestServer> {
   app.use(express.json());
   const knoveraAuth = requireKnoveraAuth({ authSecret: SECRET });
   const projectsDeps = { pool };
+  // Never a real network call in this integration test — stands in for the
+  // real HTTP downloader (see downloadDiscordAttachment.ts).
+  const discordDeps = {
+    pool,
+    downloadDiscordAttachment: vi.fn(async () => ({ content: Buffer.from("fake-video-bytes"), contentType: "video/mp4", byteSize: 16 })),
+  };
 
   app.get("/api/projects/:projectId/sources", knoveraAuth, createGetProjectSourcesHandler(projectsDeps));
   app.post("/api/projects/:projectId/sources/youtube", knoveraAuth, createAddYouTubeSourceHandler(projectsDeps));
-  app.post("/api/projects/:projectId/sources/discord", knoveraAuth, createAddDiscordSourceHandler(projectsDeps));
+  app.post("/api/projects/:projectId/sources/discord", knoveraAuth, createAddDiscordSourceHandler(discordDeps));
 
   const server: Server = await new Promise((resolve) => {
     const s = app.listen(0, () => resolve(s));

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
 import type { Request } from "express";
 import { upsertCourse } from "../src/db/coursesRepo.js";
 import { syncLessons, type SyncLessonInput } from "../src/db/lessonsRepo.js";
@@ -7,6 +7,8 @@ import { createJob } from "../src/db/analysisJobsRepo.js";
 import { createSynthesisRun } from "../src/db/synthesisRunsRepo.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, createAddDiscordSourceHandler, type ProjectSource } from "../src/http/routes/projectSources.js";
+import { getProjectSourceMedia } from "../src/db/projectSourceMediaRepo.js";
+import { DiscordAttachmentDownloadError } from "../src/discord/downloadDiscordAttachment.js";
 import { listProjects } from "../src/db/projectsRepo.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 import { makeResponse } from "./helpers/httpMocks.js";
@@ -367,8 +369,22 @@ describe("POST /api/projects/:projectId/sources/youtube (Phase 4H-A)", () => {
 
 const DISCORD_URL = "https://cdn.discordapp.com/attachments/123456789012345678/987654321098765432/clip.mp4?ex=1&is=2&hm=3";
 
-async function callAddDiscordHandler(projectId: string, url: unknown) {
-  const handler = createAddDiscordSourceHandler({ pool });
+/** A stand-in for the real HTTP downloader — no test in this file ever makes a real network call. */
+function fakeDownloadDiscordAttachment(overrides: Partial<{ content: Buffer; contentType: string; byteSize: number }> = {}) {
+  return vi.fn(async () => ({
+    content: Buffer.from("fake-video-bytes"),
+    contentType: "video/mp4",
+    byteSize: 16,
+    ...overrides,
+  }));
+}
+
+async function callAddDiscordHandler(
+  projectId: string,
+  url: unknown,
+  downloadDiscordAttachment: ReturnType<typeof fakeDownloadDiscordAttachment> = fakeDownloadDiscordAttachment(),
+) {
+  const handler = createAddDiscordSourceHandler({ pool, downloadDiscordAttachment });
   const { res, statusCode, body } = makeResponse();
   await handler({ params: { projectId }, body: { url } } as unknown as Request, res);
   return {
@@ -390,6 +406,35 @@ describe("POST /api/projects/:projectId/sources/discord (Phase 4I)", () => {
     expect(body.source?.sourceUrl).toBe(DISCORD_URL);
     expect(body.source?.title).toBeNull();
     expect(body.source?.status).toBe("READY");
+  });
+
+  it("durably persists the downloaded video bytes at add-time (Phase 4I durability fix), while the pasted URL is still fresh", async () => {
+    const project = await makeProject();
+    const download = fakeDownloadDiscordAttachment({ content: Buffer.from("real-bytes-here"), contentType: "video/quicktime", byteSize: 15 });
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), DISCORD_URL, download);
+
+    expect(statusCode).toBe(201);
+    expect(download).toHaveBeenCalledWith(DISCORD_URL);
+    const media = await getProjectSourceMedia(pool, body.source!.id);
+    expect(media?.content.toString()).toBe("real-bytes-here");
+    expect(media?.contentType).toBe("video/quicktime");
+    expect(media?.byteSize).toBe(15);
+  });
+
+  it("a download failure at add-time deletes the just-created source (compensating cleanup) and returns a clear, retryable error — never a broken un-analyzable source", async () => {
+    const project = await makeProject();
+    const failingDownload = vi.fn(async () => {
+      throw new DiscordAttachmentDownloadError("Could not download this Discord attachment (HTTP 403) — the link may already be invalid or expired.");
+    });
+
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), DISCORD_URL, failingDownload);
+
+    expect(statusCode).toBe(502);
+    expect(body.error?.type).toBe("discord_media_unavailable");
+    expect(body.error?.message).toMatch(/invalid or expired/);
+
+    const { body: sourcesBody } = await callHandler(String(project.id));
+    expect(sourcesBody.sources).toEqual([]);
   });
 
   it("D: rejects a malformed URL with a deterministic 400", async () => {

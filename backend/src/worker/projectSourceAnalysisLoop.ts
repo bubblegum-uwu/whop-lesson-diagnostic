@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
 import type { Pool, PoolClient } from "pg";
 import {
   claimNextEligibleJob,
@@ -10,15 +11,16 @@ import {
 } from "../db/projectSourceAnalysisJobsRepo.js";
 import { createProjectSourceAnalysis, findLatestByFingerprint } from "../db/projectSourceAnalysesRepo.js";
 import { getProjectSourceById, ANALYZABLE_PROJECT_SOURCE_PROVIDERS, type ProjectSourceRow } from "../db/projectSourcesRepo.js";
+import { getProjectSourceMedia } from "../db/projectSourceMediaRepo.js";
 import { acquireYouTubeVideo } from "../youtube/acquireYouTubeVideo.js";
-import { acquireDiscordVideo } from "../discord/acquireDiscordVideo.js";
-import { runRawTwoPassCalls, validateAndCombineTwoPassResult } from "../pipeline/twoPassExtraction.js";
+import { withTempMp4File } from "../tempFiles/tempFile.js";
+import { runRawTwoPassCalls, validateAndCombineTwoPassResult, type RawTwoPassResult } from "../pipeline/twoPassExtraction.js";
 import { classifyError, computeNextRetryAt } from "../pipeline/errorClassification.js";
 import { PROMPT_VERSION, SCHEMA_VERSION, EXTRACTOR_VERSION } from "../pipeline/analysisVersion.js";
 import { buildAnalysisSummary } from "../pipeline/analysisSummary.js";
 import { estimateCost } from "../pricing/geminiPricing.js";
 import { startHeartbeat } from "./heartbeat.js";
-import type { GeminiClient, VideoInputRef } from "../gemini/client.js";
+import type { GeminiClient } from "../gemini/client.js";
 import { globalRedactor, type SecretRedactor } from "../lib/redact.js";
 import { logger as defaultLogger, type SafeLogger } from "../lib/logger.js";
 
@@ -85,24 +87,70 @@ class LeaseLostError extends Error {
 /**
  * Phase 4I — the ONE place provider-specific acquisition is dispatched.
  * Everything before this (claim, lease, idempotency check) and everything
- * after (the two-pass Gemini analysis, validation, persistence) is fully
- * shared and has no per-provider branches — see the module doc comment's
- * "provider-specific acquisition → generic analysis" boundary. Adding a
- * future provider means adding one branch here, never touching the rest
- * of this file.
+ * after (schema validation, persistence) is fully shared and has no
+ * per-provider branches — see the module doc comment's "provider-specific
+ * acquisition → generic analysis" boundary. Adding a future provider means
+ * adding one branch here, never touching the rest of this file.
+ *
+ * YOUTUBE and DISCORD deliberately reach Gemini two different ways, and
+ * that is NOT a fork of the analysis itself — runRawTwoPassCalls below is
+ * called identically either way, with the same prompts/schemas/model:
+ *
+ *   - YOUTUBE: acquireYouTubeVideo reconstructs the canonical, never
+ *     -expiring watch URL from the validated external_id and hands it to
+ *     Gemini directly as a VideoContent `uri` — the officially-verified
+ *     direct-YouTube-URL path (see the Phase 4H-B live smoke test).
+ *   - DISCORD: a Discord CDN URL's signature expires and cannot be
+ *     reconstructed later (see db/projectSourceMediaRepo.ts's doc
+ *     comment), AND raw arbitrary-URL video ingestion was never verified
+ *     the way the YouTube URL path was. So Discord instead uploads its
+ *     DURABLY PERSISTED bytes (captured once, at add-time — see
+ *     http/routes/projectSources.ts) to Gemini's Files API, exactly
+ *     mirroring the Whop lesson pipeline's own
+ *     uploadFile/waitUntilActive/deleteFile pattern (see
+ *     pipeline/analyzeLesson.ts) — the same officially-supported,
+ *     already-proven-in-this-codebase ingestion mechanism, just sourced
+ *     from Postgres-persisted bytes instead of a live Mux stream. No new
+ *     Gemini-side capability is introduced; this is 100% reuse.
  */
-function acquireVideoForSource(source: ProjectSourceRow): VideoInputRef {
+async function runRawTwoPassForSource(
+  source: ProjectSourceRow,
+  pool: Pool,
+  twoPassDeps: { gemini: GeminiClient; geminiModel: string; geminiProcessingMode: "agentic" | "static" },
+): Promise<RawTwoPassResult> {
   if (source.provider === "YOUTUBE") {
     // Reconstructs the canonical YouTube URL from the validated external_id
     // ONLY — see acquireYouTubeVideo's doc comment. Synchronous, no network
     // call; never touches source.sourceUrl.
-    return acquireYouTubeVideo(source.externalId);
+    const video = acquireYouTubeVideo(source.externalId);
+    return runRawTwoPassCalls(video, twoPassDeps);
   }
+
   // provider === "DISCORD" (the only other ANALYZABLE_PROJECT_SOURCE_PROVIDERS
-  // member) — see acquireDiscordVideo's doc comment for why this one
-  // legitimately needs sourceUrl too, and how it's revalidated + cross
-  // -checked against externalId before use.
-  return acquireDiscordVideo({ externalId: source.externalId, sourceUrl: source.sourceUrl });
+  // member). The original signed URL (source.sourceUrl) is never read or
+  // used here — durability comes entirely from the persisted media row.
+  const media = await getProjectSourceMedia(pool, source.id);
+  if (!media) {
+    // Should be unreachable: a DISCORD project_source only ever exists once
+    // its media capture has already succeeded (see
+    // createAddDiscordSourceHandler's compensating cleanup on failure).
+    // Defensive only, mirroring the "unsupported provider" defensive check
+    // above it.
+    throw new Error("Discord video media was not found for this source.");
+  }
+  return withTempMp4File(async (tempFilePath) => {
+    await writeFile(tempFilePath, media.content);
+    let file = await twoPassDeps.gemini.uploadFile(tempFilePath);
+    file = await twoPassDeps.gemini.waitUntilActive(file);
+    try {
+      return await runRawTwoPassCalls({ uri: file.uri, mimeType: file.mimeType }, twoPassDeps);
+    } finally {
+      // Always attempt to delete the uploaded Gemini file, success or
+      // failure — the exact same cleanup convention as
+      // pipeline/analyzeLesson.ts's Whop path.
+      await twoPassDeps.gemini.deleteFile(file).catch(() => undefined);
+    }
+  });
 }
 
 function subjectTitleFallback(source: ProjectSourceRow): string {
@@ -155,10 +203,6 @@ async function processOneProjectSourceJob(job: ProjectSourceAnalysisJob, leaseOw
 
   const startedAt = new Date();
   try {
-    // Acquisition dispatched by provider — see acquireVideoForSource above.
-    // Synchronous, no network call, no upload; Gemini fetches the video
-    // server-side once given the URL directly, for every provider here.
-    const video = acquireVideoForSource(source);
     const subject = {
       title: source.title ?? subjectTitleFallback(source),
       durationSeconds: source.durationSeconds,
@@ -166,7 +210,13 @@ async function processOneProjectSourceJob(job: ProjectSourceAnalysisJob, leaseOw
 
     await renewNow("ANALYZING");
     if (leaseLost) throw new LeaseLostError();
-    const raw = await runRawTwoPassCalls(video, {
+    // Acquisition + the two-pass Gemini calls, dispatched by provider — see
+    // runRawTwoPassForSource above. For YOUTUBE this is a direct-URL fetch;
+    // for DISCORD it uploads the durably persisted bytes to Gemini Files
+    // first (see that function's doc comment). Either way, the SAME
+    // prompts/schemas/model run against whatever Gemini-consumable input
+    // results.
+    const raw = await runRawTwoPassForSource(source, deps.pool, {
       gemini: deps.gemini,
       geminiModel: deps.geminiModel,
       geminiProcessingMode: deps.geminiProcessingMode,
