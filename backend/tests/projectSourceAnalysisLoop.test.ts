@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterAll } from "vitest";
 import { runProjectSourceAnalysisLoop, type ProjectSourceAnalysisWorkerDeps } from "../src/worker/projectSourceAnalysisLoop.js";
 import { createJob, getJob } from "../src/db/projectSourceAnalysisJobsRepo.js";
 import { getLatestByProjectSource } from "../src/db/projectSourceAnalysesRepo.js";
-import { createYouTubeSource } from "../src/db/projectSourcesRepo.js";
+import { createYouTubeSource, createDiscordSource } from "../src/db/projectSourcesRepo.js";
 import { computeProjectSourceAnalysisFingerprint } from "../src/pipeline/fingerprint.js";
 import { estimateCost } from "../src/pricing/geminiPricing.js";
 import {
@@ -44,6 +44,17 @@ async function makeSource(projectId: number, overrides: { title?: string | null;
       overrides.durationSeconds ?? null,
     ]);
   }
+  return source;
+}
+
+const DISCORD_URL = "https://cdn.discordapp.com/attachments/123456789012345678/987654321098765432/clip.mp4?ex=1&is=2&hm=3";
+
+async function makeDiscordSource(projectId: number) {
+  const { source } = await createDiscordSource(pool, {
+    projectId,
+    externalId: "987654321098765432",
+    sourceUrl: DISCORD_URL,
+  });
   return source;
 }
 
@@ -181,6 +192,119 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
       const videoArg = call[0];
       expect(videoArg).toEqual({ uri: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" });
     }
+  });
+
+  describe("Discord project sources (Phase 4I)", () => {
+    it("O: claims a QUEUED Discord job and persists a COMPLETED analysis — the SAME generic pipeline as YouTube", async () => {
+      const project = await makeProject();
+      const source = await makeDiscordSource(project.id);
+      const job = await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      const row = await getJob(pool, job.jobId);
+      expect(row?.status).toBe("COMPLETED");
+
+      const analysis = await getLatestByProjectSource(pool, source.id);
+      expect(analysis?.status).toBe("completed");
+      expect(analysis?.strategyFound).toBe(true);
+    });
+
+    it("acquisition dispatch: analyzeVideo is called with the Discord attachment's exact stored URL, never a YouTube-style reconstruction", async () => {
+      const project = await makeProject();
+      const source = await makeDiscordSource(project.id);
+      await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps, gemini } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      const calls = (gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls.length).toBe(2);
+      for (const call of calls) {
+        expect(call[0]).toEqual({ uri: DISCORD_URL });
+      }
+    });
+
+    it("N/Q: no uploadFile/waitUntilActive/deleteFile/ffmpeg step is ever used for Discord analysis either", async () => {
+      const project = await makeProject();
+      const source = await makeDiscordSource(project.id);
+      await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps, gemini } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      expect(gemini.uploadFile).not.toHaveBeenCalled();
+      expect(gemini.waitUntilActive).not.toHaveBeenCalled();
+      expect(gemini.deleteFile).not.toHaveBeenCalled();
+    });
+
+    it("R: never calls getValidAccessToken for a Discord job either — zero Whop OAuth involvement regardless of provider", async () => {
+      const sessionService = await import("../src/whop/sessionService.js");
+      const spy = vi.spyOn(sessionService, "getValidAccessToken");
+
+      const project = await makeProject();
+      const source = await makeDiscordSource(project.id);
+      await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      expect(spy).not.toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it("Z: a Discord acquisition failure (e.g. an expired signed URL or tampered source_url) results in a clean FAILED job, never a crash", async () => {
+      const project = await makeProject();
+      // A source_url that no longer matches its own externalId — simulates
+      // a corrupted row; acquireDiscordVideo refuses to acquire it (see
+      // acquireDiscordVideo.test.ts), and that refusal must surface as an
+      // ordinary FAILED job, not an unhandled rejection.
+      const { source } = await createDiscordSource(pool, { projectId: project.id, externalId: "mismatched-id", sourceUrl: DISCORD_URL });
+      const job = await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      const row = await getJob(pool, job.jobId);
+      expect(row?.status).toBe("FAILED");
+      expect(row?.sanitizedError).toBeTruthy();
+    });
+
+    it("T/U: uses the SAME frozen Phase 3.5A strategy + knowledge prompts/schemas as YouTube — no Discord-specific prompt fork", async () => {
+      const project = await makeProject();
+      const source = await makeDiscordSource(project.id);
+      await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps, gemini } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      const calls = (gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls.length).toBe(2);
+      const prompts = calls.map((call) => call[3]);
+      expect(prompts).toContain(STRATEGY_ONLY_EXTRACTION_PROMPT);
+      expect(prompts).toContain(KNOWLEDGE_ONLY_EXTRACTION_PROMPT);
+      const schemas = calls.map((call) => call[4]);
+      expect(schemas).toContain(STRATEGY_ONLY_RESPONSE_JSON_SCHEMA);
+      expect(schemas).toContain(KNOWLEDGE_ONLY_RESPONSE_JSON_SCHEMA);
+    });
+
+    it("V: Gemini usage/cost is persisted for a Discord analysis using the same pricing infrastructure as YouTube/Whop", async () => {
+      const project = await makeProject();
+      const source = await makeDiscordSource(project.id);
+      await createJob(pool, source.id, computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL }));
+
+      const { deps } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      const analysis = await getLatestByProjectSource(pool, source.id);
+      expect(analysis?.inputTokens).toBeGreaterThan(0);
+      expect(analysis?.outputTokens).toBeGreaterThan(0);
+      expect(analysis?.estimatedCost).toBeCloseTo(
+        estimateCost({ inputTokens: analysis!.inputTokens, outputTokens: analysis!.outputTokens, thinkingTokens: analysis!.thinkingTokens })!,
+        6,
+      );
+    });
   });
 
   it("N/O/P: uses the SAME frozen Phase 3.5A prompts and JSON schemas as Whop lesson analysis", async () => {

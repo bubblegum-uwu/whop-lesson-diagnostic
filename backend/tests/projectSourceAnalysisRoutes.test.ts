@@ -5,7 +5,7 @@ import {
   createGetProjectSourceAnalysisHandler,
   createRetryProjectSourceAnalysisHandler,
 } from "../src/http/routes/projectSourceAnalysis.js";
-import { createYouTubeSource } from "../src/db/projectSourcesRepo.js";
+import { createYouTubeSource, createDiscordSource } from "../src/db/projectSourcesRepo.js";
 import { createJob, claimNextEligibleJob, markFailed, getJob } from "../src/db/projectSourceAnalysisJobsRepo.js";
 import { computeProjectSourceAnalysisFingerprint } from "../src/pipeline/fingerprint.js";
 import type { JobTrigger } from "../src/jobs/runJobTrigger.js";
@@ -133,10 +133,10 @@ describe("POST /api/projects/:projectId/sources/:sourceId/analyze (Phase 4H-B)",
     expect(Number(countResult.rows[0].count)).toBe(1);
   });
 
-  it("I: an unsupported provider is rejected deterministically (defensive — no writer ever creates a non-YOUTUBE source today)", async () => {
+  it("I: an unsupported provider is rejected deterministically (defensive — no writer creates a source with an unrecognized provider today)", async () => {
     const project = await makeProject();
     const source = await makeSource(project.id);
-    await pool.query(`UPDATE project_sources SET provider = 'DISCORD' WHERE id = $1`, [source.id]);
+    await pool.query(`UPDATE project_sources SET provider = 'TWITCH' WHERE id = $1`, [source.id]);
 
     const { statusCode, body } = await callAnalyze(String(project.id), String(source.id));
     expect(statusCode).toBe(400);
@@ -229,5 +229,59 @@ describe("POST /api/projects/:projectId/sources/:sourceId/retry (Phase 4H-B)", (
     const sourceOfB = await makeSource(projectB.id);
     const { statusCode } = await callRetry(String(projectA.id), String(sourceOfB.id));
     expect(statusCode).toBe(404);
+  });
+});
+
+async function makeDiscordSource(projectId: number) {
+  const { source } = await createDiscordSource(pool, {
+    projectId,
+    externalId: randomId("attach"),
+    sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1&is=2&hm=3",
+  });
+  return source;
+}
+
+describe("POST /api/projects/:projectId/sources/:sourceId/analyze — Discord (Phase 4I)", () => {
+  it("A: succeeds for a Discord source in a TRADING_STRATEGIES project, returns 202 with a QUEUED job — the SAME route/handler as YouTube", async () => {
+    const project = await makeProject("TRADING_STRATEGIES");
+    const source = await makeDiscordSource(project.id);
+
+    const { statusCode, body } = await callAnalyze(String(project.id), String(source.id));
+    expect(statusCode).toBe(202);
+    expect((body.job as { status: string }).status).toBe("QUEUED");
+  });
+
+  it("E: rejected for a GENERAL_KNOWLEDGE project — same deterministic 400 as YouTube", async () => {
+    const project = await makeProject("GENERAL_KNOWLEDGE");
+    const source = await makeDiscordSource(project.id);
+
+    const { statusCode, body } = await callAnalyze(String(project.id), String(source.id));
+    expect(statusCode).toBe(400);
+    expect((body.error as { type: string }).type).toBe("analysis_not_available_for_project_type");
+  });
+
+  it("G: a repeated Analyze click on a Discord source while a job is already in flight is idempotent — no duplicate job created", async () => {
+    const project = await makeProject();
+    const source = await makeDiscordSource(project.id);
+
+    await callAnalyze(String(project.id), String(source.id));
+    const { statusCode, body } = await callAnalyze(String(project.id), String(source.id));
+
+    expect(statusCode).toBe(202);
+    expect(body.alreadyQueued).toBe(true);
+    const countResult = await pool.query<{ count: string }>(`SELECT COUNT(*) AS count FROM project_source_analysis_jobs WHERE project_source_id = $1`, [source.id]);
+    expect(Number(countResult.rows[0].count)).toBe(1);
+  });
+
+  it("J: Project A cannot enqueue/retrieve analysis against Project B's Discord source", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    const sourceOfB = await makeDiscordSource(projectB.id);
+
+    const analyzeResult = await callAnalyze(String(projectA.id), String(sourceOfB.id));
+    expect(analyzeResult.statusCode).toBe(404);
+
+    const getResult = await callGetAnalysis(String(projectA.id), String(sourceOfB.id));
+    expect(getResult.statusCode).toBe(404);
   });
 });

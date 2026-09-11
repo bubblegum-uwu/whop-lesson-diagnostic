@@ -8,12 +8,19 @@ import { DiagnosticResult } from "../components/DiagnosticResult";
 import { ErrorResult } from "../components/ErrorResult";
 import { AnalyzeLesson } from "../components/AnalyzeLesson";
 import { AddYouTubeVideoDialog } from "../components/AddYouTubeVideoDialog";
+import { AddDiscordVideoDialog } from "../components/AddDiscordVideoDialog";
 import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysisDrawer";
 import type { AnalysisSummary } from "../lib/courseApi";
 import type { DiagnosticDisplayPayload } from "../lib/diagnosticPayload";
 import type { LessonFetchOutcome } from "../lib/whopApi";
 import { useResolvedProject } from "../lib/useResolvedProject";
-import { getProjectSources, type ProjectSource, type WhopProjectSource, type YouTubeProjectSource } from "../lib/sourcesApi";
+import {
+  getProjectSources,
+  type ProjectSource,
+  type WhopProjectSource,
+  type YouTubeProjectSource,
+  type DiscordProjectSource,
+} from "../lib/sourcesApi";
 import {
   analyzeProjectSource,
   getProjectSourceAnalysis,
@@ -22,7 +29,7 @@ import {
   type ProjectSourceAnalysisStatus,
 } from "../lib/projectSourceAnalysisApi";
 
-/** Phase 4H-B — display labels for the job-status badge on a YouTube source row. Falls back to "Added" for any status this map doesn't recognize (never blank). */
+/** Phase 4H-B — display labels for the job-status badge on a video source row. Falls back to "Added" for any status this map doesn't recognize (never blank). */
 const ANALYSIS_STATUS_LABELS: Record<string, string> = {
   QUEUED: "Queued",
   ANALYZING: "Analyzing",
@@ -34,6 +41,10 @@ const ANALYSIS_STATUS_LABELS: Record<string, string> = {
 };
 const PENDING_ANALYSIS_STATUSES = new Set(["QUEUED", "ANALYZING", "VALIDATING"]);
 const ANALYSIS_POLL_INTERVAL_MS = 4000;
+
+/** Phase 4I — every provider whose source is a single analyzable video, sharing one generic row/list/drawer. A future provider joins this union and this map, never a parallel list. */
+type VideoProjectSource = YouTubeProjectSource | DiscordProjectSource;
+const VIDEO_SOURCE_LABELS: Record<VideoProjectSource["provider"], string> = { YOUTUBE: "YouTube Video", DISCORD: "Discord Video" };
 
 /**
  * The single-lesson diagnostic flow's state (paste one Whop lesson URL,
@@ -86,12 +97,12 @@ type SourcesLoadState =
   | { phase: "error"; message: string };
 
 /**
- * "/projects/:projectId/sources". Provider cards (Whop operational,
- * YouTube/Discord "Coming Soon") plus the existing Whop sync/lesson-analysis
- * UI and the two standalone Whop utility tools (single-lesson diagnostic,
- * find-my-user-id), all reusing the SAME components/handlers App.tsx
- * already wires up — no analysis behavior changed, only where it's
- * rendered.
+ * "/projects/:projectId/sources". Provider cards (Whop, YouTube, and as of
+ * Phase 4I, Discord — all three operational) plus the existing Whop
+ * sync/lesson-analysis UI and the two standalone Whop utility tools
+ * (single-lesson diagnostic, find-my-user-id), all reusing the SAME
+ * components/handlers App.tsx already wires up — no analysis behavior
+ * changed, only where it's rendered.
  *
  * Loads this project's real connected sources from `GET
  * /api/projects/:projectId/sources` (via the same `useResolvedProject` hook
@@ -110,6 +121,7 @@ export function SourcesPage(props: SourcesPageProps) {
   const { state: projectState } = useResolvedProject(props.backendUrl, props.knoveraToken);
   const [sourcesState, setSourcesState] = useState<SourcesLoadState>({ phase: "idle" });
   const [showAddYouTubeDialog, setShowAddYouTubeDialog] = useState(false);
+  const [showAddDiscordDialog, setShowAddDiscordDialog] = useState(false);
   const [analysisStatuses, setAnalysisStatuses] = useState<Record<number, ProjectSourceAnalysisStatus>>({});
   const [analyzingSourceId, setAnalyzingSourceId] = useState<number | null>(null);
   const [analysisActionError, setAnalysisActionError] = useState<string | null>(null);
@@ -142,12 +154,16 @@ export function SourcesPage(props: SourcesPageProps) {
 
   const whopSource: WhopProjectSource | undefined =
     sourcesState.phase === "loaded" ? sourcesState.sources.find((s): s is WhopProjectSource => s.provider === "WHOP") : undefined;
-  // Phase 4H-A — this project's persisted YouTube sources, independent of
-  // whopSource above: a project can have YouTube sources with zero Whop
-  // courses, and vice versa (see the Phase 4H-A PR description's project
-  // isolation rules).
-  const youtubeSources: YouTubeProjectSource[] =
-    sourcesState.phase === "loaded" ? sourcesState.sources.filter((s): s is YouTubeProjectSource => s.provider === "YOUTUBE") : [];
+  // Phase 4H-A/4I — this project's persisted video sources (YouTube and, as
+  // of Phase 4I, Discord), independent of whopSource above: a project can
+  // have video sources with zero Whop courses, and vice versa (see the
+  // Phase 4H-A PR description's project isolation rules). One shared list
+  // for every video-shaped provider — never a parallel array/JSX block per
+  // provider (see VIDEO_SOURCE_LABELS above).
+  const videoSources: VideoProjectSource[] =
+    sourcesState.phase === "loaded"
+      ? sourcesState.sources.filter((s): s is VideoProjectSource => s.provider === "YOUTUBE" || s.provider === "DISCORD")
+      : [];
   // Only a completed, successful lookup that found zero Whop sources counts
   // as "confirmed never had a Whop source" — idle (signed out / not yet
   // resolved), loading, and error all fall back to the pre-Phase-4C
@@ -156,12 +172,12 @@ export function SourcesPage(props: SourcesPageProps) {
   // live Whop connection — see the component doc comment above. Gates the
   // Whop-specific CourseTable/DashboardSummary block and Diagnostic Tools
   // below — both are Whop utilities, unaffected by whether this project
-  // also has YouTube sources.
+  // also has video sources.
   const confirmedNeverHadWhopSource = sourcesState.phase === "loaded" && !whopSource;
   // The top empty-state box, by contrast, is about this project having NO
-  // source at all — a project with YouTube sources but no Whop course must
+  // source at all — a project with video sources but no Whop course must
   // never show "No sources connected yet."
-  const confirmedNeverHadAnySource = confirmedNeverHadWhopSource && youtubeSources.length === 0;
+  const confirmedNeverHadAnySource = confirmedNeverHadWhopSource && videoSources.length === 0;
   const whopLiveConnected = props.connected;
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
 
@@ -189,25 +205,25 @@ export function SourcesPage(props: SourcesPageProps) {
   // all (Analyze isn't available there yet — see isTradingStrategies
   // above), so this never invokes analysis endpoints for a project type
   // that can't use them.
-  const youtubeSourceIdsKey = youtubeSources.map((s) => s.id).join(",");
+  const videoSourceIdsKey = videoSources.map((s) => s.id).join(",");
   useEffect(() => {
-    if (!isTradingStrategies || youtubeSources.length === 0) return;
-    youtubeSources.forEach((source) => void loadAnalysisStatus(source.id));
+    if (!isTradingStrategies || videoSources.length === 0) return;
+    videoSources.forEach((source) => void loadAnalysisStatus(source.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [youtubeSourceIdsKey, isTradingStrategies, resolvedProjectId]);
+  }, [videoSourceIdsKey, isTradingStrategies, resolvedProjectId]);
 
   // Polls only sources whose latest job is genuinely still in flight — never
   // a fabricated progress percentage, just a status re-check until it
   // reaches a terminal state.
   useEffect(() => {
-    const pendingIds = youtubeSources.filter((s) => PENDING_ANALYSIS_STATUSES.has(analysisStatuses[s.id]?.job?.status ?? "")).map((s) => s.id);
+    const pendingIds = videoSources.filter((s) => PENDING_ANALYSIS_STATUSES.has(analysisStatuses[s.id]?.job?.status ?? "")).map((s) => s.id);
     if (pendingIds.length === 0) return;
     const interval = setInterval(() => {
       pendingIds.forEach((id) => void loadAnalysisStatus(id));
     }, ANALYSIS_POLL_INTERVAL_MS);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [youtubeSourceIdsKey, JSON.stringify(Object.fromEntries(Object.entries(analysisStatuses).map(([id, s]) => [id, s.job?.status])))]);
+  }, [videoSourceIdsKey, JSON.stringify(Object.fromEntries(Object.entries(analysisStatuses).map(([id, s]) => [id, s.job?.status])))]);
 
   async function handleAnalyze(sourceId: number, force = false) {
     if (!props.backendUrl || !props.knoveraToken || resolvedProjectId == null) return;
@@ -237,7 +253,7 @@ export function SourcesPage(props: SourcesPageProps) {
     }
   }
 
-  const viewingSource = viewingSourceId != null ? (youtubeSources.find((s) => s.id === viewingSourceId) ?? null) : null;
+  const viewingSource = viewingSourceId != null ? (videoSources.find((s) => s.id === viewingSourceId) ?? null) : null;
   const viewingStatus = viewingSourceId != null ? analysisStatuses[viewingSourceId] : undefined;
 
   return (
@@ -294,9 +310,16 @@ export function SourcesPage(props: SourcesPageProps) {
               <DiscordIcon className="knovera-provider-icon" />
               <h3>Discord</h3>
             </div>
-            <span className="kv-badge kv-badge-muted">Coming Soon</span>
           </div>
-          <p className="knovera-provider-desc">Analyze video shared in Discord posts/channels.</p>
+          <p className="knovera-provider-desc">Add a video attachment shared in Discord to this project.</p>
+          <button
+            type="button"
+            className="knovera-provider-connect-button"
+            onClick={() => setShowAddDiscordDialog(true)}
+            disabled={!props.backendUrl || !props.knoveraToken || resolvedProjectId == null}
+          >
+            Add Discord Video
+          </button>
         </div>
       </div>
 
@@ -311,20 +334,20 @@ export function SourcesPage(props: SourcesPageProps) {
       {confirmedNeverHadAnySource && (
         <div className="kv-card knovera-empty-state">
           <p>No sources connected yet.</p>
-          <p>Connect Whop or add a YouTube video to add content. Discord support is coming soon.</p>
+          <p>Connect Whop, add a YouTube video, or add a Discord video to add content.</p>
         </div>
       )}
 
-      {youtubeSources.length > 0 && (
+      {videoSources.length > 0 && (
         <>
-          <h2 className="knovera-section-title">YouTube Sources</h2>
+          <h2 className="knovera-section-title">Video Sources</h2>
           {analysisActionError && (
             <div className="kv-card knovera-empty-state" role="alert">
               <p>{analysisActionError}</p>
             </div>
           )}
           <ul className="knovera-youtube-source-list">
-            {youtubeSources.map((source) => {
+            {videoSources.map((source) => {
               const status = analysisStatuses[source.id];
               const job = status?.job ?? null;
               const analysis = status?.analysis ?? null;
@@ -338,7 +361,7 @@ export function SourcesPage(props: SourcesPageProps) {
               return (
                 <li key={source.id} className="kv-card knovera-youtube-source-row">
                   <div className="knovera-youtube-source-main">
-                    <span className="knovera-youtube-source-label">YouTube Video</span>
+                    <span className="knovera-youtube-source-label">{VIDEO_SOURCE_LABELS[source.provider]}</span>
                     <span className="knovera-youtube-source-title">{source.title ?? source.sourceUrl}</span>
                   </div>
                   <div className="knovera-youtube-source-actions">
@@ -398,10 +421,10 @@ export function SourcesPage(props: SourcesPageProps) {
           on that definitive signal, same as CourseTable above, so it never
           disappears mid-load or pre-auth (where it's still the way to sign
           in) — and never hidden for MasterMind, which does have a source.
-          Phase 4H-A: this gate stays Whop-specific (confirmedNeverHadWhopSource,
-          not confirmedNeverHadAnySource) — a project with only YouTube
-          sources still has no Whop course to run these Whop utilities
-          against. */}
+          Phase 4H-A/4I: this gate stays Whop-specific (confirmedNeverHadWhopSource,
+          not confirmedNeverHadAnySource) — a project with only video
+          sources (YouTube/Discord) still has no Whop course to run these
+          Whop utilities against. */}
       {!confirmedNeverHadWhopSource && (
         <details className="knovera-diagnostic-tools">
           <summary>Diagnostic Tools</summary>
@@ -452,6 +475,19 @@ export function SourcesPage(props: SourcesPageProps) {
           onClose={() => setShowAddYouTubeDialog(false)}
           onAdded={() => {
             setShowAddYouTubeDialog(false);
+            refreshSources();
+          }}
+        />
+      )}
+
+      {showAddDiscordDialog && props.backendUrl && props.knoveraToken && resolvedProjectId != null && (
+        <AddDiscordVideoDialog
+          backendUrl={props.backendUrl}
+          knoveraToken={props.knoveraToken}
+          projectId={resolvedProjectId}
+          onClose={() => setShowAddDiscordDialog(false)}
+          onAdded={() => {
+            setShowAddDiscordDialog(false);
             refreshSources();
           }}
         />

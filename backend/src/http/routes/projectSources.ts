@@ -7,16 +7,18 @@ import { getSummaryCounts } from "../../db/analysisJobsRepo.js";
 import { getCourseSpendSummary } from "../../db/lessonAnalysesRepo.js";
 import {
   createYouTubeSource,
+  createDiscordSource,
   listProjectSourcesByProjectId,
   type ProjectSourceRow,
 } from "../../db/projectSourcesRepo.js";
 import { parseYouTubeVideoUrl, YouTubeUrlParseError } from "../../lib/youtubeUrl.js";
+import { parseDiscordVideoUrl, DiscordUrlParseError } from "../../lib/discordUrl.js";
 
 export interface ProjectSourcesRouteDeps {
   pool: Pool;
 }
 
-export type SourceProvider = "WHOP" | "YOUTUBE";
+export type SourceProvider = "WHOP" | "YOUTUBE" | "DISCORD";
 export type SourceType = "COURSE" | "VIDEO";
 
 export interface WhopProjectSource {
@@ -55,7 +57,26 @@ export interface YouTubeProjectSource {
   createdAt: Date;
 }
 
-export type ProjectSource = WhopProjectSource | YouTubeProjectSource;
+/**
+ * Phase 4I — the second non-Whop project source, same shape/reasoning as
+ * YouTubeProjectSource (a coherent VIDEO source, not forced into either
+ * WhopProjectSource or a Discord-specific shape). `sourceUrl` here is the
+ * exact Discord CDN attachment link, not a normalized/reconstructed form —
+ * see lib/discordUrl.ts's doc comment on why it can't be.
+ */
+export interface DiscordProjectSource {
+  provider: "DISCORD";
+  sourceType: "VIDEO";
+  id: number;
+  externalId: string;
+  sourceUrl: string;
+  title: string | null;
+  durationSeconds: number | null;
+  status: string;
+  createdAt: Date;
+}
+
+export type ProjectSource = WhopProjectSource | YouTubeProjectSource | DiscordProjectSource;
 
 function toYouTubeProjectSource(row: ProjectSourceRow): YouTubeProjectSource {
   return {
@@ -69,6 +90,25 @@ function toYouTubeProjectSource(row: ProjectSourceRow): YouTubeProjectSource {
     status: row.status,
     createdAt: row.createdAt,
   };
+}
+
+function toDiscordProjectSource(row: ProjectSourceRow): DiscordProjectSource {
+  return {
+    provider: "DISCORD",
+    sourceType: "VIDEO",
+    id: row.id,
+    externalId: row.externalId,
+    sourceUrl: row.sourceUrl,
+    title: row.title,
+    durationSeconds: row.durationSeconds,
+    status: row.status,
+    createdAt: row.createdAt,
+  };
+}
+
+/** Dispatches a raw project_sources row to its provider-specific response shape — the one place that mapping happens, so a new provider means one new branch here, never a change to the GET handler's own logic. */
+function toProjectSource(row: ProjectSourceRow): YouTubeProjectSource | DiscordProjectSource {
+  return row.provider === "YOUTUBE" ? toYouTubeProjectSource(row) : toDiscordProjectSource(row);
 }
 
 /**
@@ -94,7 +134,7 @@ export function createGetProjectSourcesHandler(deps: ProjectSourcesRouteDeps) {
       return;
     }
 
-    const [courses, youtubeRows] = await Promise.all([
+    const [courses, nonWhopRows] = await Promise.all([
       getCoursesByProjectId(deps.pool, projectId),
       listProjectSourcesByProjectId(deps.pool, projectId),
     ]);
@@ -128,7 +168,7 @@ export function createGetProjectSourcesHandler(deps: ProjectSourcesRouteDeps) {
       }),
     );
 
-    const sources: ProjectSource[] = [...whopSources, ...youtubeRows.map(toYouTubeProjectSource)];
+    const sources: ProjectSource[] = [...whopSources, ...nonWhopRows.map(toProjectSource)];
 
     res.status(200).json({ projectId, sources });
   };
@@ -197,5 +237,64 @@ export function createAddYouTubeSourceHandler(deps: ProjectSourcesRouteDeps) {
     });
 
     res.status(created ? 201 : 200).json({ source: toYouTubeProjectSource(source), duplicate: !created });
+  };
+}
+
+interface AddDiscordSourceBody {
+  url?: unknown;
+}
+
+/**
+ * POST /api/projects/:projectId/sources/discord — Phase 4I. Stores the
+ * identity of a Discord video attachment as a project source; never
+ * fetches the attachment itself here (that happens later, at Analyze time
+ * — see discord/acquireDiscordVideo.ts). `parseDiscordVideoUrl` is a pure
+ * parser — no network call is made before or during this handler.
+ *
+ * Same auth/duplicate/isolation conventions as
+ * createAddYouTubeSourceHandler above: Knovera auth only (never
+ * requireWhopConnected), race-safe duplicate handling via
+ * projectSourcesRepo.createDiscordSource's ON CONFLICT.
+ */
+export function createAddDiscordSourceHandler(deps: ProjectSourcesRouteDeps) {
+  return async function addDiscordSourceHandler(req: Request, res: Response): Promise<void> {
+    const projectId = Number(req.params.projectId);
+    if (!Number.isInteger(projectId)) {
+      res.status(404).json({ error: { message: "Unknown project.", type: "project_not_found" } });
+      return;
+    }
+
+    const project = await getProjectById(deps.pool, projectId);
+    if (!project) {
+      res.status(404).json({ error: { message: "Unknown project.", type: "project_not_found" } });
+      return;
+    }
+
+    const body = req.body as AddDiscordSourceBody;
+    if (typeof body?.url !== "string" || body.url.trim().length === 0) {
+      res.status(400).json({ error: { message: "Missing url.", type: "invalid_request" } });
+      return;
+    }
+
+    let parsed;
+    try {
+      parsed = parseDiscordVideoUrl(body.url);
+    } catch (err) {
+      res.status(400).json({
+        error: {
+          message: err instanceof DiscordUrlParseError ? err.message : "Could not parse Discord attachment URL.",
+          type: "invalid_discord_url",
+        },
+      });
+      return;
+    }
+
+    const { source, created } = await createDiscordSource(deps.pool, {
+      projectId,
+      externalId: parsed.externalId,
+      sourceUrl: parsed.sourceUrl,
+    });
+
+    res.status(created ? 201 : 200).json({ source: toDiscordProjectSource(source), duplicate: !created });
   };
 }

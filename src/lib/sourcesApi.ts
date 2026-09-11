@@ -9,7 +9,7 @@ function authHeaders(knoveraToken: string): HeadersInit {
   return { Authorization: `Bearer ${knoveraToken}` };
 }
 
-export type SourceProvider = "WHOP" | "YOUTUBE";
+export type SourceProvider = "WHOP" | "YOUTUBE" | "DISCORD";
 export type SourceType = "COURSE" | "VIDEO";
 
 export interface WhopProjectSource {
@@ -47,7 +47,25 @@ export interface YouTubeProjectSource {
   createdAt: string;
 }
 
-export type ProjectSource = WhopProjectSource | YouTubeProjectSource;
+/**
+ * Phase 4I — the second non-Whop project source, same shape/reasoning as
+ * YouTubeProjectSource. `sourceUrl` is the exact Discord CDN attachment
+ * link (signature included), not a normalized form — see
+ * lib/discordUrl.ts's doc comment.
+ */
+export interface DiscordProjectSource {
+  provider: "DISCORD";
+  sourceType: "VIDEO";
+  id: number;
+  externalId: string;
+  sourceUrl: string;
+  title: string | null;
+  durationSeconds: number | null;
+  status: string;
+  createdAt: string;
+}
+
+export type ProjectSource = WhopProjectSource | YouTubeProjectSource | DiscordProjectSource;
 
 export interface ProjectSourcesResult {
   projectId: number;
@@ -110,4 +128,49 @@ export async function addYouTubeSource(
     );
   }
   return (await res.json()) as AddYouTubeSourceResult;
+}
+
+export class AddDiscordSourceError extends Error {
+  type: string;
+
+  constructor(message: string, type: string) {
+    super(message);
+    this.name = "AddDiscordSourceError";
+    this.type = type;
+  }
+}
+
+export interface AddDiscordSourceResult {
+  source: DiscordProjectSource;
+  /** True when this exact attachment was already a source of this project — the existing row is returned, nothing new was created. */
+  duplicate: boolean;
+}
+
+/**
+ * Phase 4I — POST /api/projects/:projectId/sources/discord. Adds a Discord
+ * video attachment's identity as a project source; never fetches the
+ * attachment itself (see backend/src/http/routes/projectSources.ts for the
+ * server-side scope). Throws AddDiscordSourceError (never a generic Error)
+ * on a non-2xx response so the caller (AddDiscordVideoDialog) can show the
+ * backend's exact validation message.
+ */
+export async function addDiscordSource(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  url: string,
+): Promise<AddDiscordSourceResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/sources/discord`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => undefined);
+    throw new AddDiscordSourceError(
+      body?.error?.message ?? `Failed to add Discord video (${res.status}).`,
+      body?.error?.type ?? "unknown_error",
+    );
+  }
+  return (await res.json()) as AddDiscordSourceResult;
 }

@@ -9,15 +9,16 @@ import {
   type ProjectSourceAnalysisJob,
 } from "../db/projectSourceAnalysisJobsRepo.js";
 import { createProjectSourceAnalysis, findLatestByFingerprint } from "../db/projectSourceAnalysesRepo.js";
-import { getProjectSourceById } from "../db/projectSourcesRepo.js";
+import { getProjectSourceById, ANALYZABLE_PROJECT_SOURCE_PROVIDERS, type ProjectSourceRow } from "../db/projectSourcesRepo.js";
 import { acquireYouTubeVideo } from "../youtube/acquireYouTubeVideo.js";
+import { acquireDiscordVideo } from "../discord/acquireDiscordVideo.js";
 import { runRawTwoPassCalls, validateAndCombineTwoPassResult } from "../pipeline/twoPassExtraction.js";
 import { classifyError, computeNextRetryAt } from "../pipeline/errorClassification.js";
 import { PROMPT_VERSION, SCHEMA_VERSION, EXTRACTOR_VERSION } from "../pipeline/analysisVersion.js";
 import { buildAnalysisSummary } from "../pipeline/analysisSummary.js";
 import { estimateCost } from "../pricing/geminiPricing.js";
 import { startHeartbeat } from "./heartbeat.js";
-import type { GeminiClient } from "../gemini/client.js";
+import type { GeminiClient, VideoInputRef } from "../gemini/client.js";
 import { globalRedactor, type SecretRedactor } from "../lib/redact.js";
 import { logger as defaultLogger, type SafeLogger } from "../lib/logger.js";
 
@@ -81,6 +82,34 @@ class LeaseLostError extends Error {
   }
 }
 
+/**
+ * Phase 4I — the ONE place provider-specific acquisition is dispatched.
+ * Everything before this (claim, lease, idempotency check) and everything
+ * after (the two-pass Gemini analysis, validation, persistence) is fully
+ * shared and has no per-provider branches — see the module doc comment's
+ * "provider-specific acquisition → generic analysis" boundary. Adding a
+ * future provider means adding one branch here, never touching the rest
+ * of this file.
+ */
+function acquireVideoForSource(source: ProjectSourceRow): VideoInputRef {
+  if (source.provider === "YOUTUBE") {
+    // Reconstructs the canonical YouTube URL from the validated external_id
+    // ONLY — see acquireYouTubeVideo's doc comment. Synchronous, no network
+    // call; never touches source.sourceUrl.
+    return acquireYouTubeVideo(source.externalId);
+  }
+  // provider === "DISCORD" (the only other ANALYZABLE_PROJECT_SOURCE_PROVIDERS
+  // member) — see acquireDiscordVideo's doc comment for why this one
+  // legitimately needs sourceUrl too, and how it's revalidated + cross
+  // -checked against externalId before use.
+  return acquireDiscordVideo({ externalId: source.externalId, sourceUrl: source.sourceUrl });
+}
+
+function subjectTitleFallback(source: ProjectSourceRow): string {
+  const providerLabel = source.provider === "YOUTUBE" ? "YouTube" : "Discord";
+  return `${providerLabel} video ${source.externalId}`;
+}
+
 async function processOneProjectSourceJob(job: ProjectSourceAnalysisJob, leaseOwner: string, deps: ProjectSourceAnalysisWorkerDeps): Promise<void> {
   const redactor = deps.redactor ?? globalRedactor;
   const log = deps.logger ?? defaultLogger;
@@ -91,9 +120,9 @@ async function processOneProjectSourceJob(job: ProjectSourceAnalysisJob, leaseOw
     return;
   }
   // Defensive only — the enqueue route (http/routes/projectSourceAnalysis.ts)
-  // already rejects any provider other than YOUTUBE before a job is ever
+  // already rejects any non-analyzable provider before a job is ever
   // created, so this can never actually be reached today.
-  if (source.provider !== "YOUTUBE") {
+  if (!ANALYZABLE_PROJECT_SOURCE_PROVIDERS.has(source.provider)) {
     await markFailed(deps.pool, job.jobId, leaseOwner, "permanent", "Unsupported source provider.");
     return;
   }
@@ -126,12 +155,12 @@ async function processOneProjectSourceJob(job: ProjectSourceAnalysisJob, leaseOw
 
   const startedAt = new Date();
   try {
-    // Acquisition: reconstructs the canonical YouTube URL from the
-    // validated external_id ONLY — see acquireYouTubeVideo's doc comment.
-    // Synchronous, no network call; never touches source.sourceUrl.
-    const video = acquireYouTubeVideo(source.externalId);
+    // Acquisition dispatched by provider — see acquireVideoForSource above.
+    // Synchronous, no network call, no upload; Gemini fetches the video
+    // server-side once given the URL directly, for every provider here.
+    const video = acquireVideoForSource(source);
     const subject = {
-      title: source.title ?? `YouTube video ${source.externalId}`,
+      title: source.title ?? subjectTitleFallback(source),
       durationSeconds: source.durationSeconds,
     };
 

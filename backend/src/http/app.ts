@@ -23,7 +23,7 @@ import { createAnalysisEventsHandler } from "./routes/analysisEvents.js";
 import { createSynthesisStatusHandler, createSynthesizeHandler, createGetSynthesisHandler } from "./routes/courseSynthesis.js";
 import { createProjectSynthesisStatusHandler, createProjectSynthesizeHandler, createGetProjectSynthesisHandler } from "./routes/projectSynthesis.js";
 import { createListProjectsHandler, createGetProjectHandler, createCreateProjectHandler } from "./routes/projects.js";
-import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler } from "./routes/projectSources.js";
+import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, createAddDiscordSourceHandler } from "./routes/projectSources.js";
 import {
   createAnalyzeProjectSourceHandler,
   createGetProjectSourceAnalysisHandler,
@@ -190,12 +190,16 @@ export function createApp(config: AppConfig): Express {
   // (see projectSources.ts's route doc comment). Knovera auth alone, same
   // as every other project route above.
   app.post("/api/projects/:projectId/sources/youtube", knoveraAuth, createAddYouTubeSourceHandler(projectsDeps));
+  // Phase 4I — same reasoning as the YouTube route above, applied to a
+  // Discord video attachment source (see projectSources.ts's route doc
+  // comment).
+  app.post("/api/projects/:projectId/sources/discord", knoveraAuth, createAddDiscordSourceHandler(projectsDeps));
 
-  // Phase 4H-B — project-source (YouTube) analysis. Same jobTrigger as
-  // lesson-analysis enqueueing (one Cloud Run Job, one entrypoint, a THIRD
-  // independent processing phase — see server.ts / worker/
-  // projectSourceAnalysisLoop.ts). Knovera auth only, never
-  // requireWhopConnected: YouTube analysis never touches Whop OAuth.
+  // Phase 4H-B — project-source analysis (YouTube; Discord as of Phase 4I).
+  // Same jobTrigger as lesson-analysis enqueueing (one Cloud Run Job, one
+  // entrypoint, a THIRD independent processing phase — see server.ts /
+  // worker/projectSourceAnalysisLoop.ts). Knovera auth only, never
+  // requireWhopConnected: project-source analysis never touches Whop OAuth.
   const projectSourceAnalysisDeps = { pool, jobTrigger, geminiModel: config.geminiModel };
   app.post(
     "/api/projects/:projectId/sources/:sourceId/analyze",

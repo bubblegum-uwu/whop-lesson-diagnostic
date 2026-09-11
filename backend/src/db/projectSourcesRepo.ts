@@ -5,11 +5,26 @@ import type { Pool } from "pg";
  * 1789400000000_project-sources.sql migration's comment for why `provider`
  * is plain TEXT in the schema rather than a CHECK/ENUM: the allow-listing
  * of supported providers lives here, in application code, instead.
+ *
+ * Phase 4I adds 'DISCORD' here, exactly as that migration comment
+ * anticipated — no migration required, purely an application-code
+ * widening.
  */
-export type ProjectSourceProvider = "YOUTUBE";
+export type ProjectSourceProvider = "YOUTUBE" | "DISCORD";
 
-/** Phase 4I adds 'DISCORD' here, not in a migration — see the schema comment. */
-export const SUPPORTED_PROJECT_SOURCE_PROVIDERS: ReadonlySet<string> = new Set<ProjectSourceProvider>(["YOUTUBE"]);
+export const SUPPORTED_PROJECT_SOURCE_PROVIDERS: ReadonlySet<string> = new Set<ProjectSourceProvider>(["YOUTUBE", "DISCORD"]);
+
+/**
+ * Phase 4I — providers whose sources can be analyzed via the generic
+ * project-source analysis pipeline (see http/routes/projectSourceAnalysis.ts
+ * and worker/projectSourceAnalysisLoop.ts). Every currently-supported
+ * provider is analyzable today; kept as its own named set (rather than
+ * reusing SUPPORTED_PROJECT_SOURCE_PROVIDERS directly at each call site) so
+ * a future provider that's storable-but-not-yet-analyzable (mirroring how
+ * GENERAL_KNOWLEDGE projects can store but not analyze YouTube/Discord
+ * sources today) doesn't require touching every analysis call site.
+ */
+export const ANALYZABLE_PROJECT_SOURCE_PROVIDERS: ReadonlySet<string> = new Set<ProjectSourceProvider>(["YOUTUBE", "DISCORD"]);
 
 /** Source-record readiness, never analysis readiness — Phase 4H-A never runs an analysis, so every row it creates is READY the moment it's inserted. */
 export type ProjectSourceStatus = "READY" | "FAILED";
@@ -29,6 +44,12 @@ export interface ProjectSourceRow {
 }
 
 export interface CreateYouTubeSourceInput {
+  projectId: number;
+  externalId: string;
+  sourceUrl: string;
+}
+
+export interface CreateDiscordSourceInput {
   projectId: number;
   externalId: string;
   sourceUrl: string;
@@ -107,6 +128,37 @@ export async function createYouTubeSource(
   );
   // The row must exist — the ON CONFLICT above only fires because a row
   // matching this exact (project_id, provider, external_id) already does.
+  return { source: mapRow(existing.rows[0]), created: false };
+}
+
+/**
+ * Phase 4I — the second project_sources writer, mirroring
+ * createYouTubeSource exactly (same NULL title/duration, same READY
+ * status, same ON CONFLICT DO NOTHING race-safety). `sourceUrl` here is
+ * the exact, verbatim Discord CDN URL (signature included) — see
+ * lib/discordUrl.ts's doc comment on why it can't be normalized down to
+ * an id the way YouTube's can, and discord/acquireDiscordVideo.ts for how
+ * this stored URL is revalidated (never blindly trusted) before use.
+ */
+export async function createDiscordSource(
+  pool: Pool,
+  input: CreateDiscordSourceInput,
+): Promise<{ source: ProjectSourceRow; created: boolean }> {
+  const inserted = await pool.query<ProjectSourceDbRow>(
+    `INSERT INTO project_sources (project_id, provider, external_id, source_url, title, duration_seconds, status)
+     VALUES ($1, 'DISCORD', $2, $3, NULL, NULL, 'READY')
+     ON CONFLICT (project_id, provider, external_id) DO NOTHING
+     RETURNING ${COLUMNS}`,
+    [input.projectId, input.externalId, input.sourceUrl],
+  );
+  if (inserted.rows[0]) {
+    return { source: mapRow(inserted.rows[0]), created: true };
+  }
+
+  const existing = await pool.query<ProjectSourceDbRow>(
+    `SELECT ${COLUMNS} FROM project_sources WHERE project_id = $1 AND provider = 'DISCORD' AND external_id = $2`,
+    [input.projectId, input.externalId],
+  );
   return { source: mapRow(existing.rows[0]), created: false };
 }
 

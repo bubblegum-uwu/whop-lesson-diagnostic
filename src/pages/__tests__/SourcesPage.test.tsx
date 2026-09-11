@@ -138,21 +138,21 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     await waitFor(() => expect(screen.getByText("Sources unavailable.")).toBeInTheDocument());
   });
 
-  it("E/C: a valid project with no sources shows the empty-source state with accurate copy, not fabricated data or a promise about Discord being connectable now", async () => {
+  it("E/C: a valid project with no sources shows the empty-source state with accurate copy, offering all three real providers (Phase 4I: Discord is functional too, never a stale 'coming soon' promise)", async () => {
     stubFetch([]);
     renderSources("/projects/7/sources", { connected: false });
 
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
-    expect(screen.getByText("Connect Whop or add a YouTube video to add content. Discord support is coming soon.")).toBeInTheDocument();
-    expect(screen.queryByText(/Connect Whop, YouTube, or Discord/)).not.toBeInTheDocument();
+    expect(screen.getByText("Connect Whop, add a YouTube video, or add a Discord video to add content.")).toBeInTheDocument();
   });
 
-  it("F/G/H: Discord shows Coming Soon; YouTube is functional (Add YouTube Video); Whop shows Not Connected (signed out, no live Whop connection) before its source is resolved", () => {
+  it("F/G/H: YouTube and Discord are both functional (Add YouTube Video / Add Discord Video); Whop shows Not Connected (signed out, no live Whop connection) before its source is resolved", () => {
     renderSources("/projects/mastermind/sources", { backendUrl: null, knoveraToken: null, connected: false });
-    expect(screen.getAllByText("Coming Soon")).toHaveLength(1);
+    expect(screen.queryByText("Coming Soon")).not.toBeInTheDocument();
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add Discord Video" })).toBeInTheDocument();
   });
 
   it("I: a real numeric project id route (from the mocked API) works end to end", async () => {
