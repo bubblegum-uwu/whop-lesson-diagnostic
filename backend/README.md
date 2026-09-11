@@ -412,6 +412,7 @@ Dockerfile                 Node 22 + ffmpeg, multi-stage build
 | `KNOVERA_LOGIN_EMAIL` | Yes | — | Not a secret by itself, but treat it as sensitive config. The one configured Knovera operator's login email (Phase 4D) — entirely separate from Whop; see "Knovera application login" below. |
 | `KNOVERA_PASSWORD_HASH` | Yes | — | **Secret.** The scrypt hash of the operator's Knovera login password — never the plaintext. Generate it with `scripts/generateKnoveraPasswordHash.ts` (see below); never hand-write one. |
 | `KNOVERA_AUTH_SECRET` | Yes | — | **Secret.** HMAC signing key for Knovera session tokens, e.g. `openssl rand -base64 48`. Rotating it invalidates every outstanding Knovera session. |
+| `YOUTUBE_API_KEY` | No | — | **Secret.** A YouTube Data API v3 key (Google Cloud Console → APIs & Services → Credentials, with the "YouTube Data API v3" enabled). Required for YouTube channel catalog discovery (Phase 4K) — resolving `@handle`/`/c/`/`/user/` channel references and enumerating a channel's full upload history via `channels.list`/`playlistItems.list`. Without it, "Add Channel"/"Refresh" on a YouTube collection responds `501 youtube_api_not_configured` rather than silently falling back to a permanently-limited discovery mechanism. À-la-carte single-video add is entirely unaffected either way. |
 
 ## Knovera application login (Phase 4D)
 

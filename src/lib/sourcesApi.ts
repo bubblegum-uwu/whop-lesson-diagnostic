@@ -45,6 +45,8 @@ export interface YouTubeProjectSource {
   durationSeconds: number | null;
   status: string;
   createdAt: string;
+  /** Phase 4K — the source_collections row (a YouTube channel) this video was discovered through, or null for an à-la-carte add. */
+  collectionId: number | null;
 }
 
 /**
@@ -63,6 +65,8 @@ export interface DiscordProjectSource {
   durationSeconds: number | null;
   status: string;
   createdAt: string;
+  /** Phase 4K — always null today (Discord collection discovery is not implemented). */
+  collectionId: number | null;
 }
 
 export type ProjectSource = WhopProjectSource | YouTubeProjectSource | DiscordProjectSource;

@@ -40,6 +40,7 @@ const YT_SOURCE: YouTubeProjectSource = {
   durationSeconds: 600,
   status: "READY",
   createdAt: "2026-01-01T00:00:00.000Z",
+  collectionId: null,
 };
 
 const DISCORD_SOURCE: DiscordProjectSource = {
@@ -52,6 +53,7 @@ const DISCORD_SOURCE: DiscordProjectSource = {
   durationSeconds: 120,
   status: "READY",
   createdAt: "2026-01-01T00:00:00.000Z",
+  collectionId: null,
 };
 
 function makeSet(overrides: Partial<SynthesisSetDetail> = {}): SynthesisSetDetail {

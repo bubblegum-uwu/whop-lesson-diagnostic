@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
 import { getProjectById } from "../../db/projectsRepo.js";
-import { getCoursesByProjectId } from "../../db/coursesRepo.js";
+import { getCoursesByProjectId, type CourseRow } from "../../db/coursesRepo.js";
 import { listLessons } from "../../db/lessonsRepo.js";
 import { getSummaryCounts } from "../../db/analysisJobsRepo.js";
 import { getCourseSpendSummary } from "../../db/lessonAnalysesRepo.js";
@@ -64,6 +64,8 @@ export interface YouTubeProjectSource {
   durationSeconds: number | null;
   status: string;
   createdAt: Date;
+  /** Phase 4K — the source_collections row (a YouTube channel) this video was discovered through, or null for an à-la-carte add. */
+  collectionId: number | null;
 }
 
 /**
@@ -83,6 +85,8 @@ export interface DiscordProjectSource {
   durationSeconds: number | null;
   status: string;
   createdAt: Date;
+  /** Phase 4K — always null today (Discord collection discovery is not implemented — see the PR description); kept for API shape symmetry with YouTubeProjectSource. */
+  collectionId: number | null;
 }
 
 export type ProjectSource = WhopProjectSource | YouTubeProjectSource | DiscordProjectSource;
@@ -98,6 +102,7 @@ function toYouTubeProjectSource(row: ProjectSourceRow): YouTubeProjectSource {
     durationSeconds: row.durationSeconds,
     status: row.status,
     createdAt: row.createdAt,
+    collectionId: row.collectionId,
   };
 }
 
@@ -112,6 +117,7 @@ function toDiscordProjectSource(row: ProjectSourceRow): DiscordProjectSource {
     durationSeconds: row.durationSeconds,
     status: row.status,
     createdAt: row.createdAt,
+    collectionId: row.collectionId,
   };
 }
 
@@ -119,6 +125,37 @@ function toDiscordProjectSource(row: ProjectSourceRow): DiscordProjectSource {
 /** Exported for reuse by http/routes/synthesisSets.ts, which needs the same provider-specific source shape for its detail view's member list — the one place this mapping happens, never duplicated. */
 export function toProjectSource(row: ProjectSourceRow): YouTubeProjectSource | DiscordProjectSource {
   return row.provider === "YOUTUBE" ? toYouTubeProjectSource(row) : toDiscordProjectSource(row);
+}
+
+/**
+ * Builds one course's WhopProjectSource summary (lesson/analysis counts +
+ * spend). Extracted from the original inline GET-handler mapping (Phase
+ * 4C) so Phase 4K's whopCourses.ts route can return the exact same shape
+ * right after connecting/refreshing a course, without duplicating this
+ * logic or changing what it computes.
+ */
+export async function buildWhopProjectSource(pool: Pool, course: CourseRow): Promise<WhopProjectSource> {
+  const lessons = await listLessons(pool, course.id);
+  const lessonIds = lessons.map((l) => l.id);
+  const [counts, spend] = await Promise.all([getSummaryCounts(pool, lessonIds), getCourseSpendSummary(pool, lessonIds)]);
+  const analyzedLessonCount = counts.completed + counts.noStrategy;
+  const accountedFor = analyzedLessonCount + counts.processing + counts.queued + counts.failed + counts.authRequired + counts.cancelled;
+
+  return {
+    provider: "WHOP",
+    sourceType: "COURSE",
+    courseId: course.id,
+    externalId: course.whopCourseId,
+    name: course.title,
+    lessonCount: lessons.length,
+    analyzedLessonCount,
+    queuedCount: counts.queued,
+    processingCount: counts.processing,
+    failedCount: counts.failed,
+    remainingCount: Math.max(0, lessons.length - accountedFor),
+    lastSyncedAt: course.lastSyncedAt,
+    totalCost: spend.totalCost,
+  };
 }
 
 /**
@@ -149,34 +186,7 @@ export function createGetProjectSourcesHandler(deps: ProjectSourcesRouteDeps) {
       listProjectSourcesByProjectId(deps.pool, projectId),
     ]);
 
-    const whopSources: ProjectSource[] = await Promise.all(
-      courses.map(async (course): Promise<WhopProjectSource> => {
-        const lessons = await listLessons(deps.pool, course.id);
-        const lessonIds = lessons.map((l) => l.id);
-        const [counts, spend] = await Promise.all([
-          getSummaryCounts(deps.pool, lessonIds),
-          getCourseSpendSummary(deps.pool, lessonIds),
-        ]);
-        const analyzedLessonCount = counts.completed + counts.noStrategy;
-        const accountedFor = analyzedLessonCount + counts.processing + counts.queued + counts.failed + counts.authRequired + counts.cancelled;
-
-        return {
-          provider: "WHOP",
-          sourceType: "COURSE",
-          courseId: course.id,
-          externalId: course.whopCourseId,
-          name: course.title,
-          lessonCount: lessons.length,
-          analyzedLessonCount,
-          queuedCount: counts.queued,
-          processingCount: counts.processing,
-          failedCount: counts.failed,
-          remainingCount: Math.max(0, lessons.length - accountedFor),
-          lastSyncedAt: course.lastSyncedAt,
-          totalCost: spend.totalCost,
-        };
-      }),
-    );
+    const whopSources: ProjectSource[] = await Promise.all(courses.map((course) => buildWhopProjectSource(deps.pool, course)));
 
     const sources: ProjectSource[] = [...whopSources, ...nonWhopRows.map(toProjectSource)];
 
@@ -347,5 +357,152 @@ export function createAddDiscordSourceHandler(deps: ProjectSourcesRouteDeps) {
     }
 
     res.status(created ? 201 : 200).json({ source: toDiscordProjectSource(source), duplicate: !created });
+  };
+}
+
+interface BatchAddSourcesBody {
+  urls?: unknown;
+}
+
+export type BatchAddResultKind = "added" | "duplicate" | "invalid";
+export interface BatchAddResultEntry {
+  url: string;
+  kind: BatchAddResultKind;
+  source?: YouTubeProjectSource | DiscordProjectSource;
+  message?: string;
+}
+export interface BatchAddSourcesResponse {
+  results: BatchAddResultEntry[];
+  addedCount: number;
+  duplicateCount: number;
+  invalidCount: number;
+}
+
+const MAX_BATCH_URLS = 50;
+
+function summarizeBatch(results: BatchAddResultEntry[]): BatchAddSourcesResponse {
+  return {
+    results,
+    addedCount: results.filter((r) => r.kind === "added").length,
+    duplicateCount: results.filter((r) => r.kind === "duplicate").length,
+    invalidCount: results.filter((r) => r.kind === "invalid").length,
+  };
+}
+
+function parseBatchUrls(body: BatchAddSourcesBody, res: Response): string[] | null {
+  if (!Array.isArray(body?.urls) || body.urls.length === 0) {
+    res.status(400).json({ error: { message: "urls must be a non-empty array.", type: "invalid_request" } });
+    return null;
+  }
+  if (body.urls.length > MAX_BATCH_URLS) {
+    res.status(400).json({ error: { message: `At most ${MAX_BATCH_URLS} URLs per batch.`, type: "invalid_request" } });
+    return null;
+  }
+  if (!body.urls.every((u): u is string => typeof u === "string")) {
+    res.status(400).json({ error: { message: "Every entry in urls must be a string.", type: "invalid_request" } });
+    return null;
+  }
+  return body.urls;
+}
+
+/**
+ * POST /api/projects/:projectId/sources/youtube/batch — Phase 4K. Multiple
+ * URLs, one per line/array entry, each independently validated/deduped/
+ * imported — never fails the whole batch because one entry is malformed
+ * (spec section 19/52). Reuses createYouTubeSource unchanged (no network
+ * acquisition for YouTube, same as the single-URL handler above) — never
+ * analyzes anything.
+ */
+export function createBatchAddYouTubeSourcesHandler(deps: ProjectSourcesRouteDeps) {
+  return async function batchAddYouTubeSourcesHandler(req: Request, res: Response): Promise<void> {
+    const projectId = Number(req.params.projectId);
+    if (!Number.isInteger(projectId)) {
+      res.status(404).json({ error: { message: "Unknown project.", type: "project_not_found" } });
+      return;
+    }
+    const project = await getProjectById(deps.pool, projectId);
+    if (!project) {
+      res.status(404).json({ error: { message: "Unknown project.", type: "project_not_found" } });
+      return;
+    }
+
+    const urls = parseBatchUrls(req.body as BatchAddSourcesBody, res);
+    if (!urls) return;
+
+    const results: BatchAddResultEntry[] = [];
+    for (const url of urls) {
+      let parsed;
+      try {
+        parsed = parseYouTubeVideoUrl(url);
+      } catch (err) {
+        results.push({ url, kind: "invalid", message: err instanceof YouTubeUrlParseError ? err.message : "Could not parse YouTube URL." });
+        continue;
+      }
+      const { source, created } = await createYouTubeSource(deps.pool, { projectId, externalId: parsed.externalId, sourceUrl: parsed.sourceUrl });
+      results.push({ url, kind: created ? "added" : "duplicate", source: toYouTubeProjectSource(source) });
+    }
+
+    res.status(200).json(summarizeBatch(results));
+  };
+}
+
+/**
+ * POST /api/projects/:projectId/sources/discord/batch — Phase 4K. Same
+ * partial-success batch shape as the YouTube batch handler above, but
+ * each newly-created entry still goes through the EXACT same durable-
+ * capture-or-compensating-delete path as the single-URL Discord handler
+ * (never weakened — spec section 24): host validation via
+ * parseDiscordVideoUrl, then an immediate download attempt, with the
+ * created row deleted and reported as "invalid" (not silently dropped) if
+ * that capture fails.
+ */
+export function createBatchAddDiscordSourcesHandler(deps: ProjectSourcesRouteDeps) {
+  return async function batchAddDiscordSourcesHandler(req: Request, res: Response): Promise<void> {
+    const projectId = Number(req.params.projectId);
+    if (!Number.isInteger(projectId)) {
+      res.status(404).json({ error: { message: "Unknown project.", type: "project_not_found" } });
+      return;
+    }
+    const project = await getProjectById(deps.pool, projectId);
+    if (!project) {
+      res.status(404).json({ error: { message: "Unknown project.", type: "project_not_found" } });
+      return;
+    }
+
+    const urls = parseBatchUrls(req.body as BatchAddSourcesBody, res);
+    if (!urls) return;
+
+    const results: BatchAddResultEntry[] = [];
+    for (const url of urls) {
+      let parsed;
+      try {
+        parsed = parseDiscordVideoUrl(url);
+      } catch (err) {
+        results.push({ url, kind: "invalid", message: err instanceof DiscordUrlParseError ? err.message : "Could not parse Discord attachment URL." });
+        continue;
+      }
+
+      const { source, created } = await createDiscordSource(deps.pool, { projectId, externalId: parsed.externalId, sourceUrl: parsed.sourceUrl });
+      if (!created) {
+        results.push({ url, kind: "duplicate", source: toDiscordProjectSource(source) });
+        continue;
+      }
+
+      try {
+        const downloadDiscordAttachment = deps.downloadDiscordAttachment ?? defaultDownloadDiscordAttachment;
+        const media = await downloadDiscordAttachment(parsed.sourceUrl);
+        await saveProjectSourceMedia(deps.pool, { projectSourceId: source.id, content: media.content, contentType: media.contentType, byteSize: media.byteSize });
+        results.push({ url, kind: "added", source: toDiscordProjectSource(source) });
+      } catch (err) {
+        await deleteProjectSource(deps.pool, source.id);
+        results.push({
+          url,
+          kind: "invalid",
+          message: err instanceof DiscordAttachmentDownloadError ? err.message : "Could not download this Discord attachment.",
+        });
+      }
+    }
+
+    res.status(200).json(summarizeBatch(results));
   };
 }

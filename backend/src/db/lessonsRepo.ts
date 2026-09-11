@@ -164,6 +164,19 @@ export async function listLessons(pool: Pool, courseId: number): Promise<LessonR
   return result.rows.map(mapRow);
 }
 
+/** Phase 4K follow-up (Whop à-la-carte import) — looks a lesson up by its Whop-native id within one course, the same identity createYouTubeSource/createDiscordSource dedup against (externalId), so an à-la-carte URL for an already-synced lesson is recognized as a duplicate rather than creating a second row. Archived lessons still match (a URL pasted for a lesson Whop stopped returning should still resolve to the same durable row, never a silent duplicate). */
+export async function getLessonByWhopLessonId(pool: Pool, courseId: number, whopLessonId: string): Promise<LessonRow | null> {
+  const result = await pool.query(
+    `SELECT id, course_id, whop_lesson_id, title, lesson_type, visibility,
+            chapter_whop_id, chapter_title, chapter_order, course_order,
+            duration_seconds, video_asset_status, video_available, source_url,
+            archived_at, last_synced_at
+     FROM lessons WHERE course_id = $1 AND whop_lesson_id = $2`,
+    [courseId, whopLessonId],
+  );
+  return result.rows[0] ? mapRow(result.rows[0]) : null;
+}
+
 export async function getLessonById(pool: Pool, lessonId: number): Promise<LessonRow | null> {
   const result = await pool.query(
     `SELECT id, course_id, whop_lesson_id, title, lesson_type, visibility,
