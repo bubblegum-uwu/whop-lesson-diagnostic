@@ -6,11 +6,15 @@ import {
   probeChannelReadable,
   listChannelMessagesPage,
   leaveGuild,
+  getApplicationInfo,
+  hasMessageContentIntent,
+  ensureMessageContentIntentEnabled,
   DiscordApiError,
   DiscordApiRateLimitedError,
   DiscordApiUnauthorizedError,
   DiscordApiForbiddenError,
   DiscordApiNotFoundError,
+  DiscordMessageContentNotEnabledError,
 } from "../src/discord/discordApiClient.js";
 
 afterEach(() => {
@@ -150,5 +154,58 @@ describe("discordApiClient (Phase 4K-B)", () => {
   it("leaveGuild is best-effort and never throws even on failure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("network down"); }));
     await expect(leaveGuild("1", TOKEN)).resolves.toBeUndefined();
+  });
+});
+
+describe("Discord Message Content Intent readiness (Phase 4K-B review fix)", () => {
+  it("getApplicationInfo reads the application's flags via GET /oauth2/applications/@me", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        expect(url).toBe("https://discord.com/api/v10/oauth2/applications/@me");
+        expect((init!.headers as Record<string, string>).Authorization).toBe(`Bot ${TOKEN}`);
+        return jsonResponse(200, { id: "app1", flags: 524288 });
+      }),
+    );
+    expect(await getApplicationInfo(TOKEN)).toEqual({ id: "app1", flags: 524288 });
+  });
+
+  it("getApplicationInfo defaults flags to 0 when Discord omits the field", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { id: "app1" })));
+    expect((await getApplicationInfo(TOKEN)).flags).toBe(0);
+  });
+
+  it("hasMessageContentIntent recognizes the verified (bit 18) flag", () => {
+    expect(hasMessageContentIntent(1 << 18)).toBe(true);
+  });
+
+  it("hasMessageContentIntent recognizes the unverified/limited (bit 19) flag", () => {
+    expect(hasMessageContentIntent(1 << 19)).toBe(true);
+  });
+
+  it("hasMessageContentIntent is false when neither bit is set, even if other unrelated flags are", () => {
+    expect(hasMessageContentIntent(0)).toBe(false);
+    expect(hasMessageContentIntent(1 << 12)).toBe(false); // some unrelated application flag
+  });
+
+  it("hasMessageContentIntent is true when BOTH bits happen to be set", () => {
+    expect(hasMessageContentIntent((1 << 18) | (1 << 19))).toBe(true);
+  });
+
+  it("ensureMessageContentIntentEnabled resolves silently when the intent is enabled", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { id: "app1", flags: 1 << 19 })));
+    await expect(ensureMessageContentIntentEnabled(TOKEN)).resolves.toBeUndefined();
+  });
+
+  it("ensureMessageContentIntentEnabled throws DiscordMessageContentNotEnabledError with an actionable message when the intent is missing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(200, { id: "app1", flags: 0 })));
+    await expect(ensureMessageContentIntentEnabled(TOKEN)).rejects.toThrow(DiscordMessageContentNotEnabledError);
+    let caught: unknown;
+    try {
+      await ensureMessageContentIntentEnabled(TOKEN);
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toMatch(/Message Content/i);
   });
 });

@@ -19,19 +19,37 @@ import { SignJWT, jwtVerify, errors as joseErrors } from "jose";
  * couple of minutes with a real user picking a guild on Discord's own UI).
  * `redirect_uri` itself is never client-supplied — see
  * discordConnections.ts, which builds it from config.publicApiBaseUrl.
+ *
+ * Phase 4K-B review fix — the state now also carries the INITIATING
+ * identity (req.knoveraOperator, from createStartDiscordConnectHandler)
+ * as an `identity` claim, so the callback (a plain, unauthenticated
+ * browser redirect — no Authorization header is possible there) can bind
+ * the resulting discord_guild_authorizations grant to whoever actually
+ * started the connect flow, never to an arbitrary/client-supplied value
+ * (spec: "do not trust arbitrary parameters returned by the browser").
+ * The `jti` (already present for unpredictability) is now also the
+ * single-use key — see db/discordOAuthStateUsesRepo.ts — checked by the
+ * callback before this state is trusted for anything.
  */
 
 const DISCORD_STATE_TYPE = "discord_connect_state";
 const DISCORD_STATE_ALG = "HS256";
 export const DISCORD_STATE_TTL_SECONDS = 10 * 60;
 
+export interface DiscordConnectStatePayload {
+  /** The Knovera identity (req.knoveraOperator) that initiated this connect flow — see http/middleware/knoveraAuth.ts. */
+  identity: string;
+  /** This token's unique id — pass to db/discordOAuthStateUsesRepo.ts's markDiscordOAuthStateUsed to enforce single-use. */
+  jti: string;
+}
+
 function secretKey(secret: string): Uint8Array {
   return new TextEncoder().encode(secret);
 }
 
-export async function issueDiscordConnectState(secret: string, ttlSeconds: number = DISCORD_STATE_TTL_SECONDS): Promise<string> {
+export async function issueDiscordConnectState(secret: string, knoveraIdentity: string, ttlSeconds: number = DISCORD_STATE_TTL_SECONDS): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ type: DISCORD_STATE_TYPE })
+  return new SignJWT({ type: DISCORD_STATE_TYPE, identity: knoveraIdentity })
     .setProtectedHeader({ alg: DISCORD_STATE_ALG, typ: "JWT" })
     .setIssuedAt(now)
     .setExpirationTime(now + ttlSeconds)
@@ -39,13 +57,16 @@ export async function issueDiscordConnectState(secret: string, ttlSeconds: numbe
     .sign(secretKey(secret));
 }
 
-/** Returns true only for a signature-valid, correctly-typed, unexpired state token — a single generic outcome (never distinguishing *why* it failed), same principle as verifyKnoveraToken. */
-export async function verifyDiscordConnectState(token: string, secret: string): Promise<boolean> {
+/** Returns the embedded {identity, jti} only for a signature-valid, correctly-typed, unexpired, well-formed state token — null for any other failure (a single generic outcome, never distinguishing *why* it failed, same principle as verifyKnoveraToken). Callers still need db/discordOAuthStateUsesRepo.ts's markDiscordOAuthStateUsed for single-use enforcement — this function alone is stateless and would accept the same valid token every time. */
+export async function verifyDiscordConnectState(token: string, secret: string): Promise<DiscordConnectStatePayload | null> {
   try {
     const { payload } = await jwtVerify(token, secretKey(secret), { algorithms: [DISCORD_STATE_ALG] });
-    return payload.type === DISCORD_STATE_TYPE;
+    if (payload.type !== DISCORD_STATE_TYPE) return null;
+    if (typeof payload.identity !== "string" || payload.identity.length === 0) return null;
+    if (typeof payload.jti !== "string" || payload.jti.length === 0) return null;
+    return { identity: payload.identity, jti: payload.jti };
   } catch (err) {
-    if (err instanceof joseErrors.JOSEError) return false;
+    if (err instanceof joseErrors.JOSEError) return null;
     throw err;
   }
 }

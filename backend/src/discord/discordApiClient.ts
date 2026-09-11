@@ -105,6 +105,62 @@ async function discordFetch<T>(path: string, botToken: string, params: Record<st
   return json as T;
 }
 
+export class DiscordMessageContentNotEnabledError extends DiscordApiError {}
+
+// Discord's Application object `flags` bitfield — the two bits that mean
+// "this application actually has working access to message content"
+// (content/embeds/attachments/components/poll fields on message objects,
+// both Gateway and REST — see docs.discord.com's Message Content Intent
+// page and backend/README.md's "Discord Message Content Intent" section
+// for the full explanation of why this is required for attachment
+// discovery specifically, not just channel/message permissions).
+//   GATEWAY_MESSAGE_CONTENT          = 1 << 18 — verified apps (100+ guilds), Discord-approved.
+//   GATEWAY_MESSAGE_CONTENT_LIMITED  = 1 << 19 — unverified apps (under 100 guilds), self-toggled in the Developer Portal, no Discord review needed.
+// Either bit means attachment discovery will actually work; neither set
+// means Discord will silently return empty attachments/content/embeds for
+// ordinary historical messages (not an error — see discordFetch's normal
+// 200 OK handling above), which is exactly the failure mode this check
+// exists to catch before it's mistaken for "this channel has no videos."
+const GATEWAY_MESSAGE_CONTENT = 1 << 18;
+const GATEWAY_MESSAGE_CONTENT_LIMITED = 1 << 19;
+
+export interface DiscordApplicationInfo {
+  id: string;
+  /** Raw Application flags bitfield — see hasMessageContentIntent below for the bits that matter here. */
+  flags: number;
+}
+
+/** GET /oauth2/applications/@me — the bot's own application record, including the `flags` bitfield that is the actual source of truth for whether Message Content access is currently live (Discord's own configuration/approval state — never something this app can grant itself via an env var or OAuth scope). */
+export async function getApplicationInfo(botToken: string): Promise<DiscordApplicationInfo> {
+  const app = await discordFetch<{ id: string; flags?: number }>("/oauth2/applications/@me", botToken);
+  return { id: app.id, flags: app.flags ?? 0 };
+}
+
+export function hasMessageContentIntent(flags: number): boolean {
+  return (flags & GATEWAY_MESSAGE_CONTENT) !== 0 || (flags & GATEWAY_MESSAGE_CONTENT_LIMITED) !== 0;
+}
+
+/**
+ * The one readiness gate every route that depends on attachment discovery
+ * calls before doing any real work (connect/start, channel import,
+ * refresh — see discordConnections.ts / discordChannels.ts): a real,
+ * bounded API call to Discord's own application record, never a
+ * self-asserted config flag. Throws DiscordMessageContentNotEnabledError
+ * (never silently proceeds) when neither bit is set, so a deployment
+ * whose Message Content intent lapsed (e.g. an annual reapproval window
+ * closing — see the README) fails closed with a clear, actionable error
+ * instead of quietly reporting "0 attachments found" as if every channel
+ * were simply empty.
+ */
+export async function ensureMessageContentIntentEnabled(botToken: string): Promise<void> {
+  const info = await getApplicationInfo(botToken);
+  if (!hasMessageContentIntent(info.flags)) {
+    throw new DiscordMessageContentNotEnabledError(
+      "This Discord application does not have the Message Content privileged intent enabled/approved — attachment discovery cannot work until it is. See backend/README.md's \"Discord Message Content Intent\" section for exact Developer Portal steps.",
+    );
+  }
+}
+
 export interface DiscordGuildSummary {
   id: string;
   name: string;

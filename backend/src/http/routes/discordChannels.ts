@@ -1,14 +1,16 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
+import type { KnoveraAuthedRequest } from "../middleware/knoveraAuth.js";
 import { getProjectById } from "../../db/projectsRepo.js";
 import { getDiscordGuildById, type DiscordGuildRow } from "../../db/discordGuildsRepo.js";
+import { isDiscordGuildAuthorizedForIdentity } from "../../db/discordGuildAuthorizationsRepo.js";
 import {
   createSourceCollection,
   markCollectionSynced,
   markCollectionSyncFailed,
   type SourceCollectionRow,
 } from "../../db/sourceCollectionsRepo.js";
-import { listGuildChannels, DiscordApiError } from "../../discord/discordApiClient.js";
+import { listGuildChannels, ensureMessageContentIntentEnabled, DiscordApiError, DiscordMessageContentNotEnabledError } from "../../discord/discordApiClient.js";
 import { discoverAndImportDiscordChannelPages, type DiscoverAndImportDiscordResult } from "../../discord/discordChannelDiscovery.js";
 import type { DownloadedDiscordAttachment } from "../../discord/downloadDiscordAttachment.js";
 
@@ -25,6 +27,21 @@ const NOT_CONFIGURED = {
   error: { message: "Discord authenticated collections require DISCORD_CLIENT_ID and DISCORD_BOT_TOKEN to be configured on this deployment.", type: "discord_api_not_configured" },
 } as const;
 const NOT_FOUND_PROJECT = { error: { message: "Unknown project.", type: "project_not_found" } } as const;
+const NOT_FOUND_GUILD = { error: { message: "Unknown or disconnected Discord guild.", type: "guild_not_found" } } as const;
+
+function messageContentNotEnabledBody(err: unknown) {
+  return {
+    error: {
+      message: err instanceof DiscordMessageContentNotEnabledError ? err.message : "Discord Message Content access could not be verified.",
+      type: "discord_message_content_not_enabled",
+    },
+  };
+}
+
+/** Every route in this file sits behind knoveraAuth (http/app.ts) — always present. */
+function identityOf(req: Request): string {
+  return (req as KnoveraAuthedRequest).knoveraOperator!;
+}
 
 interface ImportDiscordChannelsBody {
   guildId?: unknown; // our internal discord_guilds.id
@@ -52,6 +69,15 @@ export interface DiscordChannelImportResultEntry {
  * section 14) — then runs one bounded discovery+import pass exactly like
  * a YouTube channel's first Add Channel call. Per-channel partial success:
  * one bad channel id never fails the whole request.
+ *
+ * Review fix: this project may belong to ANY authenticated Knovera
+ * identity (projects themselves are not identity-scoped — see the
+ * project-model migration's own doc comment), so project ownership alone
+ * can never be the guard here. The guild referenced by `guildId` is only
+ * usable if the CALLING identity is explicitly authorized for it
+ * (discord_guild_authorizations) — never "is this guild installed
+ * anywhere in the deployment," which would let any identity import any
+ * guild's channels into any project it can reach.
  */
 export function createImportDiscordChannelsHandler(deps: DiscordChannelsRouteDeps) {
   return async function importDiscordChannelsHandler(req: Request, res: Response): Promise<void> {
@@ -84,9 +110,17 @@ export function createImportDiscordChannelsHandler(deps: DiscordChannelsRouteDep
     }
     const channelIds = body.channelIds;
 
-    const guild = await getDiscordGuildById(deps.pool, internalGuildId);
-    if (!guild || guild.status !== "CONNECTED") {
-      res.status(404).json({ error: { message: "Unknown or disconnected Discord guild.", type: "guild_not_found" } });
+    const identity = identityOf(req);
+    const [guild, authorized] = await Promise.all([getDiscordGuildById(deps.pool, internalGuildId), isDiscordGuildAuthorizedForIdentity(deps.pool, internalGuildId, identity)]);
+    if (!guild || guild.status !== "CONNECTED" || !authorized) {
+      res.status(404).json(NOT_FOUND_GUILD);
+      return;
+    }
+
+    try {
+      await ensureMessageContentIntentEnabled(botToken);
+    } catch (err) {
+      res.status(503).json(messageContentNotEnabledBody(err));
       return;
     }
 
@@ -159,21 +193,42 @@ async function attachGuildToCollection(pool: Pool, collectionId: number, discord
  * alongside: continues from a pending discoveryCursor if one exists,
  * otherwise checks the front of the channel for new attachments with an
  * early stop as soon as a page is fully already-known.
+ *
+ * Review fix: resolveOwnedCollection (sourceCollections.ts) only proves
+ * this collection belongs to the given PROJECT — projects are not
+ * identity-scoped in this codebase, so that alone would let any
+ * authenticated identity refresh any Discord collection in any project it
+ * can reach. `knoveraIdentity` (the caller's req.knoveraOperator) must
+ * also be explicitly authorized for the collection's OWN guild
+ * (collection.discordGuildId) — a collection with no guild backlink at
+ * all (legacy data, or a bug) fails closed rather than silently allowing.
  */
 export type RefreshDiscordCollectionOutcome =
   | { ok: true; result: DiscoverAndImportDiscordResult }
   | { ok: false; status: number; body: { error: { message: string; type: string } } };
 
+const GUILD_NOT_AUTHORIZED = { error: { message: "You are not authorized to use this Discord server.", type: "discord_guild_not_authorized" } } as const;
+
 export async function refreshDiscordCollection(
   pool: Pool,
   project: { id: number },
   collection: SourceCollectionRow,
+  knoveraIdentity: string,
   deps: DiscordChannelsRouteDeps,
 ): Promise<RefreshDiscordCollectionOutcome> {
   if (!deps.discordBotToken) {
     return { ok: false, status: 501, body: NOT_CONFIGURED };
   }
   const botToken = deps.discordBotToken;
+
+  if (collection.discordGuildId === null || !(await isDiscordGuildAuthorizedForIdentity(pool, collection.discordGuildId, knoveraIdentity))) {
+    return { ok: false, status: 404, body: GUILD_NOT_AUTHORIZED };
+  }
+  try {
+    await ensureMessageContentIntentEnabled(botToken);
+  } catch (err) {
+    return { ok: false, status: 503, body: messageContentNotEnabledBody(err) };
+  }
 
   const hadPendingHistory = collection.discoveryCursor !== null;
   let result: DiscoverAndImportDiscordResult;

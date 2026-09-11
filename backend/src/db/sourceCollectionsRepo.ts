@@ -25,6 +25,8 @@ export interface SourceCollectionRow {
   lastSyncedAt: Date | null;
   /** Phase 4K follow-up — see the migration's doc comment. Non-null means a deeper discovery pass is still pending (more, older videos exist beyond the last discovery/refresh call's page cap). Always null for DISCORD. */
   discoveryCursor: string | null;
+  /** Phase 4K-B review fix — which connected discord_guilds row this channel belongs to (null for YOUTUBE, and for any legacy/edge-case DISCORD row with no guild backlink). Read by discord/discordChannels.ts's refreshDiscordCollection to check the requesting identity's authorization for THIS channel's guild before refreshing it — see discord_guild_authorizations's doc comment. */
+  discordGuildId: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -40,6 +42,7 @@ interface CollectionDbRow {
   sanitized_error: string | null;
   last_synced_at: Date | null;
   discovery_cursor: string | null;
+  discord_guild_id: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -56,12 +59,13 @@ function mapRow(row: CollectionDbRow): SourceCollectionRow {
     sanitizedError: row.sanitized_error,
     lastSyncedAt: row.last_synced_at,
     discoveryCursor: row.discovery_cursor,
+    discordGuildId: row.discord_guild_id !== null ? Number(row.discord_guild_id) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
-const COLUMNS = "id, project_id, provider, external_id, title, source_url, status, sanitized_error, last_synced_at, discovery_cursor, created_at, updated_at";
+const COLUMNS = "id, project_id, provider, external_id, title, source_url, status, sanitized_error, last_synced_at, discovery_cursor, discord_guild_id, created_at, updated_at";
 
 export interface CreateSourceCollectionInput {
   projectId: number;

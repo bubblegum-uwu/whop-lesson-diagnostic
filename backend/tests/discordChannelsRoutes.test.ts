@@ -10,6 +10,7 @@ import {
 import { createAddDiscordSourceHandler, type ProjectSourcesRouteDeps } from "../src/http/routes/projectSources.js";
 import { DiscordAttachmentDownloadError } from "../src/discord/downloadDiscordAttachment.js";
 import { upsertDiscordGuild } from "../src/db/discordGuildsRepo.js";
+import { authorizeDiscordGuildForIdentity } from "../src/db/discordGuildAuthorizationsRepo.js";
 import { getSourceCollectionById } from "../src/db/sourceCollectionsRepo.js";
 import { getProjectSourceById } from "../src/db/projectSourcesRepo.js";
 import { getProjectSourceMedia } from "../src/db/projectSourceMediaRepo.js";
@@ -25,6 +26,9 @@ afterEach(() => {
 });
 
 const BOT_TOKEN = "test-bot-token";
+const MESSAGE_CONTENT_ENABLED_FLAGS = 1 << 19;
+const IDENTITY_A = "identity-a";
+const IDENTITY_B = "identity-b";
 
 function deps(overrides: Partial<SourceCollectionsRouteDeps> = {}): SourceCollectionsRouteDeps {
   return { pool, discordBotToken: BOT_TOKEN, ...overrides };
@@ -35,20 +39,31 @@ async function makeProject(): Promise<{ id: number }> {
   return { id: Number(result.rows[0].id) };
 }
 
+/** Every real guild used across this file is authorized for IDENTITY_A by default — mirrors a real Connect Discord flow having already granted that identity access. */
+async function makeAuthorizedGuild(identity: string = IDENTITY_A) {
+  const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+  await authorizeDiscordGuildForIdentity(pool, guild.id, identity);
+  return guild;
+}
+
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-function callImport(projectId: string, guildId: number, channelIds: string[], d: DiscordChannelsRouteDeps = deps()) {
-  const handler = createImportDiscordChannelsHandler(d);
-  const { res, statusCode, body } = makeResponse();
-  return handler({ params: { projectId }, body: { guildId, channelIds } } as unknown as Request, res).then(() => ({ statusCode: statusCode(), body: body() as Record<string, unknown> }));
+function reqWithIdentity(identity: string, rest: Record<string, unknown>): Request {
+  return { knoveraOperator: identity, ...rest } as unknown as Request;
 }
 
-function callRefresh(projectId: string, collectionId: string, d: SourceCollectionsRouteDeps = deps()) {
+function callImport(identity: string, projectId: string, guildId: number, channelIds: string[], d: DiscordChannelsRouteDeps = deps()) {
+  const handler = createImportDiscordChannelsHandler(d);
+  const { res, statusCode, body } = makeResponse();
+  return handler(reqWithIdentity(identity, { params: { projectId }, body: { guildId, channelIds } }), res).then(() => ({ statusCode: statusCode(), body: body() as Record<string, unknown> }));
+}
+
+function callRefresh(identity: string, projectId: string, collectionId: string, d: SourceCollectionsRouteDeps = deps()) {
   const handler = createRefreshSourceCollectionHandler(d);
   const { res, statusCode, body } = makeResponse();
-  return handler({ params: { projectId, collectionId } } as unknown as Request, res).then(() => ({ statusCode: statusCode(), body: body() as Record<string, unknown> }));
+  return handler(reqWithIdentity(identity, { params: { projectId, collectionId } }), res).then(() => ({ statusCode: statusCode(), body: body() as Record<string, unknown> }));
 }
 
 function callGet(projectId: string, collectionId: string, d: SourceCollectionsRouteDeps = deps()) {
@@ -81,10 +96,15 @@ interface FixtureChannel {
   parentId?: string | null;
 }
 
-/** Simulates GET /guilds/{id}/channels and GET /channels/{id}/messages (paginated, per-channel) for the Discord REST API. */
-function stubDiscordGuild(guildId: string, channels: FixtureChannel[], messagesByChannel: Record<string, FixtureMessage[]> = {}, pageSize = 50) {
+/** Simulates GET /oauth2/applications/@me (Message Content readiness), GET /guilds/{id}/channels, and GET /channels/{id}/messages (paginated, per-channel) for the Discord REST API. */
+function stubDiscordGuild(guildId: string, channels: FixtureChannel[], messagesByChannel: Record<string, FixtureMessage[]> = {}, opts: { pageSize?: number; applicationFlags?: number } = {}) {
+  const pageSize = opts.pageSize ?? 50;
+  const applicationFlags = opts.applicationFlags ?? MESSAGE_CONTENT_ENABLED_FLAGS;
   const fetchMock = vi.fn(async (url: string) => {
     const parsed = new URL(url);
+    if (parsed.pathname === "/api/v10/oauth2/applications/@me") {
+      return jsonResponse(200, { id: "app1", flags: applicationFlags });
+    }
     if (parsed.pathname === `/api/v10/guilds/${guildId}/channels`) {
       return jsonResponse(200, channels.map((c) => ({ id: c.id, name: c.name, type: c.type, parent_id: c.parentId ?? null })));
     }
@@ -125,14 +145,14 @@ function videoMessages(base: number, count: number): FixtureMessage[] {
 describe("POST /api/projects/:projectId/collections/discord/import", () => {
   it("imports multiple explicitly-selected channels, discovers their video attachments, and never auto-analyzes", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     const channels: FixtureChannel[] = [
       { id: "100", name: "trade-reviews", type: 0 },
       { id: "200", name: "announcements", type: 5 },
     ];
     stubDiscordGuild(guild.guildId, channels, { "100": videoMessages(1_000_000, 2), "200": videoMessages(2_000_000, 1) });
 
-    const { statusCode, body } = await callImport(String(project.id), guild.id, ["100", "200"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const { statusCode, body } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100", "200"], deps({ downloadDiscordAttachment: fakeDownloader() }));
     expect(statusCode).toBe(201);
     const results = body.results as Array<Record<string, unknown>>;
     expect(results).toHaveLength(2);
@@ -149,14 +169,14 @@ describe("POST /api/projects/:projectId/collections/discord/import", () => {
 
   it("never auto-imports channels the caller did not select — only the requested channelIds become collections", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     const channels: FixtureChannel[] = [
       { id: "100", name: "trade-reviews", type: 0 },
       { id: "300", name: "off-topic", type: 0 },
     ];
     stubDiscordGuild(guild.guildId, channels, { "100": videoMessages(3_000_000, 1), "300": videoMessages(4_000_000, 1) });
 
-    await callImport(String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
     const { body: listBody } = await callList(String(project.id));
     const collections = listBody.collections as Array<Record<string, unknown>>;
     expect(collections).toHaveLength(1);
@@ -165,10 +185,10 @@ describe("POST /api/projects/:projectId/collections/discord/import", () => {
 
   it("a nonexistent channel id in the selection is reported invalid; other valid channels in the same request still succeed (partial success)", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(5_000_000, 1) });
 
-    const { statusCode, body } = await callImport(String(project.id), guild.id, ["100", "does-not-exist"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const { statusCode, body } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100", "does-not-exist"], deps({ downloadDiscordAttachment: fakeDownloader() }));
     expect(statusCode).toBe(201);
     const results = body.results as Array<Record<string, unknown>>;
     expect(results.find((r) => r.channelId === "100")?.kind).toBe("imported");
@@ -177,37 +197,48 @@ describe("POST /api/projects/:projectId/collections/discord/import", () => {
 
   it("a non-text-capable (voice) channel id is rejected as invalid, never presented as importable", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     stubDiscordGuild(guild.guildId, [{ id: "500", name: "General VC", type: 2 }]);
 
-    const { body } = await callImport(String(project.id), guild.id, ["500"], deps());
+    const { body } = await callImport(IDENTITY_A, String(project.id), guild.id, ["500"], deps());
     const results = body.results as Array<Record<string, unknown>>;
     expect(results[0].kind).toBe("invalid");
   });
 
   it("an unknown or disconnected guild 404s", async () => {
     const project = await makeProject();
-    const { statusCode } = await callImport(String(project.id), 999999999, ["100"], deps());
+    const { statusCode } = await callImport(IDENTITY_A, String(project.id), 999999999, ["100"], deps());
     expect(statusCode).toBe(404);
   });
 
   it("responds 501 when DISCORD_BOT_TOKEN isn't configured, never calling the Discord API", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-    const { statusCode } = await callImport(String(project.id), guild.id, ["100"], deps({ discordBotToken: undefined }));
+    const { statusCode } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ discordBotToken: undefined }));
     expect(statusCode).toBe(501);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("responds 503 discord_message_content_not_enabled when the application lacks Message Content access, before ever listing channels", async () => {
+    const project = await makeProject();
+    const guild = await makeAuthorizedGuild();
+    const fetchMock = stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], {}, { applicationFlags: 0 });
+
+    const { statusCode, body } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps());
+    expect(statusCode).toBe(503);
+    expect((body.error as Record<string, unknown>).type).toBe("discord_message_content_not_enabled");
+    expect(fetchMock.mock.calls.some(([url]) => (url as string).includes("/channels/"))).toBe(false); // never got as far as listing/discovering channels
+  });
+
   it("selecting the same channel across two import calls is idempotent at the collection level — no duplicate collection, adopts already-discovered items", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(6_000_000, 1) });
 
-    const first = await callImport(String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
-    const second = await callImport(String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const first = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const second = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
     expect((first.body.results as Array<Record<string, unknown>>)[0].collection).toEqual((second.body.results as Array<Record<string, unknown>>)[0].collection);
     expect((second.body.results as Array<Record<string, unknown>>)[0].adoptedCount).toBe(1);
     expect((second.body.results as Array<Record<string, unknown>>)[0].importedCount).toBe(0);
@@ -215,25 +246,51 @@ describe("POST /api/projects/:projectId/collections/discord/import", () => {
     const { body: listBody } = await callList(String(project.id));
     expect((listBody.collections as unknown[]).length).toBe(1);
   });
+
+  describe("cross-identity isolation", () => {
+    it("an identity with no authorization for the guild cannot import its channels into ANY project it can reach — 404, never reaching the Discord API", async () => {
+      const project = await makeProject(); // identity B's own, legitimate project
+      const guild = await makeAuthorizedGuild(IDENTITY_A); // only A is authorized
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const { statusCode, body } = await callImport(IDENTITY_B, String(project.id), guild.id, ["100"], deps());
+      expect(statusCode).toBe(404);
+      expect((body.error as Record<string, unknown>).type).toBe("guild_not_found");
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const { body: listBody } = await callList(String(project.id));
+      expect((listBody.collections as unknown[]).length).toBe(0); // nothing was imported on B's behalf
+    });
+
+    it("guessing/hand-crafting the internal guild id does not help an unauthorized identity import it", async () => {
+      const project = await makeProject();
+      const guild = await makeAuthorizedGuild(IDENTITY_A);
+      vi.stubGlobal("fetch", vi.fn());
+
+      const { statusCode } = await callImport(IDENTITY_B, String(project.id), guild.id, ["100"], deps());
+      expect(statusCode).toBe(404);
+    });
+  });
 });
 
 describe("POST /api/projects/:projectId/collections/:collectionId/refresh — Discord dispatch (Phase 4K-B)", () => {
   it("refresh re-discovers newer attachments, preserves existing items, and never duplicates on a second idempotent refresh", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(7_000_000, 1) });
-    const { body: imported } = await callImport(String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const { body: imported } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
     const collectionId = ((imported.results as Array<Record<string, unknown>>)[0].collection as Record<string, unknown>).id as number;
 
     // A newer attachment has appeared since import.
     stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(7_000_000, 2) });
-    const refreshOne = await callRefresh(String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const refreshOne = await callRefresh(IDENTITY_A, String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader() }));
     expect(refreshOne.statusCode).toBe(200);
     expect(refreshOne.body.importedCount).toBe(1);
     expect(refreshOne.body.adoptedCount).toBe(1);
 
     const refreshTwoFetch = stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(7_000_000, 2) });
-    const refreshTwo = await callRefresh(String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const refreshTwo = await callRefresh(IDENTITY_A, String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader() }));
     expect(refreshTwo.body.importedCount).toBe(0);
     expect(refreshTwo.body.adoptedCount).toBe(2); // only the first (fully-known) page re-checked before stopping
     const messagesCalls = refreshTwoFetch.mock.calls.filter(([url]) => (url as string).includes("/messages")).length;
@@ -245,25 +302,25 @@ describe("POST /api/projects/:projectId/collections/:collectionId/refresh — Di
 
   it("a channel deeper than the per-call page cap leaves hasMoreHistory=true, reaching full history via subsequent refreshes, never auto-analyzing", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
-    stubDiscordGuild(guild.guildId, [{ id: "100", name: "deep-channel", type: 0 }], { "100": videoMessages(8_000_000, 30) }, 10);
+    const guild = await makeAuthorizedGuild();
+    stubDiscordGuild(guild.guildId, [{ id: "100", name: "deep-channel", type: 0 }], { "100": videoMessages(8_000_000, 30) }, { pageSize: 10 });
 
-    const { body: imported } = await callImport(String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader(), discordDiscoveryMaxPagesPerCall: 1 }));
+    const { body: imported } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader(), discordDiscoveryMaxPagesPerCall: 1 }));
     const result = (imported.results as Array<Record<string, unknown>>)[0];
     expect(result.importedCount).toBe(10);
     expect(result.hasMoreHistory).toBe(true);
     const collectionId = (result.collection as Record<string, unknown>).id as number;
 
-    const refreshOne = await callRefresh(String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader(), discordDiscoveryMaxPagesPerCall: 1 }));
+    const refreshOne = await callRefresh(IDENTITY_A, String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader(), discordDiscoveryMaxPagesPerCall: 1 }));
     expect(refreshOne.body.importedCount).toBe(10);
     expect(refreshOne.body.hasMoreHistory).toBe(true);
 
-    const refreshTwo = await callRefresh(String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader(), discordDiscoveryMaxPagesPerCall: 1 }));
+    const refreshTwo = await callRefresh(IDENTITY_A, String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader(), discordDiscoveryMaxPagesPerCall: 1 }));
     expect(refreshTwo.body.importedCount).toBe(10);
     // The final page returned exactly pageSize (10) items — a full page never proves history is exhausted (only an empty page does), so the cursor is still non-null here.
     expect(refreshTwo.body.hasMoreHistory).toBe(true);
 
-    const refreshThree = await callRefresh(String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader(), discordDiscoveryMaxPagesPerCall: 1 }));
+    const refreshThree = await callRefresh(IDENTITY_A, String(project.id), String(collectionId), deps({ downloadDiscordAttachment: fakeDownloader(), discordDiscoveryMaxPagesPerCall: 1 }));
     expect(refreshThree.body.importedCount).toBe(0);
     expect(refreshThree.body.hasMoreHistory).toBe(false);
 
@@ -276,17 +333,41 @@ describe("POST /api/projects/:projectId/collections/:collectionId/refresh — Di
     );
     expect(Number((jobCount.rows[0] as { count: string }).count)).toBe(0);
   });
+
+  describe("cross-identity isolation", () => {
+    it("an identity NOT authorized for the collection's guild cannot refresh it, even through a project it legitimately owns", async () => {
+      const project = await makeProject();
+      const guild = await makeAuthorizedGuild(IDENTITY_A);
+      stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(12_000_000, 1) });
+      const { body: imported } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+      const collectionId = ((imported.results as Array<Record<string, unknown>>)[0].collection as Record<string, unknown>).id as number;
+
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+      // B can legitimately read this SAME project's collection (projects aren't identity-scoped in this codebase) — reading is not what's under test.
+      const { statusCode, body } = await callRefresh(IDENTITY_B, String(project.id), String(collectionId), deps());
+      expect(statusCode).toBe(404);
+      expect((body.error as Record<string, unknown>).type).toBe("discord_guild_not_authorized");
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // Nothing changed — refresh never ran on B's unauthorized behalf.
+      const collectionAfter = await getSourceCollectionById(pool, collectionId);
+      expect(collectionAfter?.status).not.toBe("SYNC_FAILED");
+      const { body: detail } = await callGet(String(project.id), String(collectionId));
+      expect((detail.items as unknown[]).length).toBe(1);
+    });
+  });
 });
 
 describe("Discord catalog — project isolation at the HTTP layer (Phase 4K-B)", () => {
   it("the SAME Discord channel imported into two different projects produces independent, isolated collections/items", async () => {
     const projectA = await makeProject();
     const projectB = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Shared Community");
+    const guild = await makeAuthorizedGuild();
     stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(9_000_000, 1) });
 
-    const resultA = await callImport(String(projectA.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
-    const resultB = await callImport(String(projectB.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const resultA = await callImport(IDENTITY_A, String(projectA.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const resultB = await callImport(IDENTITY_A, String(projectB.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
     const collectionIdA = ((resultA.body.results as Array<Record<string, unknown>>)[0].collection as Record<string, unknown>).id as number;
     const collectionIdB = ((resultB.body.results as Array<Record<string, unknown>>)[0].collection as Record<string, unknown>).id as number;
     expect(collectionIdA).not.toBe(collectionIdB);
@@ -294,7 +375,7 @@ describe("Discord catalog — project isolation at the HTTP layer (Phase 4K-B)",
     // Project B can never read or refresh Project A's collection through the HTTP layer.
     const crossGet = await callGet(String(projectB.id), String(collectionIdA));
     expect(crossGet.statusCode).toBe(404);
-    const crossRefresh = await callRefresh(String(projectB.id), String(collectionIdA));
+    const crossRefresh = await callRefresh(IDENTITY_A, String(projectB.id), String(collectionIdA));
     expect(crossRefresh.statusCode).toBe(404);
 
     const { body: listA } = await callList(String(projectA.id));
@@ -307,7 +388,7 @@ describe("Discord catalog — project isolation at the HTTP layer (Phase 4K-B)",
 describe("Discord dedup — HTTP layer, both directions (Phase 4K-B)", () => {
   it("à-la-carte import FIRST, then the same attachment is discovered via channel import — adopted, no duplicate media/source, collection association added", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     const alaCarteUrl = "https://cdn.discordapp.com/attachments/1/10000001/clip.mp4?ex=old";
     const { statusCode: alaCarteStatus, body: alaCarteBody } = await callAddAlaCarteDiscord(String(project.id), alaCarteUrl, { pool, downloadDiscordAttachment: fakeDownloader() });
     expect(alaCarteStatus).toBe(201);
@@ -317,7 +398,7 @@ describe("Discord dedup — HTTP layer, both directions (Phase 4K-B)", () => {
       "100": [{ id: "20000001", attachments: [{ id: "10000001", filename: "clip.mp4", url: "https://cdn.discordapp.com/attachments/1/10000001/clip.mp4?ex=fresh", size: 50 }] }],
     });
     const downloader = fakeDownloader();
-    const { body } = await callImport(String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: downloader }));
+    const { body } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: downloader }));
     const result = (body.results as Array<Record<string, unknown>>)[0];
     expect(result.adoptedCount).toBe(1);
     expect(result.importedCount).toBe(0);
@@ -331,11 +412,11 @@ describe("Discord dedup — HTTP layer, both directions (Phase 4K-B)", () => {
 
   it("channel import FIRST, then the SAME attachment is pasted à-la-carte — reused, no second source/media row created", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], {
       "100": [{ id: "20000002", attachments: [{ id: "10000002", filename: "clip.mp4", url: "https://cdn.discordapp.com/attachments/1/10000002/clip.mp4?ex=1", size: 50 }] }],
     });
-    const { body: imported } = await callImport(String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const { body: imported } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
     const collectionId = ((imported.results as Array<Record<string, unknown>>)[0].collection as Record<string, unknown>).id as number;
     const beforeMedia = await pool.query(`SELECT ps.id FROM project_sources ps WHERE ps.collection_id = $1`, [collectionId]);
     const originalSourceId = Number((beforeMedia.rows[0] as { id: string }).id);
@@ -356,10 +437,16 @@ describe("Discord dedup — HTTP layer, both directions (Phase 4K-B)", () => {
 describe("Discord connection-loss / API failure handling (Phase 4K-B)", () => {
   it("a 403 (bot lacks access to list guild channels) fails the whole import cleanly with a sanitized error, creating no collections", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(403, { message: "Missing Access" })));
+    const guild = await makeAuthorizedGuild();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (new URL(url).pathname === "/api/v10/oauth2/applications/@me") return jsonResponse(200, { id: "app1", flags: MESSAGE_CONTENT_ENABLED_FLAGS });
+        return jsonResponse(403, { message: "Missing Access" });
+      }),
+    );
 
-    const { statusCode, body } = await callImport(String(project.id), guild.id, ["100"], deps());
+    const { statusCode, body } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps());
     expect(statusCode).toBe(502);
     expect((body.error as Record<string, unknown>).message).not.toContain(BOT_TOKEN);
 
@@ -369,9 +456,10 @@ describe("Discord connection-loss / API failure handling (Phase 4K-B)", () => {
 
   it("a per-channel discovery failure (429 exhausted) marks that channel's collection SYNC_FAILED with a sanitized error, reported invalid in the response — other channels in the same request are unaffected", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     const fetchMock = vi.fn(async (url: string) => {
       const parsed = new URL(url);
+      if (parsed.pathname === "/api/v10/oauth2/applications/@me") return jsonResponse(200, { id: "app1", flags: MESSAGE_CONTENT_ENABLED_FLAGS });
       if (parsed.pathname === `/api/v10/guilds/${guild.guildId}/channels`) {
         return jsonResponse(200, [
           { id: "100", name: "flaky-channel", type: 0, parent_id: null },
@@ -384,7 +472,7 @@ describe("Discord connection-loss / API failure handling (Phase 4K-B)", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const { statusCode, body } = await callImport(String(project.id), guild.id, ["100", "200"], deps());
+    const { statusCode, body } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100", "200"], deps());
     expect(statusCode).toBe(201);
     const results = body.results as Array<Record<string, unknown>>;
     const flaky = results.find((r) => r.channelId === "100")!;
@@ -399,13 +487,19 @@ describe("Discord connection-loss / API failure handling (Phase 4K-B)", () => {
 
   it("a refresh failure (401 — bot token invalidated / revoked) fails cleanly with a sanitized error, leaving the existing catalog completely intact", async () => {
     const project = await makeProject();
-    const guild = await upsertDiscordGuild(pool, randomId("guild"), "Trading Community");
+    const guild = await makeAuthorizedGuild();
     stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(11_000_000, 1) });
-    const { body: imported } = await callImport(String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const { body: imported } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
     const collectionId = ((imported.results as Array<Record<string, unknown>>)[0].collection as Record<string, unknown>).id as number;
 
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse(401, { message: "Unauthorized" })));
-    const { statusCode, body } = await callRefresh(String(project.id), String(collectionId));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (new URL(url).pathname === "/api/v10/oauth2/applications/@me") return jsonResponse(200, { id: "app1", flags: MESSAGE_CONTENT_ENABLED_FLAGS });
+        return jsonResponse(401, { message: "Unauthorized" });
+      }),
+    );
+    const { statusCode, body } = await callRefresh(IDENTITY_A, String(project.id), String(collectionId));
     expect(statusCode).toBe(502);
     expect((body.error as Record<string, unknown>).message).not.toContain(BOT_TOKEN);
 
@@ -413,5 +507,21 @@ describe("Discord connection-loss / API failure handling (Phase 4K-B)", () => {
     expect(collectionAfter?.status).toBe("SYNC_FAILED");
     const { body: detail } = await callGet(String(project.id), String(collectionId));
     expect((detail.items as unknown[]).length).toBe(1); // the previously-imported item is untouched
+  });
+
+  it("a refresh failure (bot lost Message Content access) fails cleanly with a sanitized error, leaving the existing catalog completely intact", async () => {
+    const project = await makeProject();
+    const guild = await makeAuthorizedGuild();
+    stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], { "100": videoMessages(13_000_000, 1) });
+    const { body: imported } = await callImport(IDENTITY_A, String(project.id), guild.id, ["100"], deps({ downloadDiscordAttachment: fakeDownloader() }));
+    const collectionId = ((imported.results as Array<Record<string, unknown>>)[0].collection as Record<string, unknown>).id as number;
+
+    stubDiscordGuild(guild.guildId, [{ id: "100", name: "trade-reviews", type: 0 }], {}, { applicationFlags: 0 });
+    const { statusCode, body } = await callRefresh(IDENTITY_A, String(project.id), String(collectionId));
+    expect(statusCode).toBe(503);
+    expect((body.error as Record<string, unknown>).type).toBe("discord_message_content_not_enabled");
+
+    const { body: detail } = await callGet(String(project.id), String(collectionId));
+    expect((detail.items as unknown[]).length).toBe(1); // untouched
   });
 });

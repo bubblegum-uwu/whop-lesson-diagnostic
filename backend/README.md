@@ -416,6 +416,100 @@ Dockerfile                 Node 22 + ffmpeg, multi-stage build
 | `DISCORD_CLIENT_ID` | No | — | Not a secret. The Discord application's client id (Discord Developer Portal → your application → OAuth2 → General). Public — embedded in the bot-install authorize URL the frontend redirects to. Required, together with `DISCORD_BOT_TOKEN` and `PUBLIC_API_BASE_URL`, for authenticated Discord server/channel connections (Phase 4K-B). |
 | `DISCORD_BOT_TOKEN` | No | — | **Secret.** The Discord application's bot token (Discord Developer Portal → your application → Bot → Reset Token). This one static, deployment-wide token authenticates every post-connect Discord API call (guild/channel listing, message-history pagination) — never a per-user/per-project OAuth token, and never refreshed or stored per guild. Required for authenticated Discord server/channel connections (Phase 4K-B); without it, "Connect Discord" and every Discord guild/channel route responds `501 discord_api_not_configured`. À-la-carte single-attachment Discord add is entirely unaffected either way. |
 
+## Discord Message Content Intent (required for attachment discovery)
+
+Channel permissions (`VIEW_CHANNEL` + `READ_MESSAGE_HISTORY`, requested by
+the bot-install flow above) are **necessary but not sufficient** for
+authenticated Discord channel discovery to actually find video
+attachments. Per Discord's own documentation, the `content`, `embeds`,
+`attachments`, `components`, and `poll` fields on a message object are
+**Message Content data** — gated by a separate, application-level
+privileged intent, on both the Gateway and every REST message-fetch
+endpoint this integration uses (`GET /channels/{id}/messages`). Without
+that intent enabled/approved, Discord does not error — it silently
+returns those fields **empty** for an ordinary historical message (the
+message itself, its author, channel, and timestamp are still returned
+normally). The only fields exempt from this redaction are messages the
+bot itself sent, DMs it received, and messages that `@mention` the bot —
+none of which describe the historical, third-party channel content
+Knovera actually needs to discover, so there is no narrower workaround:
+this integration genuinely requires real Message Content access, not a
+"only messages mentioning the bot" fallback.
+
+**Required Developer Portal configuration** (in addition to the bot
+token/client id above): open the application at
+[discord.com/developers/applications](https://discord.com/developers/applications) →
+**Bot** page → **Privileged Gateway Intents** section → enable
+**"Message Content Intent."**
+
+**Scaling / verification implications**: as of Discord's 2026 policy, the
+review requirement for privileged intents (including Message Content) is
+based on how many **unique users** can see the application across every
+server it is in, not server count directly (a **separate** bot-verification
+requirement still applies once the bot is in 100+ servers):
+
+- **Under ~10,000 reachable users**: the intent can be self-toggled in the
+  Developer Portal above with no Discord review or approval needed.
+- **At or above that threshold**: Discord requires applying for and being
+  approved for Privileged Intent access, with an **annual reapproval**
+  requirement. If access is denied or lapses (reapproval window missed),
+  the gated fields silently revert to empty — the API keeps returning
+  `200 OK`, it just stops including real attachment data, which is
+  functionally indistinguishable from "every channel is empty" unless
+  checked for explicitly.
+
+**How this deployment fails closed instead of silently degrading**:
+`discord/discordApiClient.ts`'s `ensureMessageContentIntentEnabled` calls
+`GET /oauth2/applications/@me` and inspects the real, Discord-sourced
+`flags` bitfield (`GATEWAY_MESSAGE_CONTENT` = `1 << 18` for a
+verified/100+-guild app, `GATEWAY_MESSAGE_CONTENT_LIMITED` = `1 << 19` for
+an app below that threshold) — never a self-asserted config flag, since
+there is no environment variable that can grant this intent; Discord's
+own application configuration/approval is the only real source of truth.
+This check runs before **Connect Discord** issues an authorize URL, and
+before every channel import/refresh call — a deployment whose intent
+isn't enabled, or whose approval has lapsed, gets a clear
+`503 discord_message_content_not_enabled` error at each of those points
+rather than a channel that silently reports zero discovered attachments.
+
+## Discord authorization model (guild install vs. user access vs. project catalog)
+
+Three distinct layers, deliberately never conflated:
+
+1. **Bot installation** (`discord_guilds`) — a provider *capability*: the
+   shared, deployment-wide Discord bot has been added to a given guild.
+   This alone grants no Knovera identity anything.
+2. **Guild authorization** (`discord_guild_authorizations`) — *who* may use
+   that capability: an explicit grant row binding one Knovera identity
+   (`req.knoveraOperator` — see `http/middleware/knoveraAuth.ts`; this
+   deployment has exactly one hardcoded operator identity today, per
+   "Knovera application login" below) to one guild. Created only when that
+   identity completes the bot-install OAuth flow for that guild (the
+   signed connect-state token — `lib/discordOAuthState.ts` — binds the
+   grant to whoever *initiated* the flow, never to a value read back from
+   the browser). A guild may be authorized to more than one identity (an
+   explicitly-granted sharing model); it is never implicitly available to
+   every identity just because the bot happens to be installed there.
+   Every guild/channel-listing, import, refresh, and disconnect route
+   checks this grant before doing anything else — see
+   `http/routes/discordConnections.ts` and `http/routes/discordChannels.ts`.
+3. **Project catalog membership** (`source_collections`, unchanged from
+   Phase 4K-A) — *where* imported content lives: one authorized identity
+   may import the same guild's channels into more than one project; a
+   project is not itself identity-scoped in this codebase (see the
+   project-model migration), so this layer's isolation is purely
+   project-to-project, exactly as before this fix.
+
+## Discord OAuth connect-state (single-use)
+
+The signed connect-state JWT (`lib/discordOAuthState.ts`) is single-use:
+its `jti` is recorded in `discord_oauth_state_uses` by the callback
+handler before anything else happens, and a second presentation of the
+same state (a replayed callback URL, a double-submitted request) is
+rejected identically to an invalid/expired one — it can never be used to
+complete the connect flow a second time, whether by the original browser
+or anyone who later obtains the same URL within its 10-minute TTL.
+
 ## Knovera application login (Phase 4D)
 
 Knovera's own login (Projects/MasterMind/Sources/Synthesis) is entirely

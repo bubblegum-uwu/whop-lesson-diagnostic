@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
+import type { KnoveraAuthedRequest } from "../middleware/knoveraAuth.js";
 import { getProjectById } from "../../db/projectsRepo.js";
 import {
   createSourceCollection,
@@ -420,7 +421,11 @@ export function createRefreshSourceCollectionHandler(deps: SourceCollectionsRout
     // than inlined here, so the YOUTUBE branch below is untouched byte for
     // byte (spec section 60).
     if (collection.provider === "DISCORD") {
-      const outcome = await refreshDiscordCollection(deps.pool, project, collection, deps);
+      // Review fix — resolveOwnedCollection above only proves project
+      // membership (projects are not identity-scoped); refreshDiscordCollection
+      // separately requires the CALLING identity to be authorized for this
+      // collection's own Discord guild, never just "same project."
+      const outcome = await refreshDiscordCollection(deps.pool, project, collection, (req as KnoveraAuthedRequest).knoveraOperator!, deps);
       if (!outcome.ok) {
         res.status(outcome.status).json(outcome.body);
         return;
