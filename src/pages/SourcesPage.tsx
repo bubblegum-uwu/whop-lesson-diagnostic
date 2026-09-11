@@ -32,7 +32,8 @@ import {
   ProjectSourceAnalysisError,
   type ProjectSourceAnalysisStatus,
 } from "../lib/projectSourceAnalysisApi";
-import { listSourceCollections, type CatalogCollectionSummary } from "../lib/catalogApi";
+import { listSourceCollections, listAlaCarteWhopLessons, type CatalogCollectionSummary, type AlaCarteWhopLessonSummary } from "../lib/catalogApi";
+import { enqueueAnalysisJobs } from "../lib/courseApi";
 
 /** Phase 4H-B — display labels for the job-status badge on a video source row. Falls back to "Added" for any status this map doesn't recognize (never blank). */
 const ANALYSIS_STATUS_LABELS: Record<string, string> = {
@@ -46,6 +47,22 @@ const ANALYSIS_STATUS_LABELS: Record<string, string> = {
 };
 const PENDING_ANALYSIS_STATUSES = new Set(["QUEUED", "ANALYZING", "VALIDATING"]);
 const ANALYSIS_POLL_INTERVAL_MS = 4000;
+
+/** Phase 4K follow-up — à-la-carte Whop lessons use the lesson-analysis job's own status vocabulary (see WhopCourseDetailPage's identical STATUS_LABELS/PENDING_STATUSES), a different set of states than project_source-based analysis above. */
+const WHOP_LESSON_STATUS_LABELS: Record<string, string> = {
+  NOT_ANALYZED: "Not analyzed",
+  QUEUED: "Queued",
+  ANALYZING: "Analyzing",
+  RETRIEVING: "Retrieving",
+  PREPARING_VIDEO: "Preparing",
+  UPLOADING: "Uploading",
+  VALIDATING: "Validating",
+  ANALYZED: "Analyzed",
+  FAILED: "Failed",
+  AUTH_REQUIRED: "Needs Whop reconnect",
+  CANCELLED: "Cancelled",
+};
+const WHOP_LESSON_PENDING_STATUSES = new Set(["QUEUED", "ANALYZING", "RETRIEVING", "PREPARING_VIDEO", "UPLOADING", "VALIDATING"]);
 
 /** Phase 4I — every provider whose source is a single analyzable video, sharing one generic row/list/drawer. A future provider joins this union and this map, never a parallel list. */
 type VideoProjectSource = YouTubeProjectSource | DiscordProjectSource;
@@ -132,6 +149,9 @@ export function SourcesPage(props: SourcesPageProps) {
   const [showAddYouTubeChannelDialog, setShowAddYouTubeChannelDialog] = useState(false);
   const [showConnectWhopCourseDialog, setShowConnectWhopCourseDialog] = useState(false);
   const [collections, setCollections] = useState<CatalogCollectionSummary[]>([]);
+  const [alaCarteWhopLessons, setAlaCarteWhopLessons] = useState<AlaCarteWhopLessonSummary[]>([]);
+  const [whopLessonBusyId, setWhopLessonBusyId] = useState<number | null>(null);
+  const [whopLessonActionError, setWhopLessonActionError] = useState<string | null>(null);
   const [analysisStatuses, setAnalysisStatuses] = useState<Record<number, ProjectSourceAnalysisStatus>>({});
   const [analyzingSourceId, setAnalyzingSourceId] = useState<number | null>(null);
   const [analysisActionError, setAnalysisActionError] = useState<string | null>(null);
@@ -181,6 +201,29 @@ export function SourcesPage(props: SourcesPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
 
+  // Phase 4K follow-up — à-la-carte Whop lessons are a genuinely separate
+  // catalog concept from both "Whop Courses" (whopSources, below — full
+  // course connections) and "Collections" (YouTube/Discord) — see
+  // whopLessons.ts's doc comment. Best-effort load, same convention as
+  // loadCollections: a transient failure here never hides the rest of the
+  // Sources page.
+  async function loadAlaCarteWhopLessons(url: string, token: string, projectId: number) {
+    try {
+      setAlaCarteWhopLessons(await listAlaCarteWhopLessons(url, token, projectId));
+    } catch {
+      // Best-effort — see loadCollections's identical rationale above.
+    }
+  }
+
+  useEffect(() => {
+    if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
+      setAlaCarteWhopLessons([]);
+      return;
+    }
+    void loadAlaCarteWhopLessons(props.backendUrl, props.knoveraToken, projectState.project.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectState, props.backendUrl, props.knoveraToken]);
+
   // Phase 4K — a project may now own any number of Whop courses (see
   // http/routes/whopCourses.ts); GET /api/projects/:projectId/sources
   // already returns one WhopProjectSource entry per course (backend was
@@ -224,6 +267,24 @@ export function SourcesPage(props: SourcesPageProps) {
   function refreshCollections() {
     if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) {
       void loadCollections(props.backendUrl, props.knoveraToken, resolvedProjectId);
+    }
+  }
+
+  function refreshAlaCarteWhopLessons() {
+    if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) void loadAlaCarteWhopLessons(props.backendUrl, props.knoveraToken, resolvedProjectId);
+  }
+
+  async function handleAnalyzeWhopLesson(lessonId: number, force = false) {
+    if (!props.backendUrl || !props.knoveraToken) return;
+    setWhopLessonBusyId(lessonId);
+    setWhopLessonActionError(null);
+    try {
+      await enqueueAnalysisJobs(props.backendUrl, props.knoveraToken, [lessonId], force);
+      refreshAlaCarteWhopLessons();
+    } catch (err) {
+      setWhopLessonActionError(err instanceof Error ? err.message : "Failed to start analysis.");
+    } finally {
+      setWhopLessonBusyId(null);
     }
   }
 
@@ -453,6 +514,59 @@ export function SourcesPage(props: SourcesPageProps) {
         </>
       )}
 
+      {alaCarteWhopLessons.length > 0 && (
+        <>
+          <h2 className="knovera-section-title">À-la-carte Whop</h2>
+          <p className="knovera-project-card-source">
+            Individually imported lessons — never a full course. Connect the course instead to see all of its lessons.
+          </p>
+          {whopLessonActionError && (
+            <div className="kv-card knovera-empty-state" role="alert">
+              <p>{whopLessonActionError}</p>
+            </div>
+          )}
+          <ul className="knovera-youtube-source-list">
+            {alaCarteWhopLessons.map((lesson) => {
+              const isPending = WHOP_LESSON_PENDING_STATUSES.has(lesson.status);
+              const isFailed = lesson.status === "FAILED";
+              const isDone = lesson.status === "ANALYZED";
+              const badgeClass = isFailed ? "kv-badge-danger" : isDone ? "kv-badge-accent" : "kv-badge-muted";
+              const busy = whopLessonBusyId === lesson.id;
+              return (
+                <li key={lesson.id} className="kv-card knovera-youtube-source-row">
+                  <div className="knovera-youtube-source-main">
+                    <span className="knovera-youtube-source-label">{lesson.courseTitle}</span>
+                    <span className="knovera-youtube-source-title">{lesson.title}</span>
+                  </div>
+                  <div className="knovera-youtube-source-actions">
+                    <span className={`kv-badge ${badgeClass}`}>{WHOP_LESSON_STATUS_LABELS[lesson.status] ?? lesson.status}</span>
+                    {lesson.status === "NOT_ANALYZED" && (
+                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeWhopLesson(lesson.id)}>
+                        {busy ? "Starting…" : "Analyze"}
+                      </button>
+                    )}
+                    {isPending && <span className="hint">Working…</span>}
+                    {isFailed && (
+                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeWhopLesson(lesson.id)}>
+                        {busy ? "Retrying…" : "Retry"}
+                      </button>
+                    )}
+                    {isDone && (
+                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeWhopLesson(lesson.id, true)}>
+                        {busy ? "Starting…" : "Re-analyze"}
+                      </button>
+                    )}
+                    <a href={lesson.sourceUrl} target="_blank" rel="noreferrer" className="link-button">
+                      Open on Whop
+                    </a>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
+
       {collections.length > 0 && (
         <>
           <h2 className="knovera-section-title">Collections</h2>
@@ -644,7 +758,7 @@ export function SourcesPage(props: SourcesPageProps) {
           projectId={resolvedProjectId}
           provider={batchImportProvider}
           onClose={() => setBatchImportProvider(null)}
-          onImported={refreshSources}
+          onImported={batchImportProvider === "WHOP_LESSON" ? refreshAlaCarteWhopLessons : refreshSources}
         />
       )}
 
@@ -671,6 +785,10 @@ export function SourcesPage(props: SourcesPageProps) {
           onConnected={() => {
             setShowConnectWhopCourseDialog(false);
             refreshSources();
+            // A newly-connected course may absorb lessons previously shown
+            // à la carte (spec: "à-la-carte → later course" dedup) — refresh
+            // so any such item moves out of this list immediately.
+            refreshAlaCarteWhopLessons();
           }}
         />
       )}

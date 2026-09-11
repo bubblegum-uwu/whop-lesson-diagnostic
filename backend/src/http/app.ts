@@ -20,8 +20,8 @@ import {
   createListWhopCoursesHandler,
   createRefreshWhopCourseHandler,
   createListWhopCourseLessonsHandler,
-  createBatchAddWhopLessonsHandler,
 } from "./routes/whopCourses.js";
+import { createBatchAddWhopLessonsHandler, createListAlaCarteWhopLessonsHandler } from "./routes/whopLessons.js";
 import { createCourseLessonsHandler } from "./routes/courseLessons.js";
 import { createEnqueueJobsHandler, createRetryJobHandler, createCancelJobHandler, createGetJobHandler } from "./routes/analysisJobs.js";
 import { createLessonAnalysisDetailHandler } from "./routes/lessonAnalysisDetail.js";
@@ -170,11 +170,15 @@ export function createApp(config: AppConfig): Express {
   app.get("/api/projects/:projectId/whop-courses", knoveraAuth, createListWhopCoursesHandler(whopCoursesDeps));
   app.post("/api/projects/:projectId/whop-courses/:courseId/refresh", knoveraAuth, whopConnected, createRefreshWhopCourseHandler(whopCoursesDeps));
   app.get("/api/projects/:projectId/whop-courses/:courseId/lessons", knoveraAuth, createListWhopCourseLessonsHandler(whopCoursesDeps));
-  // Phase 4K follow-up — à-la-carte Whop lesson import; calls the live
-  // Whop API to sync each URL's course (see whopCourses.ts's doc comment
-  // on createBatchAddWhopLessonsHandler), so it needs the same
-  // whopConnected gate as connect/refresh above.
+  // Phase 4K follow-up — TRUE à-la-carte Whop lesson import, a distinct
+  // concept from whop-courses above (see whopLessons.ts's doc comment):
+  // importing one lesson URL never connects its course or exposes the
+  // course's other lessons. The batch-import call syncs the live Whop API
+  // to resolve each URL's course, so it needs the same whopConnected gate
+  // as connect/refresh above; the list read below touches only
+  // already-persisted Postgres data.
   app.post("/api/projects/:projectId/whop-lessons/batch", knoveraAuth, whopConnected, createBatchAddWhopLessonsHandler(whopCoursesDeps));
+  app.get("/api/projects/:projectId/whop-lessons", knoveraAuth, createListAlaCarteWhopLessonsHandler({ pool }));
   // Reads of already-persisted course/lesson data — never call Whop (see
   // courseLessons.ts / lessonAnalysisDetail.ts: both read Postgres only).
   // Whop being disconnected must never hide content that already exists.

@@ -191,6 +191,32 @@ describe("SourcesPage — multi-course Whop + collections catalog (Phase 4K)", (
     expect(screen.getByRole("heading", { name: "Bulk Import YouTube Videos" })).toBeInTheDocument();
   });
 
+  it("renders an à-la-carte Whop lesson distinctly from Connected Courses, with an individual Analyze action", async () => {
+    const alaCarteLesson = { id: 42, title: "Lesson 7", courseId: 5, courseTitle: "Big Course", sourceUrl: "https://whop.com/x", durationSeconds: null, status: "NOT_ANALYZED", eligibleForSynthesis: false };
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/sources")) return jsonResponse(200, { projectId: 7, sources: [] }); // no connected courses
+      if (url.endsWith("/collections")) return jsonResponse(200, { projectId: 7, collections: [] });
+      if (url.endsWith("/whop-lessons") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, items: [alaCarteLesson] });
+      if (url.endsWith("/api/analysis/jobs") && init?.method === "POST") {
+        expect(JSON.parse(init.body as string)).toEqual({ lessonIds: [42], force: false });
+        return jsonResponse(200, { queued: [{ lessonId: 42, jobId: "job-1" }], skipped: [] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSources();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "À-la-carte Whop" })).toBeInTheDocument());
+    expect(screen.getByText("Lesson 7")).toBeInTheDocument();
+    expect(screen.getByText("Big Course")).toBeInTheDocument();
+    // Never rendered as a Connected Courses card.
+    expect(screen.queryByRole("heading", { name: "Big Course", level: 2 })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("https://backend.example.com/api/analysis/jobs", expect.objectContaining({ method: "POST" })));
+  });
+
   it("Bulk Import Lessons opens the WHOP_LESSON batch dialog when Whop is connected", async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });

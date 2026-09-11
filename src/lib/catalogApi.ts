@@ -259,6 +259,29 @@ export async function batchAddWhopLessons(backendUrl: string, knoveraToken: stri
   return await res.json();
 }
 
+export interface AlaCarteWhopLessonSummary {
+  id: number;
+  title: string;
+  courseId: number;
+  courseTitle: string;
+  sourceUrl: string;
+  durationSeconds: number | null;
+  status: CatalogItemStatus;
+  eligibleForSynthesis: boolean;
+}
+
+/**
+ * GET /api/projects/:projectId/whop-lessons — this project's à-la-carte
+ * Whop lessons ONLY (never a connected course's full lesson list — see
+ * listWhopCourseLessons above for that, a genuinely different concept).
+ */
+export async function listAlaCarteWhopLessons(backendUrl: string, knoveraToken: string, projectId: number): Promise<AlaCarteWhopLessonSummary[]> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/whop-lessons`, { headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to load à-la-carte Whop lessons (${res.status}).`);
+  const body = (await res.json()) as { items: AlaCarteWhopLessonSummary[] };
+  return body.items;
+}
+
 /** GET /api/projects/:projectId/whop-courses/:courseId/lessons */
 export async function listWhopCourseLessons(
   backendUrl: string,
