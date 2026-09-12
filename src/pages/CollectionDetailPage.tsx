@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysisDrawer";
+import { RowActionsMenu } from "../components/RowActionsMenu";
+import { AddToProjectDialog } from "../components/AddToProjectDialog";
 import { useResolvedProject } from "../lib/useResolvedProject";
 import {
   getSourceCollection,
@@ -65,6 +67,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   const [viewingSourceId, setViewingSourceId] = useState<number | null>(null);
   const [viewingStatus, setViewingStatus] = useState<ProjectSourceAnalysisStatus | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [addToProjectItem, setAddToProjectItem] = useState<CatalogItemSummary | null>(null);
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
   const collectionId = collectionIdParam ? Number(collectionIdParam) : NaN;
@@ -325,6 +328,9 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
                         </button>
                       </>
                     )}
+                    {item.provider === "DISCORD" && (
+                      <RowActionsMenu items={[{ label: "Add to Project…", onClick: () => setAddToProjectItem(item) }]} />
+                    )}
                   </div>
                 </li>
               );
@@ -340,6 +346,17 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
         loading={false}
         onClose={() => setViewingSourceId(null)}
       />
+
+      {addToProjectItem && backendUrl && knoveraToken && resolvedProjectId != null && (
+        <AddToProjectDialog
+          backendUrl={backendUrl}
+          knoveraToken={knoveraToken}
+          projectId={resolvedProjectId}
+          sourceId={addToProjectItem.id}
+          sourceTitle={addToProjectItem.title ?? addToProjectItem.sourceUrl}
+          onClose={() => setAddToProjectItem(null)}
+        />
+      )}
     </div>
   );
 }
