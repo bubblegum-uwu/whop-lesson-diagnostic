@@ -150,7 +150,7 @@ async function makeAnalyzedProjectSource(projectId: number, opts: { cost: number
   const { source } =
     (opts.provider ?? "YOUTUBE") === "DISCORD"
       ? await createDiscordSource(pool, {
-          projectId,
+          ownerIdentity: "test-identity", projectId,
           externalId: randomId("attach"),
           sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1&is=2&hm=3",
         })

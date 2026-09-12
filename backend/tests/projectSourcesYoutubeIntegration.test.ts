@@ -5,7 +5,7 @@ import { requireKnoveraAuth } from "../src/http/middleware/knoveraAuth.js";
 import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, createAddDiscordSourceHandler } from "../src/http/routes/projectSources.js";
 import { issueKnoveraToken } from "../src/lib/knoveraToken.js";
 import { deleteAuthSession, saveAuthSession, markAuthRequired, getAuthSessionStatus } from "../src/db/authSessionRepo.js";
-import { createTestPool, randomId } from "./helpers/testDb.js";
+import { createTestPool, randomId, randomSnowflake } from "./helpers/testDb.js";
 
 const pool = createTestPool();
 const SECRET = "test-youtube-sources-integration-secret";
@@ -150,7 +150,12 @@ describe("POST /api/projects/:projectId/sources/youtube — auth + Whop-independ
 });
 
 describe("POST /api/projects/:projectId/sources/discord — auth + Whop-independence (Phase 4I)", () => {
-  const DISCORD_URL = "https://cdn.discordapp.com/attachments/123456789012345678/987654321098765432/clip.mp4?ex=1&is=2&hm=3";
+  // Freshly random per run (not a hardcoded literal) — this describe block
+  // uses the real, fixed "knovera-operator" identity (issueKnoveraToken
+  // below), so a hardcoded attachment id would collide with the
+  // content_assets row a PREVIOUS run of test "F" already created for that
+  // identity, making its "duplicate: false" assertion flaky across runs.
+  const DISCORD_URL = `https://cdn.discordapp.com/attachments/123456789012345678/${randomSnowflake()}/clip.mp4?ex=1&is=2&hm=3`;
 
   it("B: an unauthenticated request (no bearer token) is rejected with 401 and creates nothing — same middleware wiring as the YouTube route", async () => {
     const server = await startTestApp();

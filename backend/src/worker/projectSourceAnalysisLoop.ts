@@ -12,6 +12,7 @@ import {
 import { createProjectSourceAnalysis, findLatestByFingerprint } from "../db/projectSourceAnalysesRepo.js";
 import { getProjectSourceById, ANALYZABLE_PROJECT_SOURCE_PROVIDERS, type ProjectSourceRow } from "../db/projectSourcesRepo.js";
 import { getProjectSourceMedia } from "../db/projectSourceMediaRepo.js";
+import { getContentAssetMedia } from "../db/contentAssetsRepo.js";
 import { acquireYouTubeVideo } from "../youtube/acquireYouTubeVideo.js";
 import { withTempMp4File } from "../tempFiles/tempFile.js";
 import { runRawTwoPassCalls, validateAndCombineTwoPassResult, type RawTwoPassResult } from "../pipeline/twoPassExtraction.js";
@@ -128,8 +129,17 @@ async function runRawTwoPassForSource(
 
   // provider === "DISCORD" (the only other ANALYZABLE_PROJECT_SOURCE_PROVIDERS
   // member). The original signed URL (source.sourceUrl) is never read or
-  // used here — durability comes entirely from the persisted media row.
-  const media = await getProjectSourceMedia(pool, source.id);
+  // used here — durability comes entirely from persisted media.
+  //
+  // Phase 4K-B (revised) — a source created from this phase onward carries
+  // `contentAssetId`, and its bytes live in the SHARED content_asset_media
+  // table (see contentAssetsRepo.ts) — read via the asset, not the source,
+  // since multiple project_sources (one per project it's been added to)
+  // can point at the same asset/bytes. A source created BEFORE this
+  // migration has `contentAssetId: null` and keeps reading its own legacy
+  // project_source_media row exactly as before — see the migration's doc
+  // comment on why that table is never backfilled/migrated.
+  const media = source.contentAssetId != null ? await getContentAssetMedia(pool, source.contentAssetId) : await getProjectSourceMedia(pool, source.id);
   if (!media) {
     // Should be unreachable: a DISCORD project_source only ever exists once
     // its media capture has already succeeded (see

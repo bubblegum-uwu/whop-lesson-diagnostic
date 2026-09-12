@@ -4,6 +4,7 @@ import { createJob, getJob } from "../src/db/projectSourceAnalysisJobsRepo.js";
 import { getLatestByProjectSource } from "../src/db/projectSourceAnalysesRepo.js";
 import { createYouTubeSource, createDiscordSource } from "../src/db/projectSourcesRepo.js";
 import { saveProjectSourceMedia, getProjectSourceMedia } from "../src/db/projectSourceMediaRepo.js";
+import { saveContentAssetMedia, getContentAssetMedia } from "../src/db/contentAssetsRepo.js";
 import { computeProjectSourceAnalysisFingerprint } from "../src/pipeline/fingerprint.js";
 import { estimateCost } from "../src/pricing/geminiPricing.js";
 import {
@@ -57,14 +58,17 @@ const DISCORD_URL = "https://cdn.discordapp.com/attachments/123456789012345678/9
  * exists once successfully added, not the pre-fix shape.
  */
 async function makeDiscordSource(projectId: number, opts: { skipMedia?: boolean } = {}) {
-  const { source } = await createDiscordSource(pool, {
+  const { source, contentAssetId } = await createDiscordSource(pool, {
+    ownerIdentity: "test-identity",
     projectId,
-    externalId: "987654321098765432",
+    externalId: randomId("attach"),
     sourceUrl: DISCORD_URL,
   });
   if (!opts.skipMedia) {
-    await saveProjectSourceMedia(pool, {
-      projectSourceId: source.id,
+    // Phase 4K-B (revised) — durable bytes now live in content_asset_media,
+    // keyed by the source's contentAssetId, not project_source_media.
+    await saveContentAssetMedia(pool, {
+      contentAssetId,
       content: Buffer.from("fake-discord-video-bytes"),
       contentType: "video/mp4",
       byteSize: 24,
@@ -364,9 +368,31 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
       const { deps } = makeDeps();
       await runProjectSourceAnalysisLoop(deps);
 
-      const media = await getProjectSourceMedia(pool, source.id);
+      const media = await getContentAssetMedia(pool, source.contentAssetId!);
       expect(media).not.toBeNull();
       expect(media?.content.toString()).toBe("fake-discord-video-bytes");
+    });
+
+    it("Phase 4K-B (revised) backward compatibility: a Discord source created BEFORE the content_assets migration (contentAssetId null, bytes only in legacy project_source_media) still analyzes successfully", async () => {
+      const project = await makeProject();
+      // Simulates a pre-migration row directly: created via the OLD path
+      // (project_source_media only, no content_asset_id) rather than
+      // makeDiscordSource's new content_asset_media path.
+      const result = await pool.query<{ id: string }>(
+        `INSERT INTO project_sources (project_id, provider, external_id, source_url, status) VALUES ($1, 'DISCORD', $2, $3, 'READY') RETURNING id`,
+        [project.id, "legacy-attach-1", DISCORD_URL],
+      );
+      const legacySourceId = Number(result.rows[0].id);
+      await saveProjectSourceMedia(pool, { projectSourceId: legacySourceId, content: Buffer.from("legacy-fake-bytes"), contentType: "video/mp4", byteSize: 17 });
+      await createJob(pool, legacySourceId, computeProjectSourceAnalysisFingerprint({ projectSourceId: legacySourceId, geminiModel: GEMINI_MODEL }));
+
+      const { deps } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      const analysis = await getLatestByProjectSource(pool, legacySourceId);
+      expect(analysis?.status).toBe("completed");
+      const legacyMedia = await getProjectSourceMedia(pool, legacySourceId);
+      expect(legacyMedia?.content.toString()).toBe("legacy-fake-bytes"); // never migrated/deleted
     });
   });
 

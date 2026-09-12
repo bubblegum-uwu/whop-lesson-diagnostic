@@ -10,6 +10,7 @@ import { ErrorResult } from "../components/ErrorResult";
 import { AnalyzeLesson } from "../components/AnalyzeLesson";
 import { AddYouTubeVideoDialog } from "../components/AddYouTubeVideoDialog";
 import { AddDiscordVideoDialog } from "../components/AddDiscordVideoDialog";
+import { DiscordLinkStatusPanel } from "../components/DiscordLinkStatusPanel";
 import { BatchImportDialog } from "../components/BatchImportDialog";
 import { AddYouTubeChannelDialog } from "../components/AddYouTubeChannelDialog";
 import { ConnectWhopCourseDialog } from "../components/ConnectWhopCourseDialog";
@@ -468,6 +469,7 @@ export function SourcesPage(props: SourcesPageProps) {
               Bulk Import
             </button>
           </div>
+          <DiscordLinkStatusPanel backendUrl={props.backendUrl} knoveraToken={props.knoveraToken} />
         </div>
       </div>
 
