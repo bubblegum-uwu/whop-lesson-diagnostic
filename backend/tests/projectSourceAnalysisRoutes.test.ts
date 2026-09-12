@@ -234,7 +234,7 @@ describe("POST /api/projects/:projectId/sources/:sourceId/retry (Phase 4H-B)", (
 
 async function makeDiscordSource(projectId: number) {
   const { source } = await createDiscordSource(pool, {
-    projectId,
+    ownerIdentity: "test-identity", projectId,
     externalId: randomId("attach"),
     sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1&is=2&hm=3",
   });

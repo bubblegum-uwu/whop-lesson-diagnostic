@@ -36,6 +36,7 @@ import {
   createAddDiscordSourceHandler,
   createBatchAddYouTubeSourcesHandler,
   createBatchAddDiscordSourcesHandler,
+  createAddProjectSourceToProjectsHandler,
 } from "./routes/projectSources.js";
 import {
   createListSourceCollectionsHandler,
@@ -60,6 +61,8 @@ import {
   createBatchAnalyzeProjectSourcesHandler,
 } from "./routes/projectSourceAnalysis.js";
 import { createGetUsageHandler } from "./routes/usage.js";
+import { createDiscordInteractionsHandler, type RawBodyRequest } from "./routes/discordInteractions.js";
+import { createConsumeDiscordLinkHandler, createGetDiscordLinkStatusHandler, createUnlinkDiscordHandler } from "./routes/discordAccountLink.js";
 import { createEnsureWorkerRunningHandler } from "./routes/internal.js";
 import { requireOperator } from "./middleware/operatorAuth.js";
 import { requireKnoveraAuth } from "./middleware/knoveraAuth.js";
@@ -70,7 +73,15 @@ import type { AnalyzeLessonDeps } from "../pipeline/analyzeLesson.js";
 
 export function createApp(config: AppConfig): Express {
   const app = express();
-  app.use(express.json({ limit: "1mb" }));
+  // Phase 4K-B (revised) — `verify` captures the EXACT raw bytes of every
+  // request body before JSON parsing, stashed on the request for
+  // discordInteractions.ts's signature check (spec section 14: "do not
+  // verify a parsed/re-serialized JSON body"). Applied globally rather
+  // than as route-specific middleware ordered ahead of this line — the
+  // spec's own warning to "be careful with Express middleware ordering"
+  // is sidestepped entirely this way, at the cost of a harmless few extra
+  // bytes retained per request (negligible; discarded once handled).
+  app.use(express.json({ limit: "1mb", verify: (req, _res, buf) => { (req as RawBodyRequest).rawBody = Buffer.from(buf); } }));
   app.use(corsMiddleware(config.allowedOrigin));
 
   const { fetchLesson } = createWhopClient(config.whopApiBase);
@@ -251,6 +262,15 @@ export function createApp(config: AppConfig): Express {
   // createBatchAddDiscordSourcesHandler). Never analyzes anything.
   app.post("/api/projects/:projectId/sources/youtube/batch", knoveraAuth, createBatchAddYouTubeSourcesHandler(projectsDeps));
   app.post("/api/projects/:projectId/sources/discord/batch", knoveraAuth, createBatchAddDiscordSourcesHandler(projectsDeps));
+  // Phase 4K-B (revised) — "Add to Project…": makes an already-captured
+  // Discord source's durable content available in other projects without
+  // copying media or re-analyzing (see projectSources.ts's
+  // createAddProjectSourceToProjectsHandler doc comment).
+  app.post(
+    "/api/projects/:projectId/sources/:sourceId/add-to-projects",
+    knoveraAuth,
+    createAddProjectSourceToProjectsHandler(projectsDeps),
+  );
 
   // Phase 4K — the source-collection catalog layer (YouTube channels /
   // Discord collections) above project_sources. See
@@ -333,6 +353,20 @@ export function createApp(config: AppConfig): Express {
   // for the exact accounting rule). Pure reads of persisted Postgres data —
   // gated by Knovera auth only, never Whop.
   app.get("/api/usage", knoveraAuth, createGetUsageHandler({ pool }));
+
+  // Phase 4K-B (revised) — Discord USER_INSTALL "Save to Knovera" message
+  // command. The interactions callback is PUBLIC and unauthenticated by
+  // Knovera (Discord calls it directly, with no Knovera session possible) —
+  // it authenticates every request itself via Ed25519 signature
+  // verification inside the handler, so it deliberately carries NO
+  // knoveraAuth middleware. The account-link routes ARE Knovera-session-
+  // gated (spec section 12: linking requires "normal Knovera login").
+  const discordInteractionsDeps = { pool, discordPublicKey: config.discordPublicKey, allowedOrigin: config.allowedOrigin };
+  app.post("/api/discord/interactions", createDiscordInteractionsHandler(discordInteractionsDeps));
+  const discordAccountLinkDeps = { pool };
+  app.post("/api/discord/link", knoveraAuth, createConsumeDiscordLinkHandler(discordAccountLinkDeps));
+  app.get("/api/discord/link", knoveraAuth, createGetDiscordLinkStatusHandler(discordAccountLinkDeps));
+  app.delete("/api/discord/link", knoveraAuth, createUnlinkDiscordHandler(discordAccountLinkDeps));
 
   const oidcVerifier = createGoogleOidcVerifier(publicApiBaseUrl, schedulerServiceAccountEmail);
   app.post("/internal/ensure-worker-running", createEnsureWorkerRunningHandler({ pool, jobTrigger, oidcVerifier }));

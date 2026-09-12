@@ -66,6 +66,20 @@ function fileExtension(filename: string): string | null {
 }
 
 /**
+ * Phase 4K-B (revised) — the same video-extension boundary as
+ * parseDiscordVideoUrl above, exposed standalone for
+ * discord/discordInteractions.ts: a "Save to Knovera" context-menu
+ * capture gets the message's attachments as structured objects directly
+ * from the signed interaction payload (filename/content_type/size), never
+ * as a URL to re-parse — but the SAME "video only, silently omit
+ * everything else" rule applies (spec section 18/19/20).
+ */
+export function isSupportedVideoFilename(filename: string): boolean {
+  const extension = fileExtension(filename);
+  return extension !== null && VIDEO_EXTENSIONS.has(extension);
+}
+
+/**
  * Parses and validates a Discord CDN attachment URL, returning its stable
  * `externalId` (the attachment id) and the exact `sourceUrl` (verbatim,
  * signature included). Throws DiscordUrlParseError (never a generic Error)

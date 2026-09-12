@@ -98,6 +98,23 @@ export interface AppConfig {
    * À-la-carte single-video add/import is entirely unaffected either way.
    */
   youtubeApiKey: string | undefined;
+  /**
+   * Phase 4K-B (revised) — Discord USER_INSTALL "Save to Knovera" context
+   * command. `discordApplicationId`/`discordPublicKey` are not secrets
+   * (Developer Portal → General Information); `discordPublicKey` (a raw
+   * hex-encoded Ed25519 public key) is what the public interactions
+   * endpoint (http/routes/discordInteractions.ts) verifies every request
+   * signature against — required for that endpoint to accept anything.
+   * `discordBotToken` IS a secret (Bot → Reset Token) — used ONLY by the
+   * offline command-registration script (scripts/registerDiscordCommand.ts),
+   * never read by the running server itself (the interactions endpoint
+   * needs no bot token at all — see discordInteractionsVerify.ts's doc
+   * comment on why signature verification alone is sufficient). Never
+   * logged — see server.ts's redactor registration.
+   */
+  discordApplicationId: string | undefined;
+  discordPublicKey: string | undefined;
+  discordBotToken: string | undefined;
 }
 
 function requireEnv(name: string): string {
@@ -181,6 +198,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
           }
         : undefined,
     youtubeApiKey: env.YOUTUBE_API_KEY,
+    discordApplicationId: env.DISCORD_APPLICATION_ID,
+    discordPublicKey: env.DISCORD_PUBLIC_KEY,
+    discordBotToken: env.DISCORD_BOT_TOKEN,
   };
 }
 
