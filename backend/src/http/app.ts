@@ -37,6 +37,7 @@ import {
   createBatchAddYouTubeSourcesHandler,
   createBatchAddDiscordSourcesHandler,
   createAddProjectSourceToProjectsHandler,
+  createDiscordImportYouTubeSourcesHandler,
 } from "./routes/projectSources.js";
 import {
   createListSourceCollectionsHandler,
@@ -262,6 +263,11 @@ export function createApp(config: AppConfig): Express {
   // createBatchAddDiscordSourcesHandler). Never analyzes anything.
   app.post("/api/projects/:projectId/sources/youtube/batch", knoveraAuth, createBatchAddYouTubeSourcesHandler(projectsDeps));
   app.post("/api/projects/:projectId/sources/discord/batch", knoveraAuth, createBatchAddDiscordSourcesHandler(projectsDeps));
+  // Phase 4K-C — commits the browser companion's Discord channel scan
+  // results as ordinary YouTube sources plus provenance records (see
+  // projectSources.ts's createDiscordImportYouTubeSourcesHandler doc
+  // comment). Knovera auth only; never touches jobTrigger/analysis.
+  app.post("/api/projects/:projectId/sources/youtube/discord-import", knoveraAuth, createDiscordImportYouTubeSourcesHandler(projectsDeps));
   // Phase 4K-B (revised) — "Add to Project…": makes an already-captured
   // Discord source's durable content available in other projects without
   // copying media or re-analyzing (see projectSources.ts's

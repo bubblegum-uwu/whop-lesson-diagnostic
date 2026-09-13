@@ -107,8 +107,48 @@ describe("parseYouTubeVideoUrl", () => {
     expect(() => parseYouTubeVideoUrl("https://www.youtube.com/watch?v=abc$(rm -rf)")).toThrow(YouTubeUrlParseError);
   });
 
-  it("rejects a Shorts URL (not the supported watch/short-link forms)", () => {
-    expect(() => parseYouTubeVideoUrl("https://www.youtube.com/shorts/dQw4w9WgXcQ")).toThrow(YouTubeUrlParseError);
+  it("J: parses a Shorts URL (Phase 4K-C)", () => {
+    const result = parseYouTubeVideoUrl("https://www.youtube.com/shorts/dQw4w9WgXcQ");
+    expect(result.externalId).toBe("dQw4w9WgXcQ");
+    expect(result.sourceUrl).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  });
+
+  it("J: parses a Shorts URL with a trailing slash", () => {
+    const result = parseYouTubeVideoUrl("https://www.youtube.com/shorts/dQw4w9WgXcQ/");
+    expect(result.externalId).toBe("dQw4w9WgXcQ");
+  });
+
+  it("J: ignores tracking query params on a Shorts URL", () => {
+    const result = parseYouTubeVideoUrl("https://www.youtube.com/shorts/dQw4w9WgXcQ?si=abc123");
+    expect(result.externalId).toBe("dQw4w9WgXcQ");
+    expect(result.sourceUrl).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  });
+
+  it("K: parses a Live URL (Phase 4K-C)", () => {
+    const result = parseYouTubeVideoUrl("https://www.youtube.com/live/dQw4w9WgXcQ");
+    expect(result.externalId).toBe("dQw4w9WgXcQ");
+    expect(result.sourceUrl).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+  });
+
+  it("K: ignores tracking query params on a Live URL", () => {
+    const result = parseYouTubeVideoUrl("https://www.youtube.com/live/dQw4w9WgXcQ?feature=share");
+    expect(result.externalId).toBe("dQw4w9WgXcQ");
+  });
+
+  it("C: Shorts and Live normalize to the same canonical watch URL as /watch and youtu.be", () => {
+    const fromWatch = parseYouTubeVideoUrl("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    const fromShorts = parseYouTubeVideoUrl("https://www.youtube.com/shorts/dQw4w9WgXcQ");
+    const fromLive = parseYouTubeVideoUrl("https://www.youtube.com/live/dQw4w9WgXcQ");
+    expect(fromShorts.sourceUrl).toBe(fromWatch.sourceUrl);
+    expect(fromLive.sourceUrl).toBe(fromWatch.sourceUrl);
+  });
+
+  it("rejects a Shorts URL with an invalid video id", () => {
+    expect(() => parseYouTubeVideoUrl("https://www.youtube.com/shorts/short")).toThrow(YouTubeUrlParseError);
+  });
+
+  it("rejects a Shorts URL with extra path segments", () => {
+    expect(() => parseYouTubeVideoUrl("https://www.youtube.com/shorts/dQw4w9WgXcQ/extra")).toThrow(YouTubeUrlParseError);
   });
 
   it("trims surrounding whitespace before parsing", () => {

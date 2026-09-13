@@ -41,6 +41,7 @@ const YT_SOURCE: YouTubeProjectSource = {
   status: "READY",
   createdAt: "2026-01-01T00:00:00.000Z",
   collectionId: null,
+  origins: [],
 };
 
 const DISCORD_SOURCE: DiscordProjectSource = {

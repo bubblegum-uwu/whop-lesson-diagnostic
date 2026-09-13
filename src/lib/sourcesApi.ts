@@ -29,6 +29,24 @@ export interface WhopProjectSource {
 }
 
 /**
+ * Phase 4K-C — one provenance record on a YouTube source (frontend mirror
+ * of backend/src/http/routes/projectSources.ts's ProjectSourceOriginSummary).
+ * `discordPostedAt` is always the DISCORD MESSAGE's timestamp — never
+ * YouTube's publish date, never an import/scan time. `discordChannelName`
+ * is null when the browser companion couldn't safely derive one; render
+ * `discordChannelId` instead of fabricating a name in that case.
+ */
+export interface ProjectSourceOriginSummary {
+  originType: "MANUAL" | "DISCORD_CHANNEL";
+  discordGuildId: string | null;
+  discordChannelId: string | null;
+  discordChannelName: string | null;
+  discordMessageId: string | null;
+  discordMessageUrl: string | null;
+  discordPostedAt: string | null;
+}
+
+/**
  * Phase 4H-A — the first non-Whop project source. Deliberately its own
  * shape rather than forced into WhopProjectSource's fields (no fake
  * courseId/lessonCount/etc.). `status` is source-record readiness, never
@@ -47,6 +65,8 @@ export interface YouTubeProjectSource {
   createdAt: string;
   /** Phase 4K — the source_collections row (a YouTube channel) this video was discovered through, or null for an à-la-carte add. */
   collectionId: number | null;
+  /** Phase 4K-C — every known provenance record, oldest first. Empty for a source that predates this phase — never a fabricated "Manual" label. */
+  origins: ProjectSourceOriginSummary[];
 }
 
 /**

@@ -16,6 +16,12 @@ import {
 } from "../../db/projectSourcesRepo.js";
 import { saveContentAssetMedia, deleteContentAsset, getContentAssetById } from "../../db/contentAssetsRepo.js";
 import { createSourceCollection, getSourceCollectionById } from "../../db/sourceCollectionsRepo.js";
+import {
+  insertManualOrigin,
+  insertDiscordChannelOrigin,
+  listOriginsBySourceIds,
+  type ProjectSourceOriginRow,
+} from "../../db/projectSourceOriginsRepo.js";
 import { parseYouTubeVideoUrl, YouTubeUrlParseError } from "../../lib/youtubeUrl.js";
 import { parseDiscordVideoUrl, DiscordUrlParseError } from "../../lib/discordUrl.js";
 import {
@@ -50,6 +56,36 @@ export interface WhopProjectSource {
 }
 
 /**
+ * Phase 4K-C — one provenance record on a YouTube project source's API
+ * response. `discordPostedAt` is always the DISCORD MESSAGE's timestamp
+ * (see the migration's doc comment) — never a YouTube publish date or an
+ * import/scan timestamp. `discordChannelName` is null when the browser
+ * companion couldn't safely derive one; the frontend falls back to
+ * displaying `discordChannelId` rather than fabricating a name.
+ */
+export interface ProjectSourceOriginSummary {
+  originType: "MANUAL" | "DISCORD_CHANNEL";
+  discordGuildId: string | null;
+  discordChannelId: string | null;
+  discordChannelName: string | null;
+  discordMessageId: string | null;
+  discordMessageUrl: string | null;
+  discordPostedAt: Date | null;
+}
+
+function toOriginSummary(row: ProjectSourceOriginRow): ProjectSourceOriginSummary {
+  return {
+    originType: row.originType,
+    discordGuildId: row.discordGuildId,
+    discordChannelId: row.discordChannelId,
+    discordChannelName: row.discordChannelName,
+    discordMessageId: row.discordMessageId,
+    discordMessageUrl: row.discordMessageUrl,
+    discordPostedAt: row.discordPostedAt,
+  };
+}
+
+/**
  * Phase 4H-A — the first non-Whop project source. Deliberately NOT forced
  * into WhopProjectSource's shape (no fake courseId/lessonCount/etc.) — see
  * the Phase 4H-A PR description's "one coherent source representation,
@@ -69,6 +105,13 @@ export interface YouTubeProjectSource {
   createdAt: Date;
   /** Phase 4K — the source_collections row (a YouTube channel) this video was discovered through, or null for an à-la-carte add. */
   collectionId: number | null;
+  /**
+   * Phase 4K-C — every known provenance record for this source, oldest
+   * first. Empty for a source that predates this phase (never backfilled —
+   * see the migration/repo doc comments: an unknown origin stays unknown,
+   * it is never inferred as "Manual").
+   */
+  origins: ProjectSourceOriginSummary[];
 }
 
 /**
@@ -94,7 +137,7 @@ export interface DiscordProjectSource {
 
 export type ProjectSource = WhopProjectSource | YouTubeProjectSource | DiscordProjectSource;
 
-function toYouTubeProjectSource(row: ProjectSourceRow): YouTubeProjectSource {
+function toYouTubeProjectSource(row: ProjectSourceRow, origins: ProjectSourceOriginRow[] = []): YouTubeProjectSource {
   return {
     provider: "YOUTUBE",
     sourceType: "VIDEO",
@@ -106,6 +149,7 @@ function toYouTubeProjectSource(row: ProjectSourceRow): YouTubeProjectSource {
     status: row.status,
     createdAt: row.createdAt,
     collectionId: row.collectionId,
+    origins: origins.map(toOriginSummary),
   };
 }
 
@@ -124,10 +168,19 @@ function toDiscordProjectSource(row: ProjectSourceRow): DiscordProjectSource {
   };
 }
 
-/** Dispatches a raw project_sources row to its provider-specific response shape — the one place that mapping happens, so a new provider means one new branch here, never a change to the GET handler's own logic. */
-/** Exported for reuse by http/routes/synthesisSets.ts, which needs the same provider-specific source shape for its detail view's member list — the one place this mapping happens, never duplicated. */
-export function toProjectSource(row: ProjectSourceRow): YouTubeProjectSource | DiscordProjectSource {
-  return row.provider === "YOUTUBE" ? toYouTubeProjectSource(row) : toDiscordProjectSource(row);
+/**
+ * Dispatches a raw project_sources row to its provider-specific response
+ * shape — the one place that mapping happens, so a new provider means one
+ * new branch here, never a change to the GET handler's own logic. Exported
+ * for reuse by http/routes/synthesisSets.ts, which needs the same
+ * provider-specific source shape for its detail view's member list — the
+ * one place this mapping happens, never duplicated. `origins` is optional
+ * (defaults to none): synthesisSets.ts's member-list view doesn't batch-
+ * fetch provenance, so it always renders an empty `origins` array there —
+ * honest (no provenance was looked up), never fabricated.
+ */
+export function toProjectSource(row: ProjectSourceRow, origins: ProjectSourceOriginRow[] = []): YouTubeProjectSource | DiscordProjectSource {
+  return row.provider === "YOUTUBE" ? toYouTubeProjectSource(row, origins) : toDiscordProjectSource(row);
 }
 
 /**
@@ -189,9 +242,19 @@ export function createGetProjectSourcesHandler(deps: ProjectSourcesRouteDeps) {
       listProjectSourcesByProjectId(deps.pool, projectId),
     ]);
 
-    const whopSources: ProjectSource[] = await Promise.all(courses.map((course) => buildWhopProjectSource(deps.pool, course)));
+    // Phase 4K-C — provenance is only ever recorded for YOUTUBE sources
+    // (see toOriginSummary/YouTubeProjectSource); batched in one query for
+    // every YouTube row on this page, never per-row (no N+1).
+    const youtubeSourceIds = nonWhopRows.filter((row) => row.provider === "YOUTUBE").map((row) => row.id);
+    const [whopSources, originsBySourceId] = await Promise.all([
+      Promise.all(courses.map((course) => buildWhopProjectSource(deps.pool, course))),
+      listOriginsBySourceIds(deps.pool, youtubeSourceIds),
+    ]);
 
-    const sources: ProjectSource[] = [...whopSources, ...nonWhopRows.map(toProjectSource)];
+    const sources: ProjectSource[] = [
+      ...whopSources,
+      ...nonWhopRows.map((row) => toProjectSource(row, originsBySourceId.get(row.id) ?? [])),
+    ];
 
     res.status(200).json({ projectId, sources });
   };
@@ -259,7 +322,14 @@ export function createAddYouTubeSourceHandler(deps: ProjectSourcesRouteDeps) {
       sourceUrl: parsed.sourceUrl,
     });
 
-    res.status(created ? 201 : 200).json({ source: toYouTubeProjectSource(source), duplicate: !created });
+    // Phase 4K-C — every manually-pasted URL (new source or an existing
+    // one, e.g. previously discovered via Discord) gets a MANUAL
+    // provenance record; insertManualOrigin is idempotent, so re-adding the
+    // same video through this flow twice never creates a second row.
+    await insertManualOrigin(deps.pool, source.id);
+    const origins = await listOriginsBySourceIds(deps.pool, [source.id]);
+
+    res.status(created ? 201 : 200).json({ source: toYouTubeProjectSource(source, origins.get(source.id) ?? []), duplicate: !created });
   };
 }
 
@@ -419,7 +489,10 @@ function parseBatchUrls(body: BatchAddSourcesBody, res: Response): string[] | nu
  * imported — never fails the whole batch because one entry is malformed
  * (spec section 19/52). Reuses createYouTubeSource unchanged (no network
  * acquisition for YouTube, same as the single-URL handler above) — never
- * analyzes anything.
+ * analyzes anything. Phase 4K-C: this is still a manually-pasted flow (a
+ * batch of individual pastes, not a Discord discovery), so every entry
+ * also gets an idempotent MANUAL provenance record, same as the single-URL
+ * handler.
  */
 export function createBatchAddYouTubeSourcesHandler(deps: ProjectSourcesRouteDeps) {
   return async function batchAddYouTubeSourcesHandler(req: Request, res: Response): Promise<void> {
@@ -447,7 +520,9 @@ export function createBatchAddYouTubeSourcesHandler(deps: ProjectSourcesRouteDep
         continue;
       }
       const { source, created } = await createYouTubeSource(deps.pool, { projectId, externalId: parsed.externalId, sourceUrl: parsed.sourceUrl });
-      results.push({ url, kind: created ? "added" : "duplicate", source: toYouTubeProjectSource(source) });
+      await insertManualOrigin(deps.pool, source.id);
+      const origins = await listOriginsBySourceIds(deps.pool, [source.id]);
+      results.push({ url, kind: created ? "added" : "duplicate", source: toYouTubeProjectSource(source, origins.get(source.id) ?? []) });
     }
 
     res.status(200).json(summarizeBatch(results));
@@ -526,6 +601,203 @@ export function createBatchAddDiscordSourcesHandler(deps: ProjectSourcesRouteDep
     }
 
     res.status(200).json(summarizeBatch(results));
+  };
+}
+
+interface DiscordImportChannelBody {
+  guildId?: unknown;
+  channelId?: unknown;
+  channelName?: unknown;
+}
+
+interface ParsedDiscordImportChannel {
+  guildId: string;
+  channelId: string;
+  channelName: string | null;
+}
+
+function parseDiscordImportChannel(channel: unknown, res: Response): ParsedDiscordImportChannel | null {
+  if (typeof channel !== "object" || channel === null) {
+    res.status(400).json({ error: { message: "channel is required.", type: "invalid_request" } });
+    return null;
+  }
+  const c = channel as DiscordImportChannelBody;
+  if (typeof c.guildId !== "string" || c.guildId.trim().length === 0) {
+    res.status(400).json({ error: { message: "channel.guildId is required.", type: "invalid_request" } });
+    return null;
+  }
+  if (typeof c.channelId !== "string" || c.channelId.trim().length === 0) {
+    res.status(400).json({ error: { message: "channel.channelId is required.", type: "invalid_request" } });
+    return null;
+  }
+  const channelName = typeof c.channelName === "string" && c.channelName.trim().length > 0 ? c.channelName : null;
+  return { guildId: c.guildId, channelId: c.channelId, channelName };
+}
+
+const MAX_DISCORD_IMPORT_OCCURRENCES = 500;
+
+function parseDiscordImportOccurrences(occurrences: unknown, res: Response): unknown[] | null {
+  if (!Array.isArray(occurrences) || occurrences.length === 0) {
+    res.status(400).json({ error: { message: "occurrences must be a non-empty array.", type: "invalid_request" } });
+    return null;
+  }
+  if (occurrences.length > MAX_DISCORD_IMPORT_OCCURRENCES) {
+    res.status(400).json({ error: { message: `At most ${MAX_DISCORD_IMPORT_OCCURRENCES} occurrences per request.`, type: "invalid_request" } });
+    return null;
+  }
+  return occurrences;
+}
+
+export type DiscordImportResultKind = "added" | "existing_source_new_origin" | "existing_origin_enriched" | "duplicate_origin" | "invalid";
+export interface DiscordImportResultEntry {
+  youtubeUrl: string;
+  messageId: string;
+  kind: DiscordImportResultKind;
+  source?: YouTubeProjectSource;
+  message?: string;
+}
+export interface DiscordImportResponse {
+  results: DiscordImportResultEntry[];
+  occurrencesProcessed: number;
+  newSourceCount: number;
+  newOriginCount: number;
+  enrichedOriginCount: number;
+  duplicateOriginCount: number;
+  invalidCount: number;
+}
+
+/**
+ * POST /api/projects/:projectId/sources/youtube/discord-import — Phase
+ * 4K-C. Commits the browser companion's scan results: one Discord channel
+ * (validated once, shared across every occurrence in the request) plus a
+ * list of `{youtubeUrl, messageId, messageUrl, postedAt}` occurrences, each
+ * independently validated/canonicalized/imported — never fails the whole
+ * request because one occurrence is malformed, same partial-success
+ * convention as the batch-add handlers above.
+ *
+ * The browser companion's extracted URLs/ids/timestamps are treated as
+ * UNTRUSTED input end to end: `parseYouTubeVideoUrl` re-validates and
+ * re-canonicalizes every URL server-side (never trusts a companion-supplied
+ * externalId), and messageId/postedAt are independently validated here too.
+ *
+ * Source identity/dedup is unchanged from every other YouTube-add path —
+ * `createYouTubeSource`'s own `ON CONFLICT (project_id, provider,
+ * external_id)`. What's new is the provenance layer on top
+ * (insertDiscordChannelOrigin, idempotent per (source, channel, message) —
+ * see the migration/repo doc comments), which is what turns "found this
+ * video 3 times across 2 channels while re-scanning" into "1 source, up to
+ * 3 provenance rows," never duplicate sources and never lost occurrences.
+ *
+ * Per-occurrence result kinds distinguish exactly what happened: `added` (a
+ * brand-new project_source), `existing_source_new_origin` (the video was
+ * already a source of this project — from a manual add, another channel,
+ * or an earlier scan — and this occurrence added a new provenance row to
+ * it), `existing_origin_enriched` (this exact Discord message was already
+ * recorded as an origin, but was missing its channel name and/or message
+ * URL — now filled in from this scan, never overwriting a value it already
+ * had — see insertDiscordChannelOrigin's doc comment), `duplicate_origin`
+ * (this exact Discord message was already recorded with nothing left to
+ * enrich — re-scanning the same channel is safe to repeat), and `invalid`
+ * (malformed occurrence — never partially applied).
+ *
+ * Never calls the analysis endpoint, jobTrigger, or any synthesis
+ * function — imported sources begin in the same NOT-analyzed state as
+ * every other newly-created project_sources row (see createYouTubeSource,
+ * unchanged). This handler's deps intentionally carry no jobTrigger.
+ */
+export function createDiscordImportYouTubeSourcesHandler(deps: ProjectSourcesRouteDeps) {
+  return async function discordImportYouTubeSourcesHandler(req: Request, res: Response): Promise<void> {
+    const projectId = Number(req.params.projectId);
+    if (!Number.isInteger(projectId)) {
+      res.status(404).json({ error: { message: "Unknown project.", type: "project_not_found" } });
+      return;
+    }
+    const project = await getProjectById(deps.pool, projectId);
+    if (!project) {
+      res.status(404).json({ error: { message: "Unknown project.", type: "project_not_found" } });
+      return;
+    }
+
+    const body = req.body as { channel?: unknown; occurrences?: unknown };
+    const channel = parseDiscordImportChannel(body?.channel, res);
+    if (!channel) return;
+    const occurrences = parseDiscordImportOccurrences(body?.occurrences, res);
+    if (!occurrences) return;
+
+    const results: DiscordImportResultEntry[] = [];
+    for (const rawOccurrence of occurrences) {
+      if (typeof rawOccurrence !== "object" || rawOccurrence === null) {
+        results.push({ youtubeUrl: "", messageId: "", kind: "invalid", message: "Malformed occurrence." });
+        continue;
+      }
+      const occ = rawOccurrence as { youtubeUrl?: unknown; messageId?: unknown; messageUrl?: unknown; postedAt?: unknown };
+      const youtubeUrl = typeof occ.youtubeUrl === "string" ? occ.youtubeUrl : "";
+      const messageId = typeof occ.messageId === "string" ? occ.messageId.trim() : "";
+
+      if (messageId.length === 0) {
+        results.push({ youtubeUrl, messageId, kind: "invalid", message: "Missing Discord message id." });
+        continue;
+      }
+
+      const postedAt = typeof occ.postedAt === "string" ? new Date(occ.postedAt) : null;
+      if (!postedAt || Number.isNaN(postedAt.getTime())) {
+        results.push({ youtubeUrl, messageId, kind: "invalid", message: "Missing or invalid Discord message timestamp." });
+        continue;
+      }
+
+      const messageUrl = typeof occ.messageUrl === "string" && occ.messageUrl.trim().length > 0 ? occ.messageUrl : null;
+
+      let parsed;
+      try {
+        parsed = parseYouTubeVideoUrl(youtubeUrl);
+      } catch (err) {
+        results.push({
+          youtubeUrl,
+          messageId,
+          kind: "invalid",
+          message: err instanceof YouTubeUrlParseError ? err.message : "Could not parse YouTube URL.",
+        });
+        continue;
+      }
+
+      const { source, created: sourceCreated } = await createYouTubeSource(deps.pool, {
+        projectId,
+        externalId: parsed.externalId,
+        sourceUrl: parsed.sourceUrl,
+      });
+
+      const { outcome: originOutcome } = await insertDiscordChannelOrigin(deps.pool, {
+        projectSourceId: source.id,
+        guildId: channel.guildId,
+        channelId: channel.channelId,
+        channelName: channel.channelName,
+        messageId,
+        messageUrl,
+        postedAt,
+      });
+
+      const origins = await listOriginsBySourceIds(deps.pool, [source.id]);
+      const kind: DiscordImportResultKind = sourceCreated
+        ? "added"
+        : originOutcome === "created"
+          ? "existing_source_new_origin"
+          : originOutcome === "enriched"
+            ? "existing_origin_enriched"
+            : "duplicate_origin";
+      results.push({ youtubeUrl, messageId, kind, source: toYouTubeProjectSource(source, origins.get(source.id) ?? []) });
+    }
+
+    const response: DiscordImportResponse = {
+      results,
+      occurrencesProcessed: occurrences.length,
+      newSourceCount: results.filter((r) => r.kind === "added").length,
+      newOriginCount: results.filter((r) => r.kind === "existing_source_new_origin").length,
+      enrichedOriginCount: results.filter((r) => r.kind === "existing_origin_enriched").length,
+      duplicateOriginCount: results.filter((r) => r.kind === "duplicate_origin").length,
+      invalidCount: results.filter((r) => r.kind === "invalid").length,
+    };
+
+    res.status(200).json(response);
   };
 }
 
