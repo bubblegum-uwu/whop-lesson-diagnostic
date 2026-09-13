@@ -5,6 +5,7 @@
  * a Whop token for these, except implicitly server-side for the Whop
  * course-connect/refresh calls (this client never sees or handles that).
  */
+import type { YouTubeProjectSource } from "./sourcesApi";
 function authHeaders(knoveraToken: string): HeadersInit {
   return { Authorization: `Bearer ${knoveraToken}` };
 }
@@ -280,6 +281,60 @@ export async function listAlaCarteWhopLessons(backendUrl: string, knoveraToken: 
   await throwOnError(res, `Failed to load à-la-carte Whop lessons (${res.status}).`);
   const body = (await res.json()) as { items: AlaCarteWhopLessonSummary[] };
   return body.items;
+}
+
+export interface DiscordImportChannelInput {
+  guildId: string;
+  channelId: string;
+  channelName: string | null;
+}
+
+export interface DiscordImportOccurrenceInput {
+  youtubeUrl: string;
+  messageId: string;
+  messageUrl: string | null;
+  /** ISO-8601 — the Discord MESSAGE's timestamp, never a scan/import time. */
+  postedAt: string;
+}
+
+export type DiscordImportResultKind = "added" | "existing_source_new_origin" | "duplicate_origin" | "invalid";
+export interface DiscordImportResultEntry {
+  youtubeUrl: string;
+  messageId: string;
+  kind: DiscordImportResultKind;
+  source?: YouTubeProjectSource;
+  message?: string;
+}
+export interface DiscordImportResponse {
+  results: DiscordImportResultEntry[];
+  occurrencesProcessed: number;
+  newSourceCount: number;
+  newOriginCount: number;
+  duplicateOriginCount: number;
+  invalidCount: number;
+}
+
+/**
+ * POST /api/projects/:projectId/sources/youtube/discord-import — Phase
+ * 4K-C. Commits the browser companion's scan results (already extracted
+ * client-side; this call sends them to the backend, which re-validates and
+ * re-canonicalizes every URL — see the backend route's own doc comment).
+ * Never analyzes anything.
+ */
+export async function importYouTubeSourcesFromDiscordChannel(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  channel: DiscordImportChannelInput,
+  occurrences: DiscordImportOccurrenceInput[],
+): Promise<DiscordImportResponse> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/sources/youtube/discord-import`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ channel, occurrences }),
+  });
+  await throwOnError(res, `Failed to import YouTube videos from Discord (${res.status}).`);
+  return await res.json();
 }
 
 /** GET /api/projects/:projectId/whop-courses/:courseId/lessons */

@@ -4,8 +4,12 @@
  * frontend and backend are separate npm packages in this PoC, mirroring
  * lib/whopUrl.ts's existing convention).
  *
- * Phase 4H-A scope only: a single public video URL
- * (youtube.com/watch?v=... or youtu.be/...). Never a playlist, channel, or
+ * Phase 4H-A scope: a single public video URL (youtube.com/watch?v=... or
+ * youtu.be/...). Phase 4K-C adds youtube.com/shorts/VIDEO_ID and
+ * youtube.com/live/VIDEO_ID as further individual-video forms — all four
+ * forms canonicalize to the same identity/sourceUrl shape, and query
+ * params beyond `v` (tracking params, `t=`, etc.) are always ignored,
+ * never part of the video's identity. Never a playlist, channel, or
  * arbitrary web URL. This is a PURE parser — it never performs a network
  * fetch; used by AddYouTubeVideoDialog for instant client-side feedback
  * before the same URL is re-validated server-side.
@@ -76,10 +80,20 @@ export function parseYouTubeVideoUrl(rawUrl: string): ParsedYouTubeVideo {
 
   if (WATCH_HOSTS.has(hostname)) {
     rejectKnownUnsupportedPath(url.pathname);
-    if (url.pathname !== "/watch") {
-      throw new YouTubeUrlParseError("Expected a youtube.com/watch?v=... video URL.");
+    if (url.pathname === "/watch") {
+      externalId = url.searchParams.get("v");
+    } else {
+      // /shorts/VIDEO_ID and /live/VIDEO_ID — the id is the single path
+      // segment after the prefix; a trailing slash is tolerated, anything
+      // else after it (extra segments) is not one of these two forms.
+      const shortsMatch = /^\/shorts\/([^/]+)\/?$/.exec(url.pathname);
+      const liveMatch = /^\/live\/([^/]+)\/?$/.exec(url.pathname);
+      const pathId = shortsMatch?.[1] ?? liveMatch?.[1] ?? null;
+      if (pathId == null) {
+        throw new YouTubeUrlParseError("Expected a youtube.com/watch?v=..., /shorts/..., or /live/... video URL.");
+      }
+      externalId = pathId;
     }
-    externalId = url.searchParams.get("v");
   } else if (SHORT_HOSTS.has(hostname)) {
     const segments = url.pathname.split("/").filter((s) => s.length > 0);
     if (segments.length !== 1) {

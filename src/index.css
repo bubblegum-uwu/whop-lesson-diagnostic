@@ -2434,6 +2434,21 @@ button.kv-topnav-avatar:hover {
   white-space: nowrap;
 }
 
+/* Phase 4K-C — the "Source: Manual / Discord · #channel" provenance line. As a <details> summary (multi-origin case) it also gets a pointer cursor and its own expanded list styling below. */
+.knovera-youtube-source-provenance {
+  font-size: 0.78rem;
+  color: var(--kv-text-muted);
+  margin: 0;
+}
+.knovera-youtube-source-provenance summary {
+  cursor: pointer;
+}
+.knovera-youtube-source-provenance ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  list-style: disc;
+}
+
 .knovera-diagnostic-tools {
   border: 1px solid var(--kv-border);
   border-radius: var(--kv-radius-md);

@@ -1,0 +1,17 @@
+{
+  "name": "knovera-discord-companion",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Knovera Browser Companion (Phase 4K-C) — a Manifest V3 extension that scans a Discord channel the user is already logged into, in the user's own browser, and hands discovered YouTube links back to the Knovera web app. Never a bot, never server-side automation, never touches the user's Discord auth token.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc -p tsconfig.json --outDir dist"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1",
+    "typescript": "~6.0.2",
+    "vitest": "^5.0.0"
+  }
+}

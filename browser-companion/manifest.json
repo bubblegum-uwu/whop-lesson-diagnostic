@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Knovera Browser Companion",
+  "version": "0.1.0",
+  "description": "Scans a Discord channel you're already logged into, in your own browser, and hands discovered YouTube links to Knovera. Never a bot — no server-side automation, no access to your Discord login.",
+  "permissions": ["tabs"],
+  "host_permissions": ["https://discord.com/*"],
+  "background": {
+    "service_worker": "serviceWorker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://discord.com/channels/*"],
+      "js": ["discordContentScript.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["knoveraContentScript.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

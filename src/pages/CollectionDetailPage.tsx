@@ -220,6 +220,10 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
         status: "READY",
         createdAt: viewingItem.createdAt,
         collectionId: state.phase === "loaded" ? state.collection.id : null,
+        // This view's CatalogItemSummary carries no provenance data — an
+        // honest empty array (never fabricated) rather than fetching it
+        // just for the analysis drawer's benefit.
+        origins: [],
       }
     : null;
 
