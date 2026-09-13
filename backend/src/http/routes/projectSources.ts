@@ -648,7 +648,7 @@ function parseDiscordImportOccurrences(occurrences: unknown, res: Response): unk
   return occurrences;
 }
 
-export type DiscordImportResultKind = "added" | "existing_source_new_origin" | "duplicate_origin" | "invalid";
+export type DiscordImportResultKind = "added" | "existing_source_new_origin" | "existing_origin_enriched" | "duplicate_origin" | "invalid";
 export interface DiscordImportResultEntry {
   youtubeUrl: string;
   messageId: string;
@@ -661,6 +661,7 @@ export interface DiscordImportResponse {
   occurrencesProcessed: number;
   newSourceCount: number;
   newOriginCount: number;
+  enrichedOriginCount: number;
   duplicateOriginCount: number;
   invalidCount: number;
 }
@@ -691,9 +692,13 @@ export interface DiscordImportResponse {
  * brand-new project_source), `existing_source_new_origin` (the video was
  * already a source of this project — from a manual add, another channel,
  * or an earlier scan — and this occurrence added a new provenance row to
- * it), `duplicate_origin` (this exact Discord message was already recorded
- * as an origin of this source — re-scanning the same channel is safe to
- * repeat), and `invalid` (malformed occurrence — never partially applied).
+ * it), `existing_origin_enriched` (this exact Discord message was already
+ * recorded as an origin, but was missing its channel name and/or message
+ * URL — now filled in from this scan, never overwriting a value it already
+ * had — see insertDiscordChannelOrigin's doc comment), `duplicate_origin`
+ * (this exact Discord message was already recorded with nothing left to
+ * enrich — re-scanning the same channel is safe to repeat), and `invalid`
+ * (malformed occurrence — never partially applied).
  *
  * Never calls the analysis endpoint, jobTrigger, or any synthesis
  * function — imported sources begin in the same NOT-analyzed state as
@@ -761,7 +766,7 @@ export function createDiscordImportYouTubeSourcesHandler(deps: ProjectSourcesRou
         sourceUrl: parsed.sourceUrl,
       });
 
-      const { created: originCreated } = await insertDiscordChannelOrigin(deps.pool, {
+      const { outcome: originOutcome } = await insertDiscordChannelOrigin(deps.pool, {
         projectSourceId: source.id,
         guildId: channel.guildId,
         channelId: channel.channelId,
@@ -772,7 +777,13 @@ export function createDiscordImportYouTubeSourcesHandler(deps: ProjectSourcesRou
       });
 
       const origins = await listOriginsBySourceIds(deps.pool, [source.id]);
-      const kind: DiscordImportResultKind = sourceCreated ? "added" : originCreated ? "existing_source_new_origin" : "duplicate_origin";
+      const kind: DiscordImportResultKind = sourceCreated
+        ? "added"
+        : originOutcome === "created"
+          ? "existing_source_new_origin"
+          : originOutcome === "enriched"
+            ? "existing_origin_enriched"
+            : "duplicate_origin";
       results.push({ youtubeUrl, messageId, kind, source: toYouTubeProjectSource(source, origins.get(source.id) ?? []) });
     }
 
@@ -781,6 +792,7 @@ export function createDiscordImportYouTubeSourcesHandler(deps: ProjectSourcesRou
       occurrencesProcessed: occurrences.length,
       newSourceCount: results.filter((r) => r.kind === "added").length,
       newOriginCount: results.filter((r) => r.kind === "existing_source_new_origin").length,
+      enrichedOriginCount: results.filter((r) => r.kind === "existing_origin_enriched").length,
       duplicateOriginCount: results.filter((r) => r.kind === "duplicate_origin").length,
       invalidCount: results.filter((r) => r.kind === "invalid").length,
     };

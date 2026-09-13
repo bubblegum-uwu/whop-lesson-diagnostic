@@ -116,6 +116,7 @@ describe("ImportDiscordChannelDialog (Phase 4K-C)", () => {
         occurrencesProcessed: 1,
         newSourceCount: 1,
         newOriginCount: 0,
+        enrichedOriginCount: 0,
         duplicateOriginCount: 0,
         invalidCount: 0,
       });

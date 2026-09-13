@@ -239,13 +239,14 @@ export function ImportDiscordChannelDialog({
           <>
             <p>
               {state.response.newSourceCount} added · {state.response.newOriginCount} linked to existing sources ·{" "}
-              {state.response.duplicateOriginCount} already recorded · {state.response.invalidCount} invalid
+              {state.response.enrichedOriginCount} enriched · {state.response.duplicateOriginCount} already recorded ·{" "}
+              {state.response.invalidCount} invalid
             </p>
             <ul className="knovera-batch-import-results">
               {state.response.results.map((r, i) => (
                 <li key={i}>
                   <span
-                    className={`kv-badge ${r.kind === "added" || r.kind === "existing_source_new_origin" ? "kv-badge-accent" : r.kind === "invalid" ? "kv-badge-danger" : "kv-badge-muted"}`}
+                    className={`kv-badge ${r.kind === "added" || r.kind === "existing_source_new_origin" || r.kind === "existing_origin_enriched" ? "kv-badge-accent" : r.kind === "invalid" ? "kv-badge-danger" : "kv-badge-muted"}`}
                   >
                     {r.kind}
                   </span>

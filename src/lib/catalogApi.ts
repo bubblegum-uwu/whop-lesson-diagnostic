@@ -297,7 +297,7 @@ export interface DiscordImportOccurrenceInput {
   postedAt: string;
 }
 
-export type DiscordImportResultKind = "added" | "existing_source_new_origin" | "duplicate_origin" | "invalid";
+export type DiscordImportResultKind = "added" | "existing_source_new_origin" | "existing_origin_enriched" | "duplicate_origin" | "invalid";
 export interface DiscordImportResultEntry {
   youtubeUrl: string;
   messageId: string;
@@ -310,6 +310,8 @@ export interface DiscordImportResponse {
   occurrencesProcessed: number;
   newSourceCount: number;
   newOriginCount: number;
+  /** A previously-recorded Discord occurrence whose channel name and/or message URL was missing and just got filled in — never a duplicate row, never an overwritten trustworthy value (see the backend's insertDiscordChannelOrigin doc comment). */
+  enrichedOriginCount: number;
   duplicateOriginCount: number;
   invalidCount: number;
 }

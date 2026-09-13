@@ -79,7 +79,7 @@ describe("findScroller", () => {
 const CHANNEL_ID = "1219022089252503632";
 
 describe("findChannelName", () => {
-  it("1: extracts a real-style channel heading (an <h1> in the header, above the message list)", () => {
+  it("extracts a real-style channel heading (an <h1> in the header, above the message list) when nothing outranks it", () => {
     const header = document.createElement("header");
     const h1 = document.createElement("h1");
     h1.textContent = "pre-market-live";
@@ -94,7 +94,7 @@ describe("findChannelName", () => {
     }
   });
 
-  it("2: extracts an alternate accessible heading (role=\"heading\", not necessarily an <h1>)", () => {
+  it("extracts an alternate accessible heading (role=\"heading\", not necessarily an <h1>)", () => {
     const heading = document.createElement("div");
     heading.setAttribute("role", "heading");
     heading.textContent = "daily-setups";
@@ -108,7 +108,7 @@ describe("findChannelName", () => {
     }
   });
 
-  it("3: falls back to the selected nav item matching the channel id when no header heading is present", () => {
+  it("uses the selected nav item matching the channel id when no header heading is present", () => {
     const nav = document.createElement("div");
     nav.setAttribute("aria-selected", "true");
     nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
@@ -121,7 +121,7 @@ describe("findChannelName", () => {
     }
   });
 
-  it("4: never uses unrelated visible text — a heading inside the message list, or a selected nav item for a DIFFERENT channel, are both ignored", () => {
+  it("never uses unrelated visible text — a heading inside the message list, or a selected nav item for a DIFFERENT channel, are both ignored", () => {
     const messageList = createMessageList(document, []);
     const headingInsideMessages = document.createElement("h1");
     headingInsideMessages.textContent = "someone's message that looks like a heading";
@@ -141,7 +141,114 @@ describe("findChannelName", () => {
     }
   });
 
-  it("5: returns null (never fabricated) when no trustworthy name is found anywhere — the caller falls back to \"channel <id>\"", () => {
+  it("returns null (never fabricated) when no trustworthy name is found anywhere — the caller falls back to \"channel <id>\"", () => {
     expect(findChannelName(document, CHANNEL_ID)).toBeNull();
+  });
+
+  // PR #32 second live-validation follow-up: a generic header heading can
+  // render a COMPOSITE label (server/category name + channel name) —
+  // the exact-channel-id-correlated nav item must always outrank it.
+  it("1: a composite server+channel header PLUS a selected exact-channel nav item → the nav item's precise name wins, never the composite string", () => {
+    const header = document.createElement("header");
+    const h1 = document.createElement("h1");
+    h1.textContent = "The Accelerator: 🚨︱scarface-alerts";
+    header.appendChild(h1);
+
+    const nav = document.createElement("div");
+    nav.setAttribute("aria-selected", "true");
+    nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
+    nav.textContent = "scarface-alerts";
+
+    const messageList = createMessageList(document, []);
+    document.body.append(nav, header, messageList);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+      header.remove();
+      messageList.remove();
+    }
+  });
+
+  it("2: with no selected exact-channel nav item, a trustworthy (non-composite) channel heading is still used", () => {
+    const header = document.createElement("header");
+    const h1 = document.createElement("h1");
+    h1.textContent = "scarface-alerts";
+    header.appendChild(h1);
+    const messageList = createMessageList(document, []);
+    document.body.append(header, messageList);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      header.remove();
+      messageList.remove();
+    }
+  });
+
+  it("3: no trustworthy name anywhere → null, so the caller falls back to the channel id", () => {
+    const header = document.createElement("header");
+    header.innerHTML = "<div>Loading…</div>";
+    document.body.appendChild(header);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBeNull();
+    } finally {
+      header.remove();
+    }
+  });
+
+  it("4: an unrelated server/category heading never wins over the exact-channel-id nav match, even when no separator is present to normalize away", () => {
+    const header = document.createElement("header");
+    const h1 = document.createElement("h1");
+    h1.textContent = "Totally Unrelated Server Name";
+    header.appendChild(h1);
+
+    const nav = document.createElement("div");
+    nav.setAttribute("aria-selected", "true");
+    nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
+    nav.textContent = "scarface-alerts";
+
+    const messageList = createMessageList(document, []);
+    document.body.append(nav, header, messageList);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+      header.remove();
+      messageList.remove();
+    }
+  });
+
+  it("strips a purely decorative leading '#' from the selected nav item's text", () => {
+    const nav = document.createElement("div");
+    nav.setAttribute("aria-selected", "true");
+    nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
+    nav.textContent = "# scarface-alerts";
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("a channel-correlated header element without an explicit selected marker still outranks a generic heading", () => {
+    const header = document.createElement("header");
+    const h1 = document.createElement("h1");
+    h1.textContent = "The Accelerator: 🚨︱scarface-alerts";
+    header.appendChild(h1);
+
+    const channelSpecificEl = document.createElement("div");
+    channelSpecificEl.id = `channel-header-${CHANNEL_ID}`;
+    channelSpecificEl.setAttribute("aria-label", "scarface-alerts");
+    header.appendChild(channelSpecificEl);
+
+    const messageList = createMessageList(document, []);
+    document.body.append(header, messageList);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      header.remove();
+      messageList.remove();
+    }
   });
 });

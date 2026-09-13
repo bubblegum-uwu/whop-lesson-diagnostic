@@ -75,26 +75,37 @@ export function findScroller(root: ParentNode): HTMLElement | null {
 // channelName stays null, never fabricated from e.g. the URL's channel
 // id. Deliberately NOT keyed to one generated CSS class (those rotate
 // across Discord releases); each tier instead prefers a signal that's
-// either semantically meaningful (a heading, an ARIA selected-state) or
-// directly correlated to the channel id we already know from the URL —
-// never "whatever text looks plausible."
+// either directly correlated to the channel id we already know from the
+// URL, or semantically meaningful (a heading) — never "whatever text
+// looks plausible."
 //
-// Tier 1 — an accessible heading (<h1> or role="heading") that appears
-// BEFORE the message-list scroller in document order. Discord always
-// renders the channel header above the chat log, so this position check
-// is what keeps an incidental heading-like element elsewhere on the page
-// (e.g. inside a modal, or some other UI chrome) from ever being mistaken
-// for the channel title.
+// Ordered by trustworthiness, most first:
 //
-// Tier 2 — the channel navigation item that is BOTH marked as the
+// Tier 1 — the channel navigation item that is BOTH marked as the
 // currently-selected item (aria-selected="true", or a class name
 // containing "selected" as a fallback for older/differently-labelled
 // markup) AND whose own id/href encodes the exact channel id we're
-// scanning. Correlating by channel id — not just "whatever looks
-// selected" — is what prevents ever picking a different, unrelated
-// selected-looking element by accident.
+// scanning. This is the single most trustworthy signal available: it can
+// only ever name THIS channel, never a server/category label, so it
+// outranks every other tier even when a heading is also present.
+//
+// Tier 2 — any OTHER element positioned in the header area (before the
+// message-list scroller) whose id/href/data-list-item-id also encodes the
+// exact channel id, even without an explicit "selected" marker — a
+// broader net for channel-specific header markup that doesn't happen to
+// carry an aria-selected/selected-class attribute.
+//
+// Tier 3 — a generic accessible heading (<h1> or role="heading") that
+// appears before the message-list scroller, LAST because Discord's
+// header sometimes renders a composite label combining the server/
+// category name with the channel name (e.g. "The Accelerator:
+// 🚨︱scarface-alerts") — normalizeCompositeHeading below takes a
+// conservative pass at stripping that composite prefix, but a tier that
+// isn't correlated to the channel id at all is inherently less trustworthy
+// than one that is, hence last.
 const HEADING_SELECTOR = 'h1, [role="heading"]';
 const SELECTED_NAV_ITEM_SELECTOR = '[aria-selected="true"], [class*="selected"]';
+const ID_CORRELATED_SELECTOR = "[id], [href], [data-list-item-id]";
 
 function isBeforeMessageList(root: ParentNode, el: Element): boolean {
   const scroller = findScroller(root);
@@ -106,33 +117,77 @@ function isBeforeMessageList(root: ParentNode, el: Element): boolean {
   return (el.compareDocumentPosition(scroller) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
 }
 
-function findHeadingChannelName(root: ParentNode): string | null {
-  for (const heading of root.querySelectorAll(HEADING_SELECTOR)) {
-    if (!isBeforeMessageList(root, heading)) continue;
-    const text = heading.textContent?.trim();
-    if (text) return text;
-  }
-  return null;
+function isCorrelatedToChannelId(el: Element, channelId: string): boolean {
+  const listItemId = el.getAttribute("data-list-item-id") ?? "";
+  const href = el.getAttribute("href") ?? "";
+  const id = el.id ?? "";
+  return listItemId.includes(channelId) || href.includes(channelId) || id.includes(channelId);
+}
+
+/** Strips a purely decorative leading "#" (Discord's own convention for labelling text channels, e.g. "# scarface-alerts") — never part of the channel's actual name. */
+function stripDecorativeHash(text: string): string {
+  return text.replace(/^#\s*/, "");
+}
+
+/**
+ * A conservative, last-resort normalization for a composite header label
+ * (server/category name + channel name in one string). Takes the text
+ * AFTER the LAST ": " (a "Server: category-channel"-style separator) and
+ * then after the last "︱" or "|" (Discord's own decorative divider,
+ * commonly preceded by an emoji) — e.g. "The Accelerator: 🚨︱scarface-alerts"
+ * → "scarface-alerts". A heading with neither separator is returned
+ * unchanged; this never invents a name, only trims a label down when a
+ * known composite pattern is present.
+ */
+function normalizeCompositeHeading(text: string): string {
+  let result = text;
+  const colonIndex = result.lastIndexOf(": ");
+  if (colonIndex !== -1) result = result.slice(colonIndex + 2);
+  const dividerMatch = /[︱|]/.exec(result);
+  if (dividerMatch) result = result.slice(dividerMatch.index + 1);
+  return stripDecorativeHash(result.trim());
 }
 
 function findSelectedNavItemChannelName(root: ParentNode, channelId: string): string | null {
   for (const candidate of root.querySelectorAll(SELECTED_NAV_ITEM_SELECTOR)) {
-    const listItemId = candidate.getAttribute("data-list-item-id") ?? "";
-    const href = candidate.getAttribute("href") ?? "";
-    const id = candidate.id ?? "";
-    if (!listItemId.includes(channelId) && !href.includes(channelId) && !id.includes(channelId)) continue;
+    if (!isCorrelatedToChannelId(candidate, channelId)) continue;
     const text = candidate.textContent?.trim();
-    if (text) return text;
+    if (text) return stripDecorativeHash(text);
+  }
+  return null;
+}
+
+function findChannelCorrelatedHeaderElementName(root: ParentNode, channelId: string): string | null {
+  for (const candidate of root.querySelectorAll(ID_CORRELATED_SELECTOR)) {
+    if (!isBeforeMessageList(root, candidate) || !isCorrelatedToChannelId(candidate, channelId)) continue;
+    const ariaLabel = candidate.getAttribute("aria-label");
+    const text = (ariaLabel ?? candidate.textContent)?.trim();
+    if (text) return stripDecorativeHash(text);
+  }
+  return null;
+}
+
+function findGenericHeadingChannelName(root: ParentNode): string | null {
+  for (const heading of root.querySelectorAll(HEADING_SELECTOR)) {
+    if (!isBeforeMessageList(root, heading)) continue;
+    const text = heading.textContent?.trim();
+    if (text) return normalizeCompositeHeading(text);
   }
   return null;
 }
 
 /**
- * Ordered fallback: an accessible channel-header heading, then a
- * selected-nav-item correlated to `channelId`, then (handled by the
- * caller, see discordContentScript.ts) `channel <channelId>` — never
- * fabricated, and never inferred from message-body or username text.
+ * Ordered fallback (most trustworthy first): the selected nav item for
+ * this exact `channelId`, then any other header element correlated to
+ * `channelId`, then a generic (conservatively normalized) heading, then
+ * (handled by the caller, see discordContentScript.ts) `channel
+ * <channelId>` — never fabricated, and never inferred from message-body
+ * or username text.
  */
 export function findChannelName(root: ParentNode, channelId: string): string | null {
-  return findHeadingChannelName(root) ?? findSelectedNavItemChannelName(root, channelId);
+  return (
+    findSelectedNavItemChannelName(root, channelId) ??
+    findChannelCorrelatedHeaderElementName(root, channelId) ??
+    findGenericHeadingChannelName(root)
+  );
 }

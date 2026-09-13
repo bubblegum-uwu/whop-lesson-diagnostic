@@ -260,3 +260,71 @@ describe("POST /api/projects/:projectId/sources/youtube/discord-import (Phase 4K
     expect(body.error?.type).toBe("project_not_found");
   });
 });
+
+describe("re-importing a Discord occurrence enriches missing provenance fields (PR #32 live-validation follow-up)", () => {
+  it("1: an origin with channel_name NULL is filled in by a later re-import that supplies one — no duplicate row", async () => {
+    const project = await makeProject();
+    const messageId = "enrich-1";
+    const first = await callImportHandler(String(project.id), channel({ channelName: null }), [occurrence({ messageId })]);
+    expect(first.body.results[0].source!.origins).toHaveLength(1);
+    expect(first.body.results[0].source!.origins[0].discordChannelName).toBeNull();
+
+    const second = await callImportHandler(String(project.id), channel({ channelName: "scarface-alerts" }), [occurrence({ messageId })]);
+
+    expect(second.body.results[0].kind).toBe("existing_origin_enriched");
+    expect(second.body.enrichedOriginCount).toBe(1);
+    expect(second.body.results[0].source!.id).toBe(first.body.results[0].source!.id);
+    expect(second.body.results[0].source!.origins).toHaveLength(1);
+    expect(second.body.results[0].source!.origins[0].discordChannelName).toBe("scarface-alerts");
+  });
+
+  it("2: an origin with a good channel name is NOT overwritten by a re-import supplying null", async () => {
+    const project = await makeProject();
+    const messageId = "enrich-2";
+    await callImportHandler(String(project.id), channel({ channelName: "scarface-alerts" }), [occurrence({ messageId })]);
+
+    const second = await callImportHandler(String(project.id), channel({ channelName: null }), [occurrence({ messageId })]);
+
+    expect(second.body.results[0].kind).toBe("duplicate_origin");
+    expect(second.body.results[0].source!.origins).toHaveLength(1);
+    expect(second.body.results[0].source!.origins[0].discordChannelName).toBe("scarface-alerts");
+  });
+
+  it("3: an origin with a good channel name is NOT overwritten by a re-import supplying a DIFFERENT name", async () => {
+    const project = await makeProject();
+    const messageId = "enrich-3";
+    await callImportHandler(String(project.id), channel({ channelName: "scarface-alerts" }), [occurrence({ messageId })]);
+
+    const second = await callImportHandler(String(project.id), channel({ channelName: "some-other-label" }), [occurrence({ messageId })]);
+
+    expect(second.body.results[0].kind).toBe("duplicate_origin");
+    expect(second.body.results[0].source!.origins[0].discordChannelName).toBe("scarface-alerts");
+  });
+
+  it("4: enrichment never changes discord_posted_at, even when the re-import supplies a different timestamp", async () => {
+    const project = await makeProject();
+    const messageId = "enrich-4";
+    const first = await callImportHandler(String(project.id), channel({ channelName: null }), [
+      occurrence({ messageId, postedAt: "2026-01-06T10:00:00.000Z" }),
+    ]);
+    const originalPostedAt = first.body.results[0].source!.origins[0].discordPostedAt;
+
+    const second = await callImportHandler(String(project.id), channel({ channelName: "scarface-alerts" }), [
+      occurrence({ messageId, postedAt: "2026-09-12T00:00:00.000Z" }),
+    ]);
+
+    expect(second.body.results[0].kind).toBe("existing_origin_enriched");
+    expect(new Date(second.body.results[0].source!.origins[0].discordPostedAt!).toISOString()).toBe(new Date(originalPostedAt!).toISOString());
+  });
+
+  it("5: enrichment never creates a duplicate provenance row — the source keeps exactly one origin across repeated re-imports", async () => {
+    const project = await makeProject();
+    const messageId = "enrich-5";
+    await callImportHandler(String(project.id), channel({ channelName: null }), [occurrence({ messageId })]);
+    await callImportHandler(String(project.id), channel({ channelName: "scarface-alerts" }), [occurrence({ messageId })]);
+    const third = await callImportHandler(String(project.id), channel({ channelName: "scarface-alerts" }), [occurrence({ messageId })]);
+
+    expect(third.body.results[0].kind).toBe("duplicate_origin");
+    expect(third.body.results[0].source!.origins).toHaveLength(1);
+  });
+});
