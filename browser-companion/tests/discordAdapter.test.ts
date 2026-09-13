@@ -64,7 +64,7 @@ describe("findRenderedMessageElements / adaptMessageElement", () => {
   });
 });
 
-describe("findScroller / findChannelName", () => {
+describe("findScroller", () => {
   it("finds the scrollable message-list container", () => {
     const container = createMessageList(document, []);
     document.body.appendChild(container);
@@ -74,8 +74,74 @@ describe("findScroller / findChannelName", () => {
       container.remove();
     }
   });
+});
 
-  it("returns null for channel name when no title element is present — never fabricated", () => {
-    expect(findChannelName(document)).toBeNull();
+const CHANNEL_ID = "1219022089252503632";
+
+describe("findChannelName", () => {
+  it("1: extracts a real-style channel heading (an <h1> in the header, above the message list)", () => {
+    const header = document.createElement("header");
+    const h1 = document.createElement("h1");
+    h1.textContent = "pre-market-live";
+    header.appendChild(h1);
+    const messageList = createMessageList(document, []);
+    document.body.append(header, messageList);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("pre-market-live");
+    } finally {
+      header.remove();
+      messageList.remove();
+    }
+  });
+
+  it("2: extracts an alternate accessible heading (role=\"heading\", not necessarily an <h1>)", () => {
+    const heading = document.createElement("div");
+    heading.setAttribute("role", "heading");
+    heading.textContent = "daily-setups";
+    const messageList = createMessageList(document, []);
+    document.body.append(heading, messageList);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("daily-setups");
+    } finally {
+      heading.remove();
+      messageList.remove();
+    }
+  });
+
+  it("3: falls back to the selected nav item matching the channel id when no header heading is present", () => {
+    const nav = document.createElement("div");
+    nav.setAttribute("aria-selected", "true");
+    nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
+    nav.textContent = "trade-ideas";
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("trade-ideas");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("4: never uses unrelated visible text — a heading inside the message list, or a selected nav item for a DIFFERENT channel, are both ignored", () => {
+    const messageList = createMessageList(document, []);
+    const headingInsideMessages = document.createElement("h1");
+    headingInsideMessages.textContent = "someone's message that looks like a heading";
+    messageList.appendChild(headingInsideMessages);
+
+    const wrongChannelNav = document.createElement("div");
+    wrongChannelNav.setAttribute("aria-selected", "true");
+    wrongChannelNav.setAttribute("data-list-item-id", "channels___999999999999999999");
+    wrongChannelNav.textContent = "unrelated-channel";
+
+    document.body.append(wrongChannelNav, messageList);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBeNull();
+    } finally {
+      wrongChannelNav.remove();
+      messageList.remove();
+    }
+  });
+
+  it("5: returns null (never fabricated) when no trustworthy name is found anywhere — the caller falls back to \"channel <id>\"", () => {
+    expect(findChannelName(document, CHANNEL_ID)).toBeNull();
   });
 });

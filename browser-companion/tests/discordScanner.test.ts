@@ -144,6 +144,90 @@ describe("scanChannelMessages", () => {
     expect(progressReports[0]).toEqual({ scannedMessages: 1, foundOccurrences: 1 });
   });
 
+  // Same-message YouTube dedup (PR #32 live-validation follow-up) — Discord
+  // commonly renders the same video link twice within one message (the
+  // original inline anchor plus a separate embed/preview anchor), and
+  // real videos are often pasted in different equivalent URL forms. The
+  // dedup key is CANONICAL video id, scoped to one message only — a
+  // different message (even for the identical video) or a different
+  // video within the SAME message must never be collapsed.
+  it("1: a duplicate identical YouTube anchor within one message produces only one occurrence", async () => {
+    const env = createFakeEnv([[{ messageId: M1, postedAt: "2026-09-12T14:00:00.000Z", hrefs: [YT_A, YT_A] }]]);
+    const result = await scanChannelMessages(env, CHANNEL, { maxCyclesWithNoProgress: 1 });
+    expect(result.occurrences).toHaveLength(1);
+  });
+
+  it("2: watch and youtu.be forms of the same video within one message collapse to one occurrence", async () => {
+    const env = createFakeEnv([
+      [{ messageId: M1, postedAt: "2026-09-12T14:00:00.000Z", hrefs: ["https://www.youtube.com/watch?v=aaaaaaaaaaa", "https://youtu.be/aaaaaaaaaaa"] }],
+    ]);
+    const result = await scanChannelMessages(env, CHANNEL, { maxCyclesWithNoProgress: 1 });
+    expect(result.occurrences).toHaveLength(1);
+  });
+
+  it("3: a plain watch URL and a tracking-param variant of the same video within one message collapse to one occurrence", async () => {
+    const env = createFakeEnv([
+      [
+        {
+          messageId: M1,
+          postedAt: "2026-09-12T14:00:00.000Z",
+          hrefs: ["https://www.youtube.com/watch?v=aaaaaaaaaaa", "https://www.youtube.com/watch?v=aaaaaaaaaaa&t=30&si=tracking"],
+        },
+      ],
+    ]);
+    const result = await scanChannelMessages(env, CHANNEL, { maxCyclesWithNoProgress: 1 });
+    expect(result.occurrences).toHaveLength(1);
+  });
+
+  it("4: an original message-link anchor and a separate embed/preview-link anchor for the same video collapse to one occurrence", async () => {
+    // Modeling Discord's own "original anchor + generated embed anchor"
+    // duplication: two different anchor elements, two different (but
+    // equivalent) URL forms, same message.
+    const env = createFakeEnv([
+      [
+        {
+          messageId: M1,
+          postedAt: "2026-09-12T14:00:00.000Z",
+          hrefs: ["https://youtu.be/aaaaaaaaaaa?si=abc123", "https://www.youtube.com/watch?v=aaaaaaaaaaa"],
+        },
+      ],
+    ]);
+    const result = await scanChannelMessages(env, CHANNEL, { maxCyclesWithNoProgress: 1 });
+    expect(result.occurrences).toHaveLength(1);
+  });
+
+  it("6: two DIFFERENT videos within the same message are both preserved as separate occurrences", async () => {
+    const env = createFakeEnv([[{ messageId: M1, postedAt: "2026-09-12T14:00:00.000Z", hrefs: [YT_A, YT_B] }]]);
+    const result = await scanChannelMessages(env, CHANNEL, { maxCyclesWithNoProgress: 1 });
+    expect(result.occurrences).toHaveLength(2);
+    expect(result.occurrences.map((o) => o.youtubeUrl).sort()).toEqual([YT_A, YT_B].sort());
+  });
+
+  it("7: the same video scanned under two different channel identities is attributed independently to each (no cross-call dedup)", async () => {
+    const envA = createFakeEnv([[{ messageId: M1, postedAt: "2026-09-12T14:00:00.000Z", hrefs: [YT_A] }]]);
+    const resultA = await scanChannelMessages(envA, { guildId: "g1", channelId: "channel-a" }, { maxCyclesWithNoProgress: 1 });
+
+    const envB = createFakeEnv([[{ messageId: M1, postedAt: "2026-09-12T14:00:00.000Z", hrefs: [YT_A] }]]);
+    const resultB = await scanChannelMessages(envB, { guildId: "g1", channelId: "channel-b" }, { maxCyclesWithNoProgress: 1 });
+
+    expect(resultA.occurrences).toHaveLength(1);
+    expect(resultB.occurrences).toHaveLength(1);
+    expect(resultA.occurrences[0]!.messageUrl).toContain("channel-a");
+    expect(resultB.occurrences[0]!.messageUrl).toContain("channel-b");
+  });
+
+  it("8/9: progress and the final result both reflect the DEDUPED occurrence count, not the raw anchor count", async () => {
+    const env = createFakeEnv([[{ messageId: M1, postedAt: "2026-09-12T14:00:00.000Z", hrefs: [YT_A, YT_A, YT_B] }]]);
+    const progressReports: { scannedMessages: number; foundOccurrences: number }[] = [];
+    env.onProgress = (p) => progressReports.push(p);
+
+    const result = await scanChannelMessages(env, CHANNEL, { maxCyclesWithNoProgress: 1 });
+
+    // 3 raw anchors (YT_A twice + YT_B), but only 2 real occurrences.
+    expect(result.occurrences).toHaveLength(2);
+    expect(progressReports.at(-1)!.foundOccurrences).toBe(2);
+  });
+
   it("a message missing a timestamp is skipped, never crashes the scan", async () => {
     container = document.createElement("div");
     container.setAttribute("data-list-id", "chat-messages");

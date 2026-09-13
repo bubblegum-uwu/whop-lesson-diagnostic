@@ -1,6 +1,7 @@
 import { findRenderedMessageElements, adaptMessageElement } from "./discordAdapter.js";
 import { extractYouTubeUrls } from "./youtubeLinkExtractor.js";
 import { buildMessageUrl } from "./discordChannelUrl.js";
+import { tryCanonicalizeYouTubeVideoId } from "./youtubeUrl.js";
 import type { DiscordScanOccurrence, DiscordScanProgress } from "./types.js";
 
 /**
@@ -81,7 +82,22 @@ export async function scanChannelMessages(
       seenMessageIds.add(adapted.messageId);
       newThisCycle++;
 
+      // Same-message dedup (issue: Discord commonly renders the same
+      // YouTube link twice within one message — the original inline
+      // anchor plus a separate embed/preview anchor for the identical
+      // video). Keyed by CANONICAL video id, never the raw href, so
+      // watch/shorts/live/youtu.be forms and tracking-param variants of
+      // the same video collapse to one occurrence here too — matching
+      // exactly what the backend would canonicalize them to anyway. This
+      // is purely a same-message concern: a different message id (a
+      // repost, or the same video posted in a different channel) always
+      // gets its own occurrence, never merged with this one.
+      const seenVideoKeysInMessage = new Set<string>();
       for (const youtubeUrl of extractYouTubeUrls(adapted.anchorHrefs)) {
+        const dedupeKey = tryCanonicalizeYouTubeVideoId(youtubeUrl) ?? youtubeUrl;
+        if (seenVideoKeysInMessage.has(dedupeKey)) continue;
+        seenVideoKeysInMessage.add(dedupeKey);
+
         occurrences.push({
           youtubeUrl,
           messageId: adapted.messageId,

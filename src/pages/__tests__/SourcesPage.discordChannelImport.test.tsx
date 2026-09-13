@@ -136,6 +136,8 @@ describe("SourcesPage — Discord channel import (Phase 4K-C)", () => {
     );
     renderSources("/projects/7/sources");
     expect(await screen.findByText("Source: Manual")).toBeInTheDocument();
+    // 7: a MANUAL-only source never shows a fabricated posted date.
+    expect(screen.queryByText(/Posted/)).not.toBeInTheDocument();
   });
 
   it("4: a Discord-discovered YouTube source renders its channel reference and posted date", async () => {
@@ -168,7 +170,8 @@ describe("SourcesPage — Discord channel import (Phase 4K-C)", () => {
       }),
     );
     renderSources("/projects/7/sources");
-    expect(await screen.findByText(/Source: Discord · #pre-market-live \/ Posted:/)).toBeInTheDocument();
+    expect(await screen.findByText("Source: Discord · #pre-market-live")).toBeInTheDocument();
+    expect(screen.getByText("Posted: Sep 12, 2026")).toBeInTheDocument();
   });
 
   it("5: a source with no known origins renders no provenance line — never a fabricated 'Manual' label", async () => {
@@ -186,7 +189,7 @@ describe("SourcesPage — Discord channel import (Phase 4K-C)", () => {
     expect(screen.queryByText(/Source:/)).not.toBeInTheDocument();
   });
 
-  it("6: multiple provenance origins render a compact summary with every origin still available in an expandable detail", async () => {
+  it("6/4: Manual + multiple Discord origins render a compact post count, the LATEST posted date, and every origin still available in an expandable detail", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (url: string) => {
@@ -229,9 +232,69 @@ describe("SourcesPage — Discord channel import (Phase 4K-C)", () => {
 
     const summary = await screen.findByText("Source: Manual + 2 Discord posts");
     expect(summary).toBeInTheDocument();
-    // The detail list is present in the DOM (a native <details>/<summary> — collapsed by default, never discarded).
+    // The latest of the two posted dates (Sep 13 > Sep 12) stays visible
+    // in the collapsed row — never hidden behind the expand affordance.
+    expect(screen.getByText("Latest posted: Sep 13, 2026")).toBeInTheDocument();
+    // 5: the detail list is present in the DOM (a native <details>/<summary>
+    // — collapsed by default, never discarded) with every individual origin
+    // — its own channel and its own posted date — plus the Manual entry.
+    expect(screen.getByText("Manual")).toBeInTheDocument();
     expect(screen.getByText(/Discord · #pre-market-live \/ Posted:/)).toBeInTheDocument();
     expect(screen.getByText(/Discord · #trade-ideas \/ Posted:/)).toBeInTheDocument();
+  });
+
+  it("3: multiple Discord origins with NO manual origin render a compact post count and the latest posted date", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
+        if (url === "https://backend.example.com/api/projects/7/sources") {
+          return jsonResponse(200, {
+            projectId: 7,
+            sources: [
+              youtubeSource({
+                origins: [
+                  {
+                    originType: "DISCORD_CHANNEL",
+                    discordGuildId: "g1",
+                    discordChannelId: "c1",
+                    discordChannelName: "pre-market-live",
+                    discordMessageId: "m1",
+                    discordMessageUrl: null,
+                    discordPostedAt: "2026-04-02T00:00:00.000Z",
+                  },
+                  {
+                    originType: "DISCORD_CHANNEL",
+                    discordGuildId: "g1",
+                    discordChannelId: "c1",
+                    discordChannelName: "pre-market-live",
+                    discordMessageId: "m2",
+                    discordMessageUrl: null,
+                    discordPostedAt: "2026-04-08T00:00:00.000Z",
+                  },
+                  {
+                    originType: "DISCORD_CHANNEL",
+                    discordGuildId: "g1",
+                    discordChannelId: "c2",
+                    discordChannelName: "daily-setups",
+                    discordMessageId: "m3",
+                    discordMessageUrl: null,
+                    discordPostedAt: "2026-04-05T00:00:00.000Z",
+                  },
+                ],
+              }),
+            ],
+          });
+        }
+        if (url === "https://backend.example.com/api/projects/7/sources/9/analysis") return jsonResponse(200, analysisJson());
+        return jsonResponse(404, {});
+      }),
+    );
+    renderSources("/projects/7/sources");
+
+    expect(await screen.findByText("Source: 3 Discord posts")).toBeInTheDocument();
+    expect(screen.getByText("Latest posted: Apr 8, 2026")).toBeInTheDocument();
+    expect(screen.queryByText(/Manual/)).not.toBeInTheDocument();
   });
 
   it("7: falls back to the raw channel id when no channel name is available — never a fabricated name", async () => {
@@ -264,7 +327,8 @@ describe("SourcesPage — Discord channel import (Phase 4K-C)", () => {
       }),
     );
     renderSources("/projects/7/sources");
-    expect(await screen.findByText(/Source: Discord · channel 1219022089252503632 \/ Posted:/)).toBeInTheDocument();
+    expect(await screen.findByText("Source: Discord · channel 1219022089252503632")).toBeInTheDocument();
+    expect(screen.getByText("Posted: Sep 12, 2026")).toBeInTheDocument();
   });
 
   it("8: an existing source that gains a new provenance record after a refresh updates its display without duplicating the row", async () => {
@@ -308,7 +372,12 @@ describe("SourcesPage — Discord channel import (Phase 4K-C)", () => {
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("Source: Manual + 1 Discord post")).toBeInTheDocument();
+    // 2: Manual + exactly one Discord origin must name the actual channel
+    // and keep the posted date visible — never collapse to a date-less
+    // "Manual + 1 Discord post".
+    expect(await screen.findByText("Source: Manual + Discord · #pre-market-live")).toBeInTheDocument();
+    expect(screen.getByText("Posted: Sep 12, 2026")).toBeInTheDocument();
+    expect(screen.queryByText(/1 Discord post/)).not.toBeInTheDocument();
     expect(screen.getAllByText("Support & Resistance Basics")).toHaveLength(1);
   });
 });

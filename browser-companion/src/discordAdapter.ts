@@ -70,14 +70,69 @@ export function findScroller(root: ParentNode): HTMLElement | null {
   return root.querySelector<HTMLElement>(SCROLLER_SELECTOR);
 }
 
-// A best-effort read of the channel name from the header Discord renders
-// above the message list — optional by design (see the spec's "if
-// available" wording): a selector miss here means channelName stays null,
-// never fabricated from e.g. the URL's channel id.
-const CHANNEL_NAME_SELECTOR = '[data-list-id="chat-messages"] ~ * [class*="title"], header [class*="title"]';
+// A best-effort read of the channel name — optional by design (see the
+// spec's "if available" wording): a miss across every tier below means
+// channelName stays null, never fabricated from e.g. the URL's channel
+// id. Deliberately NOT keyed to one generated CSS class (those rotate
+// across Discord releases); each tier instead prefers a signal that's
+// either semantically meaningful (a heading, an ARIA selected-state) or
+// directly correlated to the channel id we already know from the URL —
+// never "whatever text looks plausible."
+//
+// Tier 1 — an accessible heading (<h1> or role="heading") that appears
+// BEFORE the message-list scroller in document order. Discord always
+// renders the channel header above the chat log, so this position check
+// is what keeps an incidental heading-like element elsewhere on the page
+// (e.g. inside a modal, or some other UI chrome) from ever being mistaken
+// for the channel title.
+//
+// Tier 2 — the channel navigation item that is BOTH marked as the
+// currently-selected item (aria-selected="true", or a class name
+// containing "selected" as a fallback for older/differently-labelled
+// markup) AND whose own id/href encodes the exact channel id we're
+// scanning. Correlating by channel id — not just "whatever looks
+// selected" — is what prevents ever picking a different, unrelated
+// selected-looking element by accident.
+const HEADING_SELECTOR = 'h1, [role="heading"]';
+const SELECTED_NAV_ITEM_SELECTOR = '[aria-selected="true"], [class*="selected"]';
 
-export function findChannelName(root: ParentNode): string | null {
-  const el = root.querySelector(CHANNEL_NAME_SELECTOR);
-  const text = el?.textContent?.trim();
-  return text && text.length > 0 ? text : null;
+function isBeforeMessageList(root: ParentNode, el: Element): boolean {
+  const scroller = findScroller(root);
+  if (!scroller) return true; // no message list rendered yet to compare against — don't over-constrain
+  if (scroller === el || scroller.contains(el)) return false; // inside (or is) the message list itself — never the channel header
+  // DOCUMENT_POSITION_FOLLOWING on the result of comparing FROM `el` means
+  // "the scroller follows el" — i.e. el sits before it, exactly the
+  // "above the chat log" position a real channel header always has.
+  return (el.compareDocumentPosition(scroller) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+}
+
+function findHeadingChannelName(root: ParentNode): string | null {
+  for (const heading of root.querySelectorAll(HEADING_SELECTOR)) {
+    if (!isBeforeMessageList(root, heading)) continue;
+    const text = heading.textContent?.trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+function findSelectedNavItemChannelName(root: ParentNode, channelId: string): string | null {
+  for (const candidate of root.querySelectorAll(SELECTED_NAV_ITEM_SELECTOR)) {
+    const listItemId = candidate.getAttribute("data-list-item-id") ?? "";
+    const href = candidate.getAttribute("href") ?? "";
+    const id = candidate.id ?? "";
+    if (!listItemId.includes(channelId) && !href.includes(channelId) && !id.includes(channelId)) continue;
+    const text = candidate.textContent?.trim();
+    if (text) return text;
+  }
+  return null;
+}
+
+/**
+ * Ordered fallback: an accessible channel-header heading, then a
+ * selected-nav-item correlated to `channelId`, then (handled by the
+ * caller, see discordContentScript.ts) `channel <channelId>` — never
+ * fabricated, and never inferred from message-body or username text.
+ */
+export function findChannelName(root: ParentNode, channelId: string): string | null {
+  return findHeadingChannelName(root) ?? findSelectedNavItemChannelName(root, channelId);
 }

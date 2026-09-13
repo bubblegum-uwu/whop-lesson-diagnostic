@@ -72,7 +72,7 @@ async function runScan(requestId: string): Promise<void> {
 
     const scanResult = await scanChannelMessages(env, channel);
     const result: DiscordScanResult = {
-      channel: { guildId: channel.guildId, channelId: channel.channelId, channelName: findChannelName(document) },
+      channel: { guildId: channel.guildId, channelId: channel.channelId, channelName: findChannelName(document, channel.channelId) },
       occurrences: scanResult.occurrences,
       messagesScanned: scanResult.messagesScanned,
       cancelled: scanResult.cancelled,

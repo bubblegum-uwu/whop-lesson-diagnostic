@@ -2448,6 +2448,12 @@ button.kv-topnav-avatar:hover {
   padding-left: 1.1rem;
   list-style: disc;
 }
+/* Live-validation follow-up — the "Source: …" / "Posted: …" (or "Latest posted: …") pair renders as two stacked lines in the collapsed row, never collapsing the posted date out of view. */
+.knovera-youtube-source-provenance-multiline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
 
 .knovera-diagnostic-tools {
   border: 1px solid var(--kv-border);
