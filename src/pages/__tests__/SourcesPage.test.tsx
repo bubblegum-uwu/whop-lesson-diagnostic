@@ -286,54 +286,29 @@ describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add YouTube Video" })).not.toBeInTheDocument());
     await waitFor(() => expect(sourcesCallCount).toBeGreaterThanOrEqual(2));
-    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
-    expect(screen.getByText("YouTube Video")).toBeInTheDocument();
-    // Phase 4H-B: MasterMind is a TRADING_STRATEGIES project, so the newly
-    // added source shows the real "Not analyzed" status + Analyze action
-    // (never the old static "Added" badge, now that analysis is real).
-    expect(screen.getByText("Not analyzed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
-  });
-
-  it("H: a YouTube source with no title falls back to its canonical URL, never a fabricated title", async () => {
-    stubFetch([{ ...YOUTUBE_SOURCE, title: null }]);
-    renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByText("https://www.youtube.com/watch?v=dQw4w9WgXcQ")).toBeInTheDocument());
+    // Phase 4L follow-up — the main Sources page is collection-only: the
+    // newly-added à-la-carte source never renders as a row here, it's
+    // reflected in the virtual Uncollected Sources card's count instead
+    // (per-row analysis status lives on UncollectedSourcesDetailPage now).
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
+    expect(screen.getByText(/À-la-carte · 1 item/)).toBeInTheDocument();
   });
 
   it("K: no fake Whop lesson-table controls (Sync Course/lesson counts) appear for a YouTube-only source, even though real per-source Analyze status now does (Phase 4H-B)", async () => {
     stubFetch([YOUTUBE_SOURCE]);
     renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
 
     expect(screen.queryByText("Sync Course")).not.toBeInTheDocument();
     expect(screen.queryByText("Analyze All Unanalyzed")).not.toBeInTheDocument();
     expect(screen.queryByText(/lessons? analyzed/i)).not.toBeInTheDocument();
   });
 
-  it("K: no Analyze/View/Retry controls appear for a YouTube source in a General Knowledge project (analysis not available yet)", async () => {
-    const generalKnowledgeProject = { ...MASTERMIND_API_PROJECT, id: 8, name: "GK Project", projectType: "GENERAL_KNOWLEDGE" };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [generalKnowledgeProject] });
-        if (url === "https://backend.example.com/api/projects/8/sources") return jsonResponse(200, { projectId: 8, sources: [YOUTUBE_SOURCE] });
-        return jsonResponse(404, {});
-      }),
-    );
-    renderSources("/projects/8/sources");
-    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
-
-    expect(screen.getByText("Added")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Analyze" })).not.toBeInTheDocument();
-    expect(screen.queryByText("Not analyzed")).not.toBeInTheDocument();
-  });
-
   it("a YouTube-only project (no Whop course) does not show the empty-state box or the Whop CourseTable", async () => {
     stubFetch([YOUTUBE_SOURCE]);
     renderSources("/projects/7/sources", { courseTitle: "The Trading Accelerator" });
 
-    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
     expect(screen.queryByText("No sources connected yet.")).not.toBeInTheDocument();
     expect(screen.queryByText("Sync Course")).not.toBeInTheDocument();
   });
@@ -370,6 +345,6 @@ describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
     renderSources("/projects/7/sources");
 
     await waitFor(() => expect(screen.getByText(/The Trading Accelerator — course lessons/)).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByText("Support & Resistance Basics")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
   });
 });

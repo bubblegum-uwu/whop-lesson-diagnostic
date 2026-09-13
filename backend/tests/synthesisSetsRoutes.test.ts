@@ -141,6 +141,19 @@ describe("Synthesis Sets CRUD routes (Phase 4J)", () => {
     expect(statusCode).toBe(404);
   });
 
+  it("Phase 4L follow-up: rejects creating a set for a GENERAL_KNOWLEDGE project (fails safely — never a permanently-unusable empty set)", async () => {
+    const result = await pool.query<{ id: string }>(`INSERT INTO projects (name, project_type) VALUES ($1, 'GENERAL_KNOWLEDGE') RETURNING id`, [randomId("proj")]);
+    const projectId = Number(result.rows[0].id);
+
+    const { statusCode, body } = await callCreate(String(projectId), { name: "x" });
+    expect(statusCode).toBe(400);
+    expect((body.error as { type: string }).type).toBe("synthesis_sets_not_available_for_project_type");
+
+    const { statusCode: listStatus, body: listBody } = await callList(String(projectId));
+    expect(listStatus).toBe(200);
+    expect(listBody.synthesisSets).toEqual([]);
+  });
+
   it("lists sets for a project with readiness rollups, never leaking another project's sets", async () => {
     const projectA = await makeProject();
     const projectB = await makeProject();

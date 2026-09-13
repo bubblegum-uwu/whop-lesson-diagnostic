@@ -73,7 +73,8 @@ export interface ProjectSourceOriginSummary {
   discordPostedAt: Date | null;
 }
 
-function toOriginSummary(row: ProjectSourceOriginRow): ProjectSourceOriginSummary {
+/** Exported for reuse by http/routes/sourceCollections.ts (Phase 4L) — the one place this row→wire mapping happens, never duplicated. */
+export function toOriginSummary(row: ProjectSourceOriginRow): ProjectSourceOriginSummary {
   return {
     originType: row.originType,
     discordGuildId: row.discordGuildId,

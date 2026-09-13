@@ -1,5 +1,5 @@
 import { Navigate, NavLink } from "react-router-dom";
-import { PROJECT_TYPE_LABEL, MASTERMIND_ROUTE_SLUG, ProjectType } from "../lib/projects";
+import { PROJECT_TYPE_LABEL, MASTERMIND_ROUTE_SLUG, ProjectType, OPERATIONAL_PROJECT_TYPES } from "../lib/projects";
 import { useResolvedProject } from "../lib/useResolvedProject";
 
 export interface ProjectHeaderProps {
@@ -71,13 +71,24 @@ export function ProjectHeader({ backendUrl, knoveraToken }: ProjectHeaderProps) 
             CONFIGURATION UI (Synthesis Set != Synthesis Run — see the
             synthesisSetsApi.ts doc comment). isActive matches this tab for
             both the list and detail routes since both start with this
-            prefix. */}
-        <NavLink
-          to={`/projects/${linkId}/synthesis-sets`}
-          className={({ isActive }) => (isActive ? "knovera-project-tab active" : "knovera-project-tab")}
-        >
-          Synthesis Sets
-        </NavLink>
+            prefix.
+
+            Phase 4L follow-up — hidden for a project type with no working
+            synthesis engine (see lib/projects.ts's OPERATIONAL_PROJECT_TYPES
+            doc comment): a GENERAL_KNOWLEDGE source can never be analyzed,
+            so it can never become eligible for a Synthesis Set either —
+            exposing this tab there would only ever lead to a
+            permanently-empty set. Never shown before the project type is
+            known (projectType is null pre-resolution), matching the
+            existing type badge's own reveal timing above. */}
+        {projectType && OPERATIONAL_PROJECT_TYPES.has(projectType) && (
+          <NavLink
+            to={`/projects/${linkId}/synthesis-sets`}
+            className={({ isActive }) => (isActive ? "knovera-project-tab active" : "knovera-project-tab")}
+          >
+            Synthesis Sets
+          </NavLink>
+        )}
       </nav>
     </div>
   );

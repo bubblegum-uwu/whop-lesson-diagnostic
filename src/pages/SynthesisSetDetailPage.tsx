@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
+import { ProvenanceLine } from "../components/ProvenanceLine";
 import { useResolvedProject } from "../lib/useResolvedProject";
-import { getProjectSources, type YouTubeProjectSource, type DiscordProjectSource } from "../lib/sourcesApi";
+import { OPERATIONAL_PROJECT_TYPES } from "../lib/projects";
+import { getProjectSources, type YouTubeProjectSource, type DiscordProjectSource, type ProjectSourceOriginSummary } from "../lib/sourcesApi";
 import { getProjectSourceAnalysis } from "../lib/projectSourceAnalysisApi";
 import { listSourceCollections, getSourceCollection, type CatalogCollectionSummary } from "../lib/catalogApi";
 import {
@@ -30,6 +32,8 @@ interface FineTuneRow {
   title: string;
   eligible: boolean;
   collectionTitle: string | null;
+  /** Phase 4K-C provenance — always empty for DISCORD rows (provenance describes how a YOUTUBE video was found, never a Discord source's own identity). */
+  origins: ProjectSourceOriginSummary[];
 }
 
 type LoadState =
@@ -75,6 +79,7 @@ async function loadFineTuneRowsForCollection(
     title: item.title ?? item.sourceUrl,
     eligible: item.eligibleForSynthesis,
     collectionTitle: detail.collection.title,
+    origins: item.origins,
   }));
 }
 
@@ -104,7 +109,14 @@ async function loadFineTuneRowsForUncollected(
         // Best-effort — a transient status-read failure leaves this source
         // showing as not-yet-eligible rather than surfacing a page-level error.
       }
-      return { id: source.id, provider: source.provider, title: source.title ?? source.sourceUrl, eligible, collectionTitle: null };
+      return {
+        id: source.id,
+        provider: source.provider,
+        title: source.title ?? source.sourceUrl,
+        eligible,
+        collectionTitle: null,
+        origins: source.provider === "YOUTUBE" ? source.origins : [],
+      };
     }),
   );
 }
@@ -145,6 +157,12 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
   const setId = setIdParam ? Number(setIdParam) : NaN;
+  // Phase 4L follow-up — a GENERAL_KNOWLEDGE project can never have an
+  // eligible source (see synthesisSets.ts's create-handler doc comment),
+  // so this page must refuse direct-URL navigation too, not just hide the
+  // nav tab — never fetch or render the set-editing UI for it.
+  const isOperational = projectState.phase === "resolved" && OPERATIONAL_PROJECT_TYPES.has(projectState.project.projectType);
+  const notOperational = projectState.phase === "resolved" && !isOperational;
 
   async function load(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setState({ phase: "loading" });
@@ -176,7 +194,7 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
   }
 
   useEffect(() => {
-    if (!backendUrl || !knoveraToken || resolvedProjectId == null || !Number.isInteger(setId)) {
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || !Number.isInteger(setId) || !isOperational) {
       setState({ phase: "idle" });
       return;
     }
@@ -186,7 +204,7 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
       cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, knoveraToken, resolvedProjectId, setId]);
+  }, [backendUrl, knoveraToken, resolvedProjectId, setId, isOperational]);
 
   function refresh() {
     if (backendUrl && knoveraToken && resolvedProjectId != null) {
@@ -277,7 +295,15 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
     return (
       <div className="knovera-page">
         <ProjectHeader backendUrl={backendUrl} knoveraToken={knoveraToken} />
-        {state.phase === "loading" && <p className="knovera-sources-loading">Loading synthesis set…</p>}
+        {notOperational && (
+          <div className="kv-card knovera-empty-state">
+            <p>
+              <span className="kv-badge kv-badge-muted">Coming Soon</span>
+            </p>
+            <p>Synthesis Sets aren&rsquo;t available for General Knowledge projects yet.</p>
+          </div>
+        )}
+        {!notOperational && state.phase === "loading" && <p className="knovera-sources-loading">Loading synthesis set…</p>}
         {state.phase === "not_found" && (
           <div className="kv-card knovera-empty-state" role="alert">
             <p>This synthesis set doesn't exist.</p>
@@ -525,6 +551,7 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
                       <div className="knovera-youtube-source-main">
                         <span className="knovera-youtube-source-label">{row.collectionTitle ?? "Uncollected"}</span>
                         <span className="knovera-youtube-source-title">{row.title}</span>
+                        {row.provider === "YOUTUBE" && <ProvenanceLine origins={row.origins} />}
                       </div>
                     </label>
                     <div className="knovera-youtube-source-actions">

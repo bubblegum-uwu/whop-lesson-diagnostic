@@ -11,6 +11,7 @@ import {
 import { createYouTubeSource, getProjectSourceById } from "../src/db/projectSourcesRepo.js";
 import { createSourceCollection, getSourceCollectionById } from "../src/db/sourceCollectionsRepo.js";
 import { createProjectSourceAnalysis } from "../src/db/projectSourceAnalysesRepo.js";
+import { insertManualOrigin, insertDiscordChannelOrigin } from "../src/db/projectSourceOriginsRepo.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 import { makeResponse } from "./helpers/httpMocks.js";
@@ -433,5 +434,49 @@ describe("Source Collections — project isolation at the DB layer (Phase 4K)", 
     await createSourceCollection(pool, { projectId: projectA.id, provider: "YOUTUBE", externalId: "UCshared0000000000000000", title: "Shared", sourceUrl: "https://x" });
     const { created } = await createSourceCollection(pool, { projectId: projectB.id, provider: "YOUTUBE", externalId: "UCshared0000000000000000", title: "Shared", sourceUrl: "https://x" });
     expect(created).toBe(true);
+  });
+});
+
+describe("Source Collections — Phase 4K-C provenance on collection items (Phase 4L follow-up)", () => {
+  it("batch-loads each item's provenance (Manual/Discord-channel) alongside its analysis status, never one request per item", async () => {
+    const project = await makeProject();
+    stubYouTubeDataApi({ channelId: "UC_x5XG1OV2P6uZZ5FSM9Ttw", channelTitle: "SMB Capital", videoIds: ["aaaaaaaaaaa", "bbbbbbbbbbb"] });
+    const { body: added } = await callAddYouTubeChannel(String(project.id), "UC_x5XG1OV2P6uZZ5FSM9Ttw");
+    const collectionId = (added.collection as Record<string, unknown>).id as number;
+
+    const sourceIds = await pool.query<{ id: string }>(`SELECT id FROM project_sources WHERE collection_id = $1 ORDER BY created_at ASC`, [collectionId]);
+    const [firstId, secondId] = sourceIds.rows.map((r) => Number(r.id));
+
+    await insertManualOrigin(pool, firstId);
+    await insertDiscordChannelOrigin(pool, {
+      projectSourceId: secondId,
+      guildId: "g1",
+      channelId: "c1",
+      channelName: "scarface-alerts",
+      messageId: "m1",
+      messageUrl: null,
+      postedAt: new Date("2026-09-12T14:30:00.000Z"),
+    });
+
+    const { statusCode, body } = await callGet(String(project.id), String(collectionId));
+    expect(statusCode).toBe(200);
+    const items = body.items as Array<{ id: number; origins: Array<Record<string, unknown>> }>;
+    const first = items.find((i) => i.id === firstId)!;
+    const second = items.find((i) => i.id === secondId)!;
+    expect(first.origins).toEqual([{ originType: "MANUAL", discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }]);
+    expect(second.origins).toEqual([
+      { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "c1", discordChannelName: "scarface-alerts", discordMessageId: "m1", discordMessageUrl: null, discordPostedAt: new Date("2026-09-12T14:30:00.000Z") },
+    ]);
+  });
+
+  it("an item with no known provenance gets an empty origins array, never a fabricated Manual label", async () => {
+    const project = await makeProject();
+    stubYouTubeDataApi({ channelId: "UC_x5XG1OV2P6uZZ5FSM9Ttw", channelTitle: "SMB Capital", videoIds: ["ccccccccccc"] });
+    const { body: added } = await callAddYouTubeChannel(String(project.id), "UC_x5XG1OV2P6uZZ5FSM9Ttw");
+    const collectionId = (added.collection as Record<string, unknown>).id as number;
+
+    const { body } = await callGet(String(project.id), String(collectionId));
+    const items = body.items as Array<{ origins: unknown[] }>;
+    expect(items[0].origins).toEqual([]);
   });
 });

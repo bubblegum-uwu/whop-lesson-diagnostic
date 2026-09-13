@@ -70,6 +70,7 @@ const COLLECTION_ITEM_ELIGIBLE: CatalogItemSummary = {
   createdAt: "2026-01-01T00:00:00.000Z",
   status: "ANALYZED",
   eligibleForSynthesis: true,
+  origins: [],
 };
 
 const COLLECTION_ITEM_INELIGIBLE: CatalogItemSummary = {
@@ -81,6 +82,7 @@ const COLLECTION_ITEM_INELIGIBLE: CatalogItemSummary = {
   createdAt: "2026-01-01T00:00:00.000Z",
   status: "NOT_ANALYZED",
   eligibleForSynthesis: false,
+  origins: [],
 };
 
 const UNCOLLECTED_YOUTUBE: YouTubeProjectSource = {
@@ -466,5 +468,100 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
     await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(3));
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/analyze"))).toBe(false);
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/run"))).toBe(false);
+  });
+});
+
+describe("SynthesisSetDetailPage — Fine-Tune provenance display (Phase 4L follow-up)", () => {
+  it("a collection-member Discord-origin YouTube row shows its channel and posted date, same rules as Sources/Collection Detail", async () => {
+    const withOrigin: CatalogItemSummary = {
+      ...COLLECTION_ITEM_ELIGIBLE,
+      origins: [
+        { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "c1", discordChannelName: "scarface-alerts", discordMessageId: "m1", discordMessageUrl: null, discordPostedAt: "2026-09-12T00:00:00.000Z" },
+      ],
+    };
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [withOrigin] } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    expect(await screen.findByText("Source: Discord · #scarface-alerts")).toBeInTheDocument();
+    expect(screen.getByText("Posted: Sep 12, 2026")).toBeInTheDocument();
+  });
+
+  it("a Manual-only collection-member row shows 'Source: Manual'", async () => {
+    const manual: CatalogItemSummary = {
+      ...COLLECTION_ITEM_ELIGIBLE,
+      origins: [{ originType: "MANUAL", discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }],
+    };
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [manual] } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    expect(await screen.findByText("Source: Manual")).toBeInTheDocument();
+  });
+
+  it("a Manual + Discord mixed-origin row renders the combined summary", async () => {
+    const mixed: CatalogItemSummary = {
+      ...COLLECTION_ITEM_ELIGIBLE,
+      origins: [
+        { originType: "MANUAL", discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null },
+        { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "c1", discordChannelName: "scarface-alerts", discordMessageId: "m1", discordMessageUrl: null, discordPostedAt: "2026-09-12T00:00:00.000Z" },
+      ],
+    };
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [mixed] } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    expect(await screen.findByText("Source: Manual + Discord · #scarface-alerts")).toBeInTheDocument();
+    expect(screen.getByText("Posted: Sep 12, 2026")).toBeInTheDocument();
+  });
+
+  it("multiple Discord origins on a collection-member row follow the same compact-count + latest-posted-date rules", async () => {
+    const multi: CatalogItemSummary = {
+      ...COLLECTION_ITEM_ELIGIBLE,
+      origins: [
+        { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "c1", discordChannelName: "pre-market-live", discordMessageId: "m1", discordMessageUrl: null, discordPostedAt: "2026-09-12T00:00:00.000Z" },
+        { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "c2", discordChannelName: "trade-ideas", discordMessageId: "m2", discordMessageUrl: null, discordPostedAt: "2026-09-13T00:00:00.000Z" },
+      ],
+    };
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [multi] } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    expect(await screen.findByText("Source: 2 Discord posts")).toBeInTheDocument();
+    expect(screen.getByText("Latest posted: Sep 13, 2026")).toBeInTheDocument();
+  });
+
+  it("an uncollected YouTube source's own provenance (already loaded from GET /sources) renders in Fine-Tune too", async () => {
+    const withOrigin = { ...UNCOLLECTED_YOUTUBE, origins: [{ originType: "MANUAL" as const, discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }] };
+    stubFetch({ set: makeSet(), uncollectedSources: [withOrigin], uncollectedEligibility: { 301: true } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    expect(await screen.findByText("Source: Manual")).toBeInTheDocument();
+  });
+
+  it("loading a collection's fine-tune provenance costs exactly ONE extra request per collection, never one per item", async () => {
+    const items: CatalogItemSummary[] = Array.from({ length: 5 }, (_, i) => ({
+      ...COLLECTION_ITEM_ELIGIBLE,
+      id: 210 + i,
+      title: `Video ${i}`,
+      origins: [{ originType: "MANUAL", discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }],
+    }));
+    const fetchMock = stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: items } });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("SMB Capital")).toBeInTheDocument());
+
+    const collectionItemsCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/collections/10"));
+    expect(collectionItemsCalls).toHaveLength(1); // one GET for the whole collection's items+origins, not five
+  });
+});
+
+describe("SynthesisSetDetailPage — GENERAL_KNOWLEDGE gating (Phase 4L follow-up)", () => {
+  it("direct navigation to a set's detail URL shows 'Coming Soon' instead of the editor, and never calls the synthesis-set API at all", async () => {
+    const gkProject = { ...PROJECT, projectType: "GENERAL_KNOWLEDGE" };
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [gkProject] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Synthesis Sets aren.t available for General Knowledge projects yet\./)).toBeInTheDocument());
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/synthesis-sets/1"))).toBe(false);
   });
 });

@@ -127,6 +127,19 @@ export function createCreateSynthesisSetHandler(deps: SynthesisSetsRouteDeps) {
       res.status(404).json(PROJECT_NOT_FOUND_RESPONSE);
       return;
     }
+    // Phase 4L follow-up — Synthesis Sets exist to select sources for a
+    // future Trading-Strategies-only synthesis run; a GENERAL_KNOWLEDGE
+    // source can never become eligible in the first place (it can never be
+    // analyzed — see projectSourceAnalysis.ts's own project-type gate), so
+    // creating a set here would only ever produce a permanently-empty,
+    // pointless row. Fails safely rather than exposing set-management UI
+    // for a project type it can never do anything useful for.
+    if (project.projectType !== "TRADING_STRATEGIES") {
+      res.status(400).json({
+        error: { message: "Synthesis Sets are not available for General Knowledge projects yet.", type: "synthesis_sets_not_available_for_project_type" },
+      });
+      return;
+    }
 
     const body = req.body as CreateSynthesisSetBody;
     const name = typeof body?.name === "string" ? body.name.trim() : "";

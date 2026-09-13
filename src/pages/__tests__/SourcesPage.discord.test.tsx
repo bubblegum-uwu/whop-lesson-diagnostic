@@ -125,8 +125,12 @@ describe("SourcesPage — Discord project sources (Phase 4I)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Video" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add Discord Video" })).not.toBeInTheDocument());
-    await waitFor(() => expect(screen.getByText("Trade Recap Clip")).toBeInTheDocument());
-    expect(screen.getByText("Discord Video")).toBeInTheDocument();
+    // Phase 4L follow-up — the main Sources page is collection-only: the
+    // newly-added source never renders as a row here (see
+    // UncollectedSourcesDetailPage.tsx for the per-row Discord Video
+    // identity/analysis behavior), only the virtual card's count.
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
+    expect(screen.getByText(/À-la-carte · 1 item/)).toBeInTheDocument();
   });
 
   it("a malformed Discord URL is rejected client-side (never reaches the network) with the parser's own message", async () => {
@@ -145,106 +149,6 @@ describe("SourcesPage — Discord project sources (Phase 4I)", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/discord/i);
     expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("/sources/discord"), expect.anything());
-  });
-
-  it("A: a Discord source with no analysis job shows 'Not analyzed' and an Analyze button — the same generic logic as YouTube", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
-        if (url === "https://backend.example.com/api/projects/7/sources") return jsonResponse(200, { projectId: 7, sources: [DISCORD_SOURCE] });
-        if (url === "https://backend.example.com/api/projects/7/sources/5/analysis") return jsonResponse(200, analysisJson());
-        return jsonResponse(404, {});
-      }),
-    );
-
-    renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByText("Not analyzed")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
-  });
-
-  it("J: Whop disconnected does not disable Analyze for a Discord source", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
-        if (url === "https://backend.example.com/api/projects/7/sources") return jsonResponse(200, { projectId: 7, sources: [DISCORD_SOURCE] });
-        if (url === "https://backend.example.com/api/projects/7/sources/5/analysis") return jsonResponse(200, analysisJson());
-        return jsonResponse(404, {});
-      }),
-    );
-
-    renderSources("/projects/7/sources", { connected: false });
-    await waitFor(() => expect(screen.getByText("Not Connected")).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByRole("button", { name: "Analyze" })).toBeEnabled());
-  });
-
-  it("K: no Analyze/View/Retry controls appear for a Discord source in a General Knowledge project", async () => {
-    const gkProject = { ...MASTERMIND_API_PROJECT, id: 8, name: "GK Project", projectType: "GENERAL_KNOWLEDGE" };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [gkProject] });
-        if (url === "https://backend.example.com/api/projects/8/sources") return jsonResponse(200, { projectId: 8, sources: [DISCORD_SOURCE] });
-        return jsonResponse(404, {});
-      }),
-    );
-    renderSources("/projects/8/sources");
-    await waitFor(() => expect(screen.getByText("Trade Recap Clip")).toBeInTheDocument());
-
-    expect(screen.getByText("Added")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Analyze" })).not.toBeInTheDocument();
-    expect(screen.queryByText("Not analyzed")).not.toBeInTheDocument();
-  });
-
-  it("H/I: View on a completed Discord analysis opens the drawer under a 'Discord Video' identity with an 'Open Attachment' link, never a fake Whop lesson or YouTube label", async () => {
-    const analysis = {
-      analysisId: 1,
-      projectSourceId: 5,
-      status: "completed",
-      strategyFound: true,
-      validatedJson: {
-        lesson: { title: "Trade Recap Clip", duration_seconds: null },
-        strategy_found: true,
-        strategies: [
-          {
-            strategy_name: "Break & Retest",
-            market_or_instrument: [],
-            timeframes: [],
-            entry_rules: [{ description: "retest entry", start_timestamp: "00:15", end_timestamp: null, evidence: "shown on screen" }],
-          },
-        ],
-        knowledge: { summary: "", knowledgeItems: [], examples: [], conflictsAndAmbiguities: [] },
-      },
-      analysisSummary: "Break & Retest",
-      processingDurationSeconds: 20,
-      inputTokens: 10,
-      outputTokens: 5,
-      thinkingTokens: 0,
-      estimatedCost: 0.02,
-      completedAt: "2026-01-06T00:00:00.000Z",
-    };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
-        if (url === "https://backend.example.com/api/projects/7/sources") return jsonResponse(200, { projectId: 7, sources: [DISCORD_SOURCE] });
-        if (url === "https://backend.example.com/api/projects/7/sources/5/analysis") {
-          return jsonResponse(200, analysisJson({ job: { jobId: "job-1", projectSourceId: 5, status: "COMPLETED", attemptCount: 1, sanitizedError: null }, analysis }));
-        }
-        return jsonResponse(404, {});
-      }),
-    );
-
-    renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByRole("button", { name: "View" })).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "View" }));
-
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getAllByText("Discord Video").length).toBeGreaterThan(0);
-    expect(screen.getByRole("link", { name: "Open Attachment" })).toHaveAttribute("href", DISCORD_URL);
-    expect(screen.queryByText("YouTube Video")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Whop lesson/i)).not.toBeInTheDocument();
   });
 
   it("M: existing Whop Sources UI and YouTube provider card remain unchanged alongside the new Discord card", async () => {

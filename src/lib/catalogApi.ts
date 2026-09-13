@@ -5,7 +5,7 @@
  * a Whop token for these, except implicitly server-side for the Whop
  * course-connect/refresh calls (this client never sees or handles that).
  */
-import type { YouTubeProjectSource } from "./sourcesApi";
+import type { YouTubeProjectSource, ProjectSourceOriginSummary } from "./sourcesApi";
 function authHeaders(knoveraToken: string): HeadersInit {
   return { Authorization: `Bearer ${knoveraToken}` };
 }
@@ -58,6 +58,8 @@ export interface CatalogItemSummary {
   createdAt: string;
   status: CatalogItemStatus;
   eligibleForSynthesis: boolean;
+  /** Phase 4L — Phase 4K-C provenance, batch-loaded server-side; always empty for DISCORD items or a source that predates Phase 4K-C. */
+  origins: ProjectSourceOriginSummary[];
 }
 
 export interface CatalogPagination {

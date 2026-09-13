@@ -12,6 +12,8 @@ import {
 } from "../../db/sourceCollectionsRepo.js";
 import { createYouTubeSource } from "../../db/projectSourcesRepo.js";
 import { getCatalogAnalysisStatusForSources, type CatalogAnalysisStatusEntry } from "../../db/projectSourceCatalogStatusRepo.js";
+import { listOriginsBySourceIds } from "../../db/projectSourceOriginsRepo.js";
+import { toOriginSummary, type ProjectSourceOriginSummary } from "./projectSources.js";
 import { parseYouTubeChannelRef, YouTubeChannelUrlParseError } from "../../lib/youtubeChannelUrl.js";
 import { resolveYouTubeChannelId, YouTubeChannelResolveError } from "../../youtube/resolveYoutubeChannel.js";
 import { getChannelUploadsPlaylistId, discoverYoutubeChannelVideosPage, YouTubeChannelDiscoveryError } from "../../youtube/discoverYoutubeChannelVideos.js";
@@ -131,6 +133,15 @@ export interface CatalogItemSummary {
   createdAt: Date;
   status: CatalogAnalysisStatusEntry["status"];
   eligibleForSynthesis: boolean;
+  /**
+   * Phase 4L — Phase 4K-C provenance (Manual / Discord-channel-discovery
+   * records), batch-loaded exactly like `statusBySource` below so a
+   * collection with hundreds of items still costs one extra round trip,
+   * never one per item. Always empty for DISCORD items (provenance
+   * describes how a YOUTUBE video was found, never a Discord source's own
+   * identity) and for a source that predates Phase 4K-C.
+   */
+  origins: ProjectSourceOriginSummary[];
 }
 
 /**
@@ -159,11 +170,15 @@ export function createGetSourceCollectionHandler(deps: SourceCollectionsRouteDep
       [collection.id, limit, offset],
     );
     const sourceIds = itemsResult.rows.map((r) => Number(r.id));
-    const statusBySource = await getCatalogAnalysisStatusForSources(deps.pool, sourceIds);
+    const [statusBySource, originsBySource] = await Promise.all([
+      getCatalogAnalysisStatusForSources(deps.pool, sourceIds),
+      listOriginsBySourceIds(deps.pool, sourceIds),
+    ]);
     const totalCount = itemsResult.rows[0] ? Number(itemsResult.rows[0].total_count) : 0;
 
     const items: CatalogItemSummary[] = itemsResult.rows.map((row) => {
       const entry = statusBySource.get(Number(row.id)) ?? { status: "NOT_ANALYZED" as const, eligibleForSynthesis: false };
+      const origins = originsBySource.get(Number(row.id)) ?? [];
       return {
         id: Number(row.id),
         provider: row.provider as "YOUTUBE" | "DISCORD",
@@ -173,6 +188,7 @@ export function createGetSourceCollectionHandler(deps: SourceCollectionsRouteDep
         createdAt: row.created_at,
         status: entry.status,
         eligibleForSynthesis: entry.eligibleForSynthesis,
+        origins: origins.map(toOriginSummary),
       };
     });
 

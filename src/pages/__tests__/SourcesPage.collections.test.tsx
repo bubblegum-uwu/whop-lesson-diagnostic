@@ -113,6 +113,7 @@ function renderSources(initialPath: string, props: Partial<SourcesPageProps> = {
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/projects/:projectId/sources" element={<SourcesPage {...baseProps(props)} />} />
+        <Route path="/projects/:projectId/collections/uncollected" element={<div>UNCOLLECTED_DETAIL_MARKER</div>} />
         <Route path="/projects/:projectId/collections/:collectionId" element={<div>COLLECTION_DETAIL_MARKER</div>} />
       </Routes>
     </MemoryRouter>,
@@ -143,45 +144,44 @@ describe("SourcesPage — collection-first Sources UI (Phase 4L)", () => {
     stubFetch([UNCOLLECTED_SOURCE], []);
     renderSources("/projects/7/sources");
 
-    await waitFor(() => expect(screen.getByText("A La Carte Video")).toBeInTheDocument());
-    expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
+    // The main Sources page is collection-only — the individual source
+    // title/row never renders here, only the virtual card's summary.
+    expect(screen.queryByText("A La Carte Video")).not.toBeInTheDocument();
+    expect(screen.getByText(/À-la-carte · 1 item/)).toBeInTheDocument();
   });
 
-  it("a collected source is excluded from Uncollected Sources even when other uncollected sources exist", async () => {
+  it("the Uncollected Sources card still renders for a GENERAL_KNOWLEDGE project, without an analyzed-count clause (Analyze isn't available there)", async () => {
+    stubFetch([UNCOLLECTED_SOURCE], [], [GENERAL_KNOWLEDGE_PROJECT]);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
+    expect(screen.getByText("À-la-carte · 1 item")).toBeInTheDocument();
+  });
+
+  it("a collected source never inflates the Uncollected Sources card's count", async () => {
     stubFetch([COLLECTED_SOURCE, UNCOLLECTED_SOURCE], [COLLECTION_SUMMARY]);
     renderSources("/projects/7/sources");
 
-    await waitFor(() => expect(screen.getByText("A La Carte Video")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
+    expect(screen.getByText(/À-la-carte · 1 item/)).toBeInTheDocument();
     expect(screen.queryByText("Inside a Channel")).not.toBeInTheDocument();
+    expect(screen.queryByText("A La Carte Video")).not.toBeInTheDocument();
   });
 
-  it("no Uncollected Sources section renders when every video source belongs to a collection", async () => {
+  it("no Uncollected Sources card renders when every video source belongs to a collection", async () => {
     stubFetch([COLLECTED_SOURCE], [COLLECTION_SUMMARY]);
     renderSources("/projects/7/sources");
     await waitFor(() => expect(screen.getByRole("heading", { name: "SMB Capital" })).toBeInTheDocument());
     expect(screen.queryByRole("heading", { name: "Uncollected Sources" })).not.toBeInTheDocument();
   });
 
-  it("Analyze/Retry/View controls on an uncollected source are still gated by project type (none for GENERAL_KNOWLEDGE)", async () => {
-    stubFetch([UNCOLLECTED_SOURCE], [], [GENERAL_KNOWLEDGE_PROJECT]);
-    renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByText("A La Carte Video")).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: "Analyze" })).not.toBeInTheDocument();
-  });
-
-  it("Analyze is offered for an uncollected source in a TRADING_STRATEGIES project", async () => {
+  it("clicking Open on the Uncollected Sources card navigates to its virtual detail route", async () => {
     stubFetch([UNCOLLECTED_SOURCE], []);
     renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByText("A La Carte Video")).toBeInTheDocument());
-    expect(screen.getByRole("button", { name: "Analyze" })).toBeInTheDocument();
-  });
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
 
-  it("Phase 4K-C Discord provenance still renders on an uncollected source's row", async () => {
-    const withOrigin = { ...UNCOLLECTED_SOURCE, origins: [{ originType: "MANUAL", discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }] };
-    stubFetch([withOrigin], []);
-    renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByText("A La Carte Video")).toBeInTheDocument());
-    expect(screen.getByText("Source: Manual")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Open/ }));
+    expect(screen.getByText("UNCOLLECTED_DETAIL_MARKER")).toBeInTheDocument();
   });
 
   it("multiple collections each render their own card with independent counts", async () => {

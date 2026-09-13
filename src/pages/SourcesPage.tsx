@@ -15,41 +15,14 @@ import { BatchImportDialog } from "../components/BatchImportDialog";
 import { AddYouTubeChannelDialog } from "../components/AddYouTubeChannelDialog";
 import { ImportDiscordChannelDialog } from "../components/ImportDiscordChannelDialog";
 import { ConnectWhopCourseDialog } from "../components/ConnectWhopCourseDialog";
-import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysisDrawer";
 import type { AnalysisSummary } from "../lib/courseApi";
 import type { DiagnosticDisplayPayload } from "../lib/diagnosticPayload";
 import type { LessonFetchOutcome } from "../lib/whopApi";
 import { useResolvedProject } from "../lib/useResolvedProject";
-import {
-  getProjectSources,
-  type ProjectSource,
-  type WhopProjectSource,
-  type YouTubeProjectSource,
-  type DiscordProjectSource,
-  type ProjectSourceOriginSummary,
-} from "../lib/sourcesApi";
-import {
-  analyzeProjectSource,
-  getProjectSourceAnalysis,
-  retryProjectSourceAnalysis,
-  ProjectSourceAnalysisError,
-  type ProjectSourceAnalysisStatus,
-} from "../lib/projectSourceAnalysisApi";
+import { getProjectSources, type ProjectSource, type WhopProjectSource, type YouTubeProjectSource, type DiscordProjectSource } from "../lib/sourcesApi";
+import { getProjectSourceAnalysis } from "../lib/projectSourceAnalysisApi";
 import { listSourceCollections, listAlaCarteWhopLessons, type CatalogCollectionSummary, type AlaCarteWhopLessonSummary } from "../lib/catalogApi";
 import { enqueueAnalysisJobs } from "../lib/courseApi";
-
-/** Phase 4H-B — display labels for the job-status badge on a video source row. Falls back to "Added" for any status this map doesn't recognize (never blank). */
-const ANALYSIS_STATUS_LABELS: Record<string, string> = {
-  QUEUED: "Queued",
-  ANALYZING: "Analyzing",
-  VALIDATING: "Validating",
-  COMPLETED: "Analyzed",
-  NO_STRATEGY: "Analyzed",
-  FAILED: "Failed",
-  CANCELLED: "Cancelled",
-};
-const PENDING_ANALYSIS_STATUSES = new Set(["QUEUED", "ANALYZING", "VALIDATING"]);
-const ANALYSIS_POLL_INTERVAL_MS = 4000;
 
 /** Phase 4K follow-up — à-la-carte Whop lessons use the lesson-analysis job's own status vocabulary (see WhopCourseDetailPage's identical STATUS_LABELS/PENDING_STATUSES), a different set of states than project_source-based analysis above. */
 const WHOP_LESSON_STATUS_LABELS: Record<string, string> = {
@@ -67,97 +40,8 @@ const WHOP_LESSON_STATUS_LABELS: Record<string, string> = {
 };
 const WHOP_LESSON_PENDING_STATUSES = new Set(["QUEUED", "ANALYZING", "RETRIEVING", "PREPARING_VIDEO", "UPLOADING", "VALIDATING"]);
 
-/** Phase 4I — every provider whose source is a single analyzable video, sharing one generic row/list/drawer. A future provider joins this union and this map, never a parallel list. */
+/** Phase 4I — every provider whose source is a single analyzable video. A future provider joins this union. */
 type VideoProjectSource = YouTubeProjectSource | DiscordProjectSource;
-const VIDEO_SOURCE_LABELS: Record<VideoProjectSource["provider"], string> = { YOUTUBE: "YouTube Video", DISCORD: "Discord Video" };
-
-/** "Posted: Sep 12, 2026" — the Discord MESSAGE's timestamp, rendered in the viewer's local timezone; the stored value is always UTC (see sourcesApi.ts's ProjectSourceOriginSummary doc comment). */
-function formatPostedAt(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-}
-
-/** "#channel-name" when the companion could safely derive one, else a safe fallback to the raw channel id — never a fabricated name (Phase 4K-C spec). */
-function discordChannelDisplayName(origin: ProjectSourceOriginSummary): string {
-  return origin.discordChannelName ? `#${origin.discordChannelName}` : `channel ${origin.discordChannelId}`;
-}
-
-function originDetailLine(origin: ProjectSourceOriginSummary): string {
-  return origin.originType === "MANUAL" ? "Manual" : `Discord · ${discordChannelDisplayName(origin)} / Posted: ${formatPostedAt(origin.discordPostedAt!)}`;
-}
-
-/** MAX(discordPostedAt) across every Discord origin — never YouTube's publish date, an import time, or a scan time (see ProjectSourceOriginSummary's own doc comment). Assumes at least one Discord origin is present. */
-function latestDiscordPostedAt(discordOrigins: ProjectSourceOriginSummary[]): string {
-  return discordOrigins.reduce(
-    (latest, o) => (new Date(o.discordPostedAt!).getTime() > new Date(latest).getTime() ? o.discordPostedAt! : latest),
-    discordOrigins[0].discordPostedAt!,
-  );
-}
-
-/**
- * Phase 4K-C — the compact "Source: …" provenance block for a YouTube
- * source row. A source with no known origins (every source that predates
- * this phase) renders nothing here — never a fabricated "Manual" label,
- * per the spec's historical-data rule.
- *
- * Live-validation follow-up: a Discord posted date must stay visible in
- * the COLLAPSED row whenever at least one Discord origin exists — a
- * viewer should never have to expand provenance just to see when a video
- * was posted. A single Discord origin (with or without an accompanying
- * Manual origin) always names its exact channel and posted date inline;
- * only once there are MULTIPLE Discord origins does the row collapse to a
- * post count, and even then it still shows the latest posted date. Every
- * individual origin — channel, message, and its own posted date — remains
- * available via the expandable detail list, never discarded for the sake
- * of the compact summary.
- */
-function ProvenanceLine({ origins }: { origins: ProjectSourceOriginSummary[] }) {
-  if (origins.length === 0) return null;
-
-  const discordOrigins = origins.filter((o) => o.originType === "DISCORD_CHANNEL");
-  const hasManual = origins.some((o) => o.originType === "MANUAL");
-
-  if (discordOrigins.length === 0) {
-    // Manual-only (the DB caps MANUAL at one per source, so this is the
-    // whole list) — no Discord provenance exists, so no posted date is
-    // ever shown here; a date would have to be invented from nowhere.
-    return <p className="knovera-youtube-source-provenance">Source: Manual</p>;
-  }
-
-  const sourceLabel =
-    discordOrigins.length === 1
-      ? `${hasManual ? "Manual + " : ""}Discord · ${discordChannelDisplayName(discordOrigins[0])}`
-      : `${hasManual ? "Manual + " : ""}${discordOrigins.length} Discord posts`;
-  const dateLabel = discordOrigins.length === 1 ? "Posted" : "Latest posted";
-  const dateValue = discordOrigins.length === 1 ? discordOrigins[0].discordPostedAt! : latestDiscordPostedAt(discordOrigins);
-
-  const summary = (
-    <>
-      <span className="knovera-youtube-source-provenance-source">Source: {sourceLabel}</span>
-      <span className="knovera-youtube-source-provenance-posted">
-        {dateLabel}: {formatPostedAt(dateValue)}
-      </span>
-    </>
-  );
-
-  // A single Discord origin (± Manual) already shows everything the
-  // expanded list would — no need for a <details> affordance. Multiple
-  // Discord origins collapse the row to a count, so the expandable detail
-  // is what surfaces every individual channel/message/date.
-  if (origins.length <= 2 && discordOrigins.length <= 1) {
-    return <p className="knovera-youtube-source-provenance knovera-youtube-source-provenance-multiline">{summary}</p>;
-  }
-
-  return (
-    <details className="knovera-youtube-source-provenance">
-      <summary className="knovera-youtube-source-provenance-multiline">{summary}</summary>
-      <ul>
-        {origins.map((origin, i) => (
-          <li key={i}>{originDetailLine(origin)}</li>
-        ))}
-      </ul>
-    </details>
-  );
-}
 
 /**
  * The single-lesson diagnostic flow's state (paste one Whop lesson URL,
@@ -244,10 +128,7 @@ export function SourcesPage(props: SourcesPageProps) {
   const [alaCarteWhopLessons, setAlaCarteWhopLessons] = useState<AlaCarteWhopLessonSummary[]>([]);
   const [whopLessonBusyId, setWhopLessonBusyId] = useState<number | null>(null);
   const [whopLessonActionError, setWhopLessonActionError] = useState<string | null>(null);
-  const [analysisStatuses, setAnalysisStatuses] = useState<Record<number, ProjectSourceAnalysisStatus>>({});
-  const [analyzingSourceId, setAnalyzingSourceId] = useState<number | null>(null);
-  const [analysisActionError, setAnalysisActionError] = useState<string | null>(null);
-  const [viewingSourceId, setViewingSourceId] = useState<number | null>(null);
+  const [uncollectedAnalyzedCount, setUncollectedAnalyzedCount] = useState(0);
 
   async function loadSources(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setSourcesState({ phase: "loading" });
@@ -278,9 +159,8 @@ export function SourcesPage(props: SourcesPageProps) {
     try {
       setCollections(await listSourceCollections(url, token, projectId));
     } catch {
-      // Best-effort — the flat video-source list below still shows every
-      // source regardless of collection, so a transient collections-list
-      // failure never hides content, only the grouped-by-channel view.
+      // Best-effort — a transient collections-list failure only hides the
+      // Collections/Uncollected cards below, never the rest of the page.
     }
   }
 
@@ -333,12 +213,12 @@ export function SourcesPage(props: SourcesPageProps) {
     sourcesState.phase === "loaded"
       ? sourcesState.sources.filter((s): s is VideoProjectSource => s.provider === "YOUTUBE" || s.provider === "DISCORD")
       : [];
-  // Phase 4L — the main Sources page is collection-first: Collections
-  // render as cards (below), and individual source rows only appear inside
-  // a collection's own detail page. A video source with no collection
-  // (added à la carte, never grouped under a channel/Discord import) would
-  // otherwise vanish entirely, so it gets this one small, clearly-labeled
-  // section instead of reviving the old flat "every video source" list.
+  // Phase 4L follow-up — the main Sources page is COLLECTION-ONLY: no
+  // individual source row of any kind renders here, including uncollected
+  // ones (see UncollectedSourcesDetailPage.tsx's doc comment). A video
+  // source with no real collection (added à la carte, never grouped under
+  // a channel/Discord import) surfaces through one virtual "Uncollected
+  // Sources" card in the Collections grid below, never a flat list.
   const uncollectedVideoSources = videoSources.filter((s) => s.collectionId === null);
   // Phase 4K-C — the current YouTube externalIds this project already has,
   // for ImportDiscordChannelDialog's client-side preview estimate only
@@ -393,72 +273,35 @@ export function SourcesPage(props: SourcesPageProps) {
 
   const isTradingStrategies = projectState.phase === "resolved" && projectState.project.projectType === "TRADING_STRATEGIES";
 
-  async function loadAnalysisStatus(sourceId: number) {
-    if (!props.backendUrl || !props.knoveraToken || resolvedProjectId == null) return;
-    try {
-      const status = await getProjectSourceAnalysis(props.backendUrl, props.knoveraToken, resolvedProjectId, sourceId);
-      setAnalysisStatuses((prev) => ({ ...prev, [sourceId]: status }));
-    } catch {
-      // Best-effort — a transient status-fetch failure leaves the row at
-      // its last-known state rather than surfacing an error banner for a
-      // read that will simply retry on the next poll tick.
-    }
-  }
-
-  // Phase 4H-B — General Knowledge projects never fetch analysis status at
-  // all (Analyze isn't available there yet — see isTradingStrategies
-  // above), so this never invokes analysis endpoints for a project type
-  // that can't use them.
-  const videoSourceIdsKey = videoSources.map((s) => s.id).join(",");
+  // Phase 4L — the main Sources page no longer renders any individual
+  // source row (see the virtual "Uncollected Sources" card below and its
+  // own detail page, UncollectedSourcesDetailPage.tsx, for where per-source
+  // Analyze/Retry/View now lives). This page only needs a lightweight
+  // ANALYZED COUNT for that card's summary line — a one-time per-source
+  // status read (never a live poll, since nothing here shows a per-row
+  // "Working…" indicator anymore), the same accepted pattern already used
+  // for uncollected sources in SynthesisSetDetailPage's fine-tune list.
+  const uncollectedIdsKey = uncollectedVideoSources.map((s) => s.id).join(",");
   useEffect(() => {
-    if (!isTradingStrategies || videoSources.length === 0) return;
-    videoSources.forEach((source) => void loadAnalysisStatus(source.id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoSourceIdsKey, isTradingStrategies, resolvedProjectId]);
-
-  // Polls only sources whose latest job is genuinely still in flight — never
-  // a fabricated progress percentage, just a status re-check until it
-  // reaches a terminal state.
-  useEffect(() => {
-    const pendingIds = videoSources.filter((s) => PENDING_ANALYSIS_STATUSES.has(analysisStatuses[s.id]?.job?.status ?? "")).map((s) => s.id);
-    if (pendingIds.length === 0) return;
-    const interval = setInterval(() => {
-      pendingIds.forEach((id) => void loadAnalysisStatus(id));
-    }, ANALYSIS_POLL_INTERVAL_MS);
-    return () => clearInterval(interval);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [videoSourceIdsKey, JSON.stringify(Object.fromEntries(Object.entries(analysisStatuses).map(([id, s]) => [id, s.job?.status])))]);
-
-  async function handleAnalyze(sourceId: number, force = false) {
-    if (!props.backendUrl || !props.knoveraToken || resolvedProjectId == null) return;
-    setAnalysisActionError(null);
-    setAnalyzingSourceId(sourceId);
-    try {
-      await analyzeProjectSource(props.backendUrl, props.knoveraToken, resolvedProjectId, sourceId, force);
-      await loadAnalysisStatus(sourceId);
-    } catch (err) {
-      setAnalysisActionError(err instanceof ProjectSourceAnalysisError ? err.message : "Failed to start analysis. Please try again.");
-    } finally {
-      setAnalyzingSourceId(null);
+    if (!isTradingStrategies || !props.backendUrl || !props.knoveraToken || resolvedProjectId == null || uncollectedVideoSources.length === 0) {
+      setUncollectedAnalyzedCount(0);
+      return;
     }
-  }
-
-  async function handleRetry(sourceId: number) {
-    if (!props.backendUrl || !props.knoveraToken || resolvedProjectId == null) return;
-    setAnalysisActionError(null);
-    setAnalyzingSourceId(sourceId);
-    try {
-      await retryProjectSourceAnalysis(props.backendUrl, props.knoveraToken, resolvedProjectId, sourceId);
-      await loadAnalysisStatus(sourceId);
-    } catch (err) {
-      setAnalysisActionError(err instanceof ProjectSourceAnalysisError ? err.message : "Failed to retry analysis. Please try again.");
-    } finally {
-      setAnalyzingSourceId(null);
-    }
-  }
-
-  const viewingSource = viewingSourceId != null ? (videoSources.find((s) => s.id === viewingSourceId) ?? null) : null;
-  const viewingStatus = viewingSourceId != null ? analysisStatuses[viewingSourceId] : undefined;
+    let cancelled = false;
+    const url = props.backendUrl;
+    const token = props.knoveraToken;
+    const projectId = resolvedProjectId;
+    void (async () => {
+      const results = await Promise.all(
+        uncollectedVideoSources.map((s) => getProjectSourceAnalysis(url, token, projectId, s.id).catch(() => null)),
+      );
+      if (!cancelled) setUncollectedAnalyzedCount(results.filter((r) => r?.analysis != null).length);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uncollectedIdsKey, isTradingStrategies, resolvedProjectId]);
 
   return (
     <div className="knovera-page">
@@ -679,7 +522,7 @@ export function SourcesPage(props: SourcesPageProps) {
         </>
       )}
 
-      {collections.length > 0 && (
+      {(collections.length > 0 || uncollectedVideoSources.length > 0) && (
         <>
           <h2 className="knovera-section-title">Collections</h2>
           <div className="knovera-project-grid">
@@ -704,66 +547,36 @@ export function SourcesPage(props: SourcesPageProps) {
                 </div>
               </div>
             ))}
+
+            {/* Phase 4L follow-up — the main Sources page is collection-only:
+                no individual source row renders here (see
+                UncollectedSourcesDetailPage.tsx's doc comment). À-la-carte
+                sources with no real source_collections row get this ONE
+                virtual, presentation-only card instead — never a fabricated
+                persisted collection, never backfilled historical
+                membership. `collection_id` on these sources stays NULL. */}
+            {uncollectedVideoSources.length > 0 && (
+              <div className="kv-card knovera-project-card">
+                <div className="knovera-project-card-top">
+                  <div>
+                    <h2>Uncollected Sources</h2>
+                    <p className="knovera-project-card-source">
+                      À-la-carte · {uncollectedVideoSources.length} item{uncollectedVideoSources.length === 1 ? "" : "s"}
+                      {isTradingStrategies ? ` · ${uncollectedAnalyzedCount} analyzed` : ""}
+                    </p>
+                  </div>
+                </div>
+                <div className="knovera-project-card-footer">
+                  <button type="button" className="knovera-open-link" onClick={() => navigate(`/projects/${resolvedProjectId}/collections/uncollected`)}>
+                    Open
+                    <span className="knovera-cta-arrow" aria-hidden="true">
+                      →
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-        </>
-      )}
-
-      {uncollectedVideoSources.length > 0 && (
-        <>
-          <h2 className="knovera-section-title">Uncollected Sources</h2>
-          <p className="knovera-project-card-source">Added individually, not part of a channel or Discord import — not grouped under any Collection above.</p>
-          {analysisActionError && (
-            <div className="kv-card knovera-empty-state" role="alert">
-              <p>{analysisActionError}</p>
-            </div>
-          )}
-          <ul className="knovera-youtube-source-list">
-            {uncollectedVideoSources.map((source) => {
-              const status = analysisStatuses[source.id];
-              const job = status?.job ?? null;
-              const analysis = status?.analysis ?? null;
-              const busy = analyzingSourceId === source.id;
-              const isPending = !!job && PENDING_ANALYSIS_STATUSES.has(job.status);
-              const isFailed = job?.status === "FAILED";
-              const isDone = !!analysis;
-              const badgeLabel = !isTradingStrategies ? "Added" : job ? (ANALYSIS_STATUS_LABELS[job.status] ?? "Added") : isDone ? "Analyzed" : "Not analyzed";
-              const badgeClass = isFailed ? "kv-badge-danger" : isDone ? "kv-badge-accent" : "kv-badge-muted";
-
-              return (
-                <li key={source.id} className="kv-card knovera-youtube-source-row">
-                  <div className="knovera-youtube-source-main">
-                    <span className="knovera-youtube-source-label">{VIDEO_SOURCE_LABELS[source.provider]}</span>
-                    <span className="knovera-youtube-source-title">{source.title ?? source.sourceUrl}</span>
-                    {source.provider === "YOUTUBE" && <ProvenanceLine origins={source.origins ?? []} />}
-                  </div>
-                  <div className="knovera-youtube-source-actions">
-                    <span className={`kv-badge ${badgeClass}`}>{badgeLabel}</span>
-                    {isTradingStrategies && !job && !analysis && (
-                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyze(source.id)}>
-                        {busy ? "Starting…" : "Analyze"}
-                      </button>
-                    )}
-                    {isTradingStrategies && isPending && <span className="hint">Working…</span>}
-                    {isTradingStrategies && isFailed && (
-                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleRetry(source.id)}>
-                        {busy ? "Retrying…" : "Retry"}
-                      </button>
-                    )}
-                    {isTradingStrategies && isDone && (
-                      <>
-                        <button type="button" className="link-button" onClick={() => setViewingSourceId(source.id)}>
-                          View
-                        </button>
-                        <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyze(source.id, true)}>
-                          {busy ? "Starting…" : "Re-analyze"}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
         </>
       )}
 
@@ -917,14 +730,6 @@ export function SourcesPage(props: SourcesPageProps) {
           }}
         />
       )}
-
-      <ProjectSourceAnalysisDrawer
-        source={viewingSource}
-        job={viewingStatus?.job ?? null}
-        analysis={viewingStatus?.analysis ?? null}
-        loading={false}
-        onClose={() => setViewingSourceId(null)}
-      />
     </div>
   );
 }
