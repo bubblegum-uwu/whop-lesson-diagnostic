@@ -59,3 +59,28 @@ export function isDiscordTabCommand(data: unknown): data is DiscordTabCommand {
   const record = data as Record<string, unknown>;
   return (record.type === "START_SCAN" || record.type === "CANCEL_SCAN") && typeof record.requestId === "string";
 }
+
+/**
+ * A separate, tiny local-readiness handshake — NOT part of a scan's
+ * lifecycle (no requestId), so it's kept out of DiscordTabCommand/
+ * DiscordTabEvent above. The service worker sends `ReadyCheckCommand` via
+ * `chrome.tabs.sendMessage`'s request/response form and reads the answer
+ * straight from that callback (see discordTabReadiness.ts) — a content
+ * script that isn't loaded simply never answers, which combined with a
+ * bounded timeout is exactly the "is this tab's content script alive"
+ * signal (see the Phase 4K-C follow-up fix's doc comments).
+ */
+export interface ReadyCheckCommand {
+  type: "READY_CHECK";
+}
+export interface ReadyResponse {
+  type: "READY";
+}
+
+export function isReadyCheckCommand(data: unknown): data is ReadyCheckCommand {
+  return typeof data === "object" && data !== null && (data as Record<string, unknown>).type === "READY_CHECK";
+}
+
+export function isReadyResponse(data: unknown): data is ReadyResponse {
+  return typeof data === "object" && data !== null && (data as Record<string, unknown>).type === "READY";
+}

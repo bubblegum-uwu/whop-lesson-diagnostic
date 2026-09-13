@@ -19,6 +19,8 @@ declare namespace chrome {
       ): void;
     };
     function sendMessage(message: unknown, callback?: (response?: unknown) => void): void;
+    /** Set only inside a chrome.*.sendMessage callback when the call failed (e.g. no receiving end in the target tab) — must be read inside that callback or Chrome logs an "Unchecked runtime.lastError" warning. */
+    let lastError: { message?: string } | undefined;
   }
 
   namespace tabs {

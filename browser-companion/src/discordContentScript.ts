@@ -16,14 +16,24 @@
 import { scanChannelMessages, type ScannerEnvironment } from "./discordScanner.js";
 import { parseDiscordChannelUrl, DiscordChannelUrlParseError } from "./discordChannelUrl.js";
 import { findScroller, findChannelName } from "./discordAdapter.js";
-import { isDiscordTabCommand } from "./bridgeProtocol.js";
+import { isDiscordTabCommand, isReadyCheckCommand } from "./bridgeProtocol.js";
 import type { DiscordScanResult } from "./types.js";
 
 const SCROLL_SETTLE_DELAY_MS = 700;
 
 const activeCancelFlags = new Map<string, { cancelled: boolean }>();
 
-chrome.runtime.onMessage.addListener((message: unknown) => {
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  // The service worker's readiness probe (discordTabReadiness.ts) — a
+  // synchronous reply is enough proof this content script is loaded and
+  // listening; a tab whose content script isn't injected never answers at
+  // all, which combined with the probe's own timeout is the actual
+  // "not ready" signal (see serviceWorker.ts).
+  if (isReadyCheckCommand(message)) {
+    sendResponse({ type: "READY" });
+    return;
+  }
+
   if (!isDiscordTabCommand(message)) return;
   if (message.type === "START_SCAN") {
     void runScan(message.requestId);

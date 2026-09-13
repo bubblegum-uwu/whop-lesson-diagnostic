@@ -7,9 +7,13 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "build": "tsc -p tsconfig.json --outDir dist"
+    "build": "node scripts/build.mjs",
+    "generate-manifest": "node scripts/generateManifest.mjs",
+    "verify-build": "node scripts/verifyBuild.mjs"
   },
   "devDependencies": {
+    "@types/node": "^24.13.3",
+    "esbuild": "^0.28.2",
     "jsdom": "^30.0.1",
     "typescript": "~6.0.2",
     "vitest": "^5.0.0"
