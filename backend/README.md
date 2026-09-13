@@ -413,6 +413,40 @@ Dockerfile                 Node 22 + ffmpeg, multi-stage build
 | `KNOVERA_PASSWORD_HASH` | Yes | — | **Secret.** The scrypt hash of the operator's Knovera login password — never the plaintext. Generate it with `scripts/generateKnoveraPasswordHash.ts` (see below); never hand-write one. |
 | `KNOVERA_AUTH_SECRET` | Yes | — | **Secret.** HMAC signing key for Knovera session tokens, e.g. `openssl rand -base64 48`. Rotating it invalidates every outstanding Knovera session. |
 | `YOUTUBE_API_KEY` | No | — | **Secret.** A YouTube Data API v3 key (Google Cloud Console → APIs & Services → Credentials, with the "YouTube Data API v3" enabled). Required for YouTube channel catalog discovery (Phase 4K) — resolving `@handle`/`/c/`/`/user/` channel references and enumerating a channel's full upload history via `channels.list`/`playlistItems.list`. Without it, "Add Channel"/"Refresh" on a YouTube collection responds `501 youtube_api_not_configured` rather than silently falling back to a permanently-limited discovery mechanism. À-la-carte single-video add is entirely unaffected either way. |
+| `DISCORD_APPLICATION_ID` | No | — | Not a secret. Discord Developer Portal → General Information → Application ID. Required for the "Save to Knovera" USER_INSTALL command (Phase 4K-B revised) to do anything. |
+| `DISCORD_PUBLIC_KEY` | No | — | Not a secret. Developer Portal → General Information → Public Key (raw hex-encoded Ed25519 key). What `POST /api/discord/interactions` verifies every request signature against — required for that endpoint to accept anything but a 401. |
+| `DISCORD_BOT_TOKEN` | No | — | **Secret.** Developer Portal → Bot → Reset Token. Used ONLY by the offline `scripts/registerDiscordCommand.ts` setup script (see "Discord Save to Knovera command" below) — never read by the running server itself; the interactions endpoint authenticates via `DISCORD_PUBLIC_KEY` signature verification alone. |
+
+## Discord "Save to Knovera" command (Phase 4K-B revised)
+
+The USER_INSTALL "Save to Knovera" message context-menu command (right-click
+a message → Apps → Save to Knovera) must be registered with Discord once
+before it appears for any user — this is a Discord Developer Portal-side
+registration, entirely separate from deploying the backend itself. See
+`src/http/routes/discordInteractions.ts` for the runtime handler and
+`src/discord/discordInteractionsVerify.ts` for why the running server needs
+no bot token at all.
+
+1. Create/open the application in the
+   [Discord Developer Portal](https://discord.com/developers/applications),
+   enable **User Install** under Installation, and note its **Application ID**
+   and **Public Key** (General Information) — set these as
+   `DISCORD_APPLICATION_ID`/`DISCORD_PUBLIC_KEY` on the backend deployment.
+2. Register the command (idempotent — safe to re-run any time, including
+   with nothing changed):
+   ```
+   cd backend
+   DISCORD_APPLICATION_ID=<application id> DISCORD_BOT_TOKEN=<bot token> \
+     npm run discord:register-command
+   ```
+   `DISCORD_BOT_TOKEN` here is only ever used by this one-off script (Bot →
+   Reset Token in the portal) — never commit it, never paste it into
+   chat/logs, and never set it on the running backend service/worker.
+3. Set the interactions endpoint URL in the portal (General Information →
+   Interactions Endpoint URL) to this deployment's
+   `https://<backend-host>/api/discord/interactions` — Discord sends a PING
+   here immediately and refuses to save the URL unless it gets a valid
+   signed PONG back.
 
 ## Knovera application login (Phase 4D)
 

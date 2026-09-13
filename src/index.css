@@ -1889,12 +1889,53 @@ button.kv-topnav-avatar:hover {
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--kv-space-3);
+  /* Live-validation cleanup — lets the badge group (below) drop to its own
+     line at narrow widths instead of forcing the card wider than its
+     grid cell. A no-op for this class's other users (Whop course cards,
+     collections, synthesis sets — see SourcesPage.tsx/SynthesisSetsPage.tsx),
+     which never render a second child here to wrap against. */
+  flex-wrap: wrap;
 }
 
 .knovera-project-card-top h2 {
   margin: 0 0 0.3rem;
   font-size: 1.2rem;
   font-weight: 600;
+}
+
+/* Live-validation cleanup — the project name/source-line column (Projects
+   page cards only). Without min-width:0, a flex item's default min-width
+   (auto) keeps it at its content's intrinsic width, which is what forced
+   the badge group (its flex sibling) outside the card on a long title;
+   flex-basis 10rem gives it a sensible minimum share of the row before the
+   badges are allowed to wrap onto their own line. */
+.knovera-project-card-heading {
+  min-width: 0;
+  flex: 1 1 10rem;
+}
+
+.knovera-project-card-badges {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--kv-space-2);
+  /* Live-validation cleanup — keeps the badge column from ever exceeding
+     the card's own width, and lets it settle flush right whether it's
+     sharing the top row with the heading or has wrapped onto its own
+     line below it. */
+  max-width: 100%;
+  margin-left: auto;
+}
+
+/* Live-validation cleanup — scoped to project-card badges only (never
+   `.kv-badge` globally, which every other badge in the app still relies
+   on staying single-line). "General Knowledge"/"Synthesis Coming Soon" can
+   be long enough to need two lines at a narrow card width; center-aligned
+   wrapped text reads better here than the default left alignment. */
+.knovera-project-card-badges .kv-badge {
+  white-space: normal;
+  text-align: center;
+  line-height: 1.25;
 }
 
 .knovera-project-card-source {

@@ -6,6 +6,7 @@ import { createJob } from "../src/db/analysisJobsRepo.js";
 import { createSynthesisRun } from "../src/db/synthesisRunsRepo.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import { listProjects, getProjectById, getProjectForCourse, getProjectStats, createProject } from "../src/db/projectsRepo.js";
+import { createYouTubeSource, createDiscordSource } from "../src/db/projectSourcesRepo.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 
 const pool = createTestPool();
@@ -167,7 +168,47 @@ describe("projectsRepo", () => {
       analyzedLessonCount: 0,
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
+      projectSourceCount: 0,
     });
+  });
+
+  // Live-validation cleanup — Projects page accuracy: courseCount alone
+  // (Whop-only, via `courses`) went stale once YouTube/Discord project_sources
+  // became first-class. projectSourceCount is the generic, provider-independent
+  // signal for those.
+  it("getProjectStats reports projectSourceCount 0 for an empty project", async () => {
+    const project = await makeProject("GENERAL_KNOWLEDGE");
+    const stats = await getProjectStats(pool, project.id);
+    expect(stats.projectSourceCount).toBe(0);
+  });
+
+  it("getProjectStats counts YouTube and Discord project_sources, scoped to just this project", async () => {
+    const project = await makeProject("GENERAL_KNOWLEDGE");
+    const otherProject = await makeProject("GENERAL_KNOWLEDGE");
+
+    await createYouTubeSource(pool, {
+      projectId: project.id,
+      externalId: "dQw4w9WgXcQ",
+      sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+    });
+    await createDiscordSource(pool, {
+      projectId: project.id,
+      ownerIdentity: "test-identity",
+      externalId: randomId("attach"),
+      sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4",
+    });
+    // A source in a DIFFERENT project must never be counted here.
+    await createYouTubeSource(pool, {
+      projectId: otherProject.id,
+      externalId: "jNQXAC9IVRw",
+      sourceUrl: "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+    });
+
+    const stats = await getProjectStats(pool, project.id);
+    expect(stats.projectSourceCount).toBe(2);
+
+    const otherStats = await getProjectStats(pool, otherProject.id);
+    expect(otherStats.projectSourceCount).toBe(1);
   });
 });
 

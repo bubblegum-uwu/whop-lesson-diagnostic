@@ -29,7 +29,7 @@ async function makeYouTubeSource(projectId: number) {
 }
 
 async function makeDiscordSource(projectId: number) {
-  const { source } = await createDiscordSource(pool, { projectId, externalId: randomId("attach"), sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1&is=2&hm=3" });
+  const { source } = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId, externalId: randomId("attach"), sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1&is=2&hm=3" });
   return source;
 }
 
@@ -105,6 +105,16 @@ describe("POST /api/projects/:projectId/sources/analyze-batch (Phase 4K)", () =>
 
     const { body } = await callBatchAnalyze(String(project.id), [source.id], makeJobTrigger(), true);
     expect(body.results).toEqual([{ sourceId: source.id, kind: "queued" }]);
+
+    // Live-validation Fix 4 — the batch route must ALSO persist force ON
+    // the newly created job (not just decide whether to skip based on
+    // it), the same as the single-source Analyze route.
+    const newJobRow = await pool.query<{ force_reanalysis: boolean }>(
+      `SELECT force_reanalysis FROM project_source_analysis_jobs WHERE project_source_id = $1 AND job_id != $2`,
+      [source.id, job.jobId],
+    );
+    expect(newJobRow.rows).toHaveLength(1);
+    expect(newJobRow.rows[0].force_reanalysis).toBe(true);
   });
 
   it("an unknown sourceId is reported not_found, never crashing the batch", async () => {

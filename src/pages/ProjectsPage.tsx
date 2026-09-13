@@ -96,28 +96,50 @@ export function ProjectsPage({ backendUrl, knoveraToken }: ProjectsPageProps) {
           {state.phase === "loaded" &&
             state.projects.map((project) => {
               const projectType = project.projectType as ProjectType;
-              const operational = OPERATIONAL_PROJECT_TYPES.has(projectType);
-              const showStats = operational && project.lessonCount > 0;
+              // Live-validation Fix 2 — `operational` means ONLY "this project
+              // type has a working synthesis engine" (see OPERATIONAL_PROJECT_TYPES's
+              // own doc comment). It must never also mean "can be opened": a
+              // GENERAL_KNOWLEDGE project is a fully usable workspace for
+              // sources/catalog/the Discord Knowledge inbox today — only its
+              // synthesis functionality is unimplemented. The Open button
+              // below is therefore never disabled by this flag.
+              const hasSynthesis = OPERATIONAL_PROJECT_TYPES.has(projectType);
+              const showStats = hasSynthesis && project.lessonCount > 0;
               return (
-                <div key={project.id} className={operational ? "kv-card knovera-project-card operational" : "kv-card knovera-project-card"}>
+                <div key={project.id} className={hasSynthesis ? "kv-card knovera-project-card operational" : "kv-card knovera-project-card"}>
                   <div className="knovera-project-card-top">
-                    <div>
+                    <div className="knovera-project-card-heading">
                       <h2>{project.name}</h2>
-                      {/* Phase 4C correction: derived from this project's real courseCount
-                          (from GET /api/projects, the same courses.project_id ownership
-                          GET /api/projects/:projectId/sources itself enforces) — never a
-                          hardcoded "Whop" label. Whop is the only provider that produces a
-                          `courses` row today, so courseCount > 0 reliably means a Whop
-                          source is connected without a second per-card fetch; this stops
-                          being a safe inference the moment a second provider can persist
-                          data of its own. */}
-                      <p className="knovera-project-card-source">{project.courseCount > 0 ? "Whop" : "No sources yet"}</p>
+                      {/* Phase 4C correction, updated by the live-validation
+                          cleanup below: derived from this project's real stats
+                          (from GET /api/projects) — never a hardcoded label,
+                          and never a second per-card fetch. courseCount > 0
+                          still means "Whop" specifically (Whop is the only
+                          provider that produces a `courses` row). Once that
+                          stopped being a safe "any source exists" inference —
+                          YouTube/Discord project_sources are real, first-class
+                          sources with no course row at all — projectSourceCount
+                          (a generic, provider-independent project_sources count;
+                          see projectsRepo.ts's getProjectStats) is what keeps
+                          this line from claiming "No sources yet" on a project
+                          that actually has sources, without guessing which
+                          provider they came from. */}
+                      <p className="knovera-project-card-source">
+                        {project.courseCount > 0
+                          ? "Whop"
+                          : project.projectSourceCount > 0
+                            ? `${project.projectSourceCount} source${project.projectSourceCount === 1 ? "" : "s"}`
+                            : "No sources yet"}
+                      </p>
                     </div>
-                    {operational ? (
-                      <span className="kv-badge kv-badge-accent">{PROJECT_TYPE_LABEL[projectType]}</span>
-                    ) : (
-                      <span className="kv-badge kv-badge-muted">Coming Soon</span>
-                    )}
+                    <div className="knovera-project-card-badges">
+                      <span className={hasSynthesis ? "kv-badge kv-badge-accent" : "kv-badge kv-badge-muted"}>{PROJECT_TYPE_LABEL[projectType]}</span>
+                      {/* Scoped to synthesis only — never implies the whole
+                          project (sources/catalog/captures) is unavailable;
+                          see projectSynthesis.ts's own GENERAL_KNOWLEDGE guard,
+                          which this label documents rather than duplicates. */}
+                      {!hasSynthesis && <span className="kv-badge kv-badge-muted">Synthesis Coming Soon</span>}
+                    </div>
                   </div>
 
                   {showStats && (
@@ -136,12 +158,7 @@ export function ProjectsPage({ backendUrl, knoveraToken }: ProjectsPageProps) {
                   )}
 
                   <div className="knovera-project-card-footer">
-                    <button
-                      type="button"
-                      className="knovera-open-link"
-                      disabled={!operational}
-                      onClick={() => navigate(`/projects/${project.id}/sources`)}
-                    >
+                    <button type="button" className="knovera-open-link" onClick={() => navigate(`/projects/${project.id}/sources`)}>
                       Open
                       <span className="knovera-cta-arrow" aria-hidden="true">
                         →

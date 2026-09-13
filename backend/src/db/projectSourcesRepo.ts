@@ -1,4 +1,5 @@
 import type { Pool } from "pg";
+import { upsertContentAsset } from "./contentAssetsRepo.js";
 
 /**
  * Phase 4H-A — the first non-Whop project source. See the
@@ -41,6 +42,8 @@ export interface ProjectSourceRow {
   errorMessage: string | null;
   /** Phase 4K — the source_collections row this item was discovered through, or null for an à-la-carte item never imported via a collection (see 1789800000000_source-collections.sql). */
   collectionId: number | null;
+  /** Phase 4K-B (revised) — the shared content_assets row this source's durable bytes live under (see contentAssetsRepo.ts), or null for a YouTube/Whop-unrelated row, or a Discord row created before this migration (which keeps reading its legacy project_source_media row instead — see worker/projectSourceAnalysisLoop.ts). Set only on genuine INSERT, never touched on conflict. */
+  contentAssetId: number | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -57,8 +60,12 @@ export interface CreateYouTubeSourceInput {
 
 export interface CreateDiscordSourceInput {
   projectId: number;
+  /** Phase 4K-B (revised) — the Knovera identity this durable asset is scoped to (req.knoveraOperator); see contentAssetsRepo.ts's UNIQUE(owner_identity, provider, external_id). */
+  ownerIdentity: string;
   externalId: string;
   sourceUrl: string;
+  collectionId?: number | null;
+  title?: string | null;
 }
 
 interface ProjectSourceDbRow {
@@ -72,6 +79,7 @@ interface ProjectSourceDbRow {
   status: string;
   error_message: string | null;
   collection_id: string | null;
+  content_asset_id: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -88,13 +96,14 @@ function mapRow(row: ProjectSourceDbRow): ProjectSourceRow {
     status: row.status as ProjectSourceStatus,
     errorMessage: row.error_message,
     collectionId: row.collection_id == null ? null : Number(row.collection_id),
+    contentAssetId: row.content_asset_id == null ? null : Number(row.content_asset_id),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
 }
 
 const COLUMNS =
-  "id, project_id, provider, external_id, source_url, title, duration_seconds, status, error_message, collection_id, created_at, updated_at";
+  "id, project_id, provider, external_id, source_url, title, duration_seconds, status, error_message, collection_id, content_asset_id, created_at, updated_at";
 
 /**
  * Phase 4H-A — the ONLY writer of `project_sources` this phase ships.
@@ -148,37 +157,57 @@ export async function createYouTubeSource(
 }
 
 /**
- * Phase 4I — the second project_sources writer, mirroring
- * createYouTubeSource exactly (same NULL title/duration, same READY
- * status, same ON CONFLICT DO NOTHING race-safety). `sourceUrl` here is
- * the exact, verbatim Discord CDN URL (signature included) — see
- * lib/discordUrl.ts's doc comment on why it can't be normalized down to
- * an id the way YouTube's can. This URL is used ONLY once, immediately
- * after this call, to durably capture the video's bytes (see
- * discord/downloadDiscordAttachment.ts /
- * db/projectSourceMediaRepo.ts) — it is never relied on again afterward,
- * since its signature expires and cannot be reconstructed later.
+ * Phase 4I, revised in Phase 4K-B — the second project_sources writer.
+ * `sourceUrl` here is the exact Discord CDN URL captured at the moment
+ * this row (or its underlying content_asset — see below) was FIRST
+ * created; see lib/discordUrl.ts's doc comment on why it can't be
+ * normalized down to an id the way YouTube's can. It is stored purely as
+ * provenance/display and never re-fetched — durability comes entirely
+ * from content_asset_media (see contentAssetsRepo.ts), read via
+ * `contentAssetId` below.
+ *
+ * Phase 4K-B (revised) — this now ALSO upserts the shared content_assets
+ * row (owner_identity, provider, external_id) BEFORE the project_sources
+ * upsert, and links the two via `content_asset_id`. This is what makes
+ * à-la-carte URL import, Save-to-Knovera capture, and "Add to Project"
+ * all converge on ONE durable asset for the same (identity, attachment)
+ * pair, regardless of which path or which project touches it first (spec
+ * section 49/50): the caller inspects `assetCreated` (not `created`) to
+ * decide whether a durable download is actually needed — `created:false,
+ * assetCreated:true` is the "Add to Project"/new-project-same-asset case;
+ * `assetCreated:false` (regardless of `created`) means the bytes already
+ * exist somewhere and must NEVER be re-downloaded.
+ *
+ * `content_asset_id` is set only on a genuine INSERT into project_sources
+ * (never touched on conflict) — an already-existing row's link is never
+ * silently rewritten; see the migration's doc comment on pre-existing
+ * legacy rows.
  */
 export async function createDiscordSource(
   pool: Pool,
   input: CreateDiscordSourceInput,
-): Promise<{ source: ProjectSourceRow; created: boolean }> {
-  const inserted = await pool.query<ProjectSourceDbRow>(
-    `INSERT INTO project_sources (project_id, provider, external_id, source_url, title, duration_seconds, status)
-     VALUES ($1, 'DISCORD', $2, $3, NULL, NULL, 'READY')
-     ON CONFLICT (project_id, provider, external_id) DO NOTHING
-     RETURNING ${COLUMNS}`,
-    [input.projectId, input.externalId, input.sourceUrl],
-  );
-  if (inserted.rows[0]) {
-    return { source: mapRow(inserted.rows[0]), created: true };
-  }
+): Promise<{ source: ProjectSourceRow; created: boolean; assetCreated: boolean; contentAssetId: number }> {
+  const { asset, created: assetCreated } = await upsertContentAsset(pool, {
+    ownerIdentity: input.ownerIdentity,
+    provider: "DISCORD",
+    externalId: input.externalId,
+    title: input.title ?? null,
+  });
 
-  const existing = await pool.query<ProjectSourceDbRow>(
-    `SELECT ${COLUMNS} FROM project_sources WHERE project_id = $1 AND provider = 'DISCORD' AND external_id = $2`,
-    [input.projectId, input.externalId],
+  const collectionId = input.collectionId ?? null;
+  const title = input.title ?? null;
+  const inserted = await pool.query<ProjectSourceDbRow & { inserted: boolean }>(
+    `INSERT INTO project_sources (project_id, provider, external_id, source_url, title, duration_seconds, status, collection_id, content_asset_id)
+     VALUES ($1, 'DISCORD', $2, $3, $4, NULL, 'READY', $5, $6)
+     ON CONFLICT (project_id, provider, external_id) DO UPDATE SET
+       collection_id = COALESCE(project_sources.collection_id, EXCLUDED.collection_id),
+       title = COALESCE(project_sources.title, EXCLUDED.title),
+       updated_at = now()
+     RETURNING ${COLUMNS}, (xmax = 0) AS inserted`,
+    [input.projectId, input.externalId, input.sourceUrl, title, collectionId, asset.id],
   );
-  return { source: mapRow(existing.rows[0]), created: false };
+  const row = inserted.rows[0];
+  return { source: mapRow(row), created: row.inserted, assetCreated, contentAssetId: asset.id };
 }
 
 /** Every source this project owns, across all providers — scoped by project_id alone, never a global fallback. */

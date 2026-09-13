@@ -4,6 +4,7 @@ import { createJob, getJob } from "../src/db/projectSourceAnalysisJobsRepo.js";
 import { getLatestByProjectSource } from "../src/db/projectSourceAnalysesRepo.js";
 import { createYouTubeSource, createDiscordSource } from "../src/db/projectSourcesRepo.js";
 import { saveProjectSourceMedia, getProjectSourceMedia } from "../src/db/projectSourceMediaRepo.js";
+import { saveContentAssetMedia, getContentAssetMedia } from "../src/db/contentAssetsRepo.js";
 import { computeProjectSourceAnalysisFingerprint } from "../src/pipeline/fingerprint.js";
 import { estimateCost } from "../src/pricing/geminiPricing.js";
 import {
@@ -57,14 +58,17 @@ const DISCORD_URL = "https://cdn.discordapp.com/attachments/123456789012345678/9
  * exists once successfully added, not the pre-fix shape.
  */
 async function makeDiscordSource(projectId: number, opts: { skipMedia?: boolean } = {}) {
-  const { source } = await createDiscordSource(pool, {
+  const { source, contentAssetId } = await createDiscordSource(pool, {
+    ownerIdentity: "test-identity",
     projectId,
-    externalId: "987654321098765432",
+    externalId: randomId("attach"),
     sourceUrl: DISCORD_URL,
   });
   if (!opts.skipMedia) {
-    await saveProjectSourceMedia(pool, {
-      projectSourceId: source.id,
+    // Phase 4K-B (revised) — durable bytes now live in content_asset_media,
+    // keyed by the source's contentAssetId, not project_source_media.
+    await saveContentAssetMedia(pool, {
+      contentAssetId,
       content: Buffer.from("fake-discord-video-bytes"),
       contentType: "video/mp4",
       byteSize: 24,
@@ -364,9 +368,31 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
       const { deps } = makeDeps();
       await runProjectSourceAnalysisLoop(deps);
 
-      const media = await getProjectSourceMedia(pool, source.id);
+      const media = await getContentAssetMedia(pool, source.contentAssetId!);
       expect(media).not.toBeNull();
       expect(media?.content.toString()).toBe("fake-discord-video-bytes");
+    });
+
+    it("Phase 4K-B (revised) backward compatibility: a Discord source created BEFORE the content_assets migration (contentAssetId null, bytes only in legacy project_source_media) still analyzes successfully", async () => {
+      const project = await makeProject();
+      // Simulates a pre-migration row directly: created via the OLD path
+      // (project_source_media only, no content_asset_id) rather than
+      // makeDiscordSource's new content_asset_media path.
+      const result = await pool.query<{ id: string }>(
+        `INSERT INTO project_sources (project_id, provider, external_id, source_url, status) VALUES ($1, 'DISCORD', $2, $3, 'READY') RETURNING id`,
+        [project.id, "legacy-attach-1", DISCORD_URL],
+      );
+      const legacySourceId = Number(result.rows[0].id);
+      await saveProjectSourceMedia(pool, { projectSourceId: legacySourceId, content: Buffer.from("legacy-fake-bytes"), contentType: "video/mp4", byteSize: 17 });
+      await createJob(pool, legacySourceId, computeProjectSourceAnalysisFingerprint({ projectSourceId: legacySourceId, geminiModel: GEMINI_MODEL }));
+
+      const { deps } = makeDeps();
+      await runProjectSourceAnalysisLoop(deps);
+
+      const analysis = await getLatestByProjectSource(pool, legacySourceId);
+      expect(analysis?.status).toBe("completed");
+      const legacyMedia = await getProjectSourceMedia(pool, legacySourceId);
+      expect(legacyMedia?.content.toString()).toBe("legacy-fake-bytes"); // never migrated/deleted
     });
   });
 
@@ -531,4 +557,91 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
 
     expect(after).toEqual(before);
   });
+});
+
+/**
+ * Live-validation Fix 4 — `force=true` re-analyze was not actually
+ * re-analyzing: the worker's own fingerprint-based idempotency
+ * short-circuit (see the "second job was skipped, not re-analyzed" test
+ * above, which is the CORRECT behavior for a non-forced repeat) doesn't
+ * know the difference between "this is genuinely the same request
+ * arriving twice" and "the operator explicitly asked to bypass the cached
+ * result." `job.forceReanalysis` (persisted at job-creation time — see
+ * db/projectSourceAnalysisJobsRepo.ts's createJob) is the fix: it lets a
+ * forced job skip the short-circuit while a normal repeat still benefits
+ * from it, without ever weakening analysisFingerprint's meaning.
+ */
+describe("runProjectSourceAnalysisLoop — force=true re-analysis (Fix 4)", () => {
+  it("1: a normal (non-forced) repeated job still reuses the existing analysis — no second Gemini call, no second analysis row", async () => {
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+    const fingerprint = computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL });
+
+    const firstJob = await createJob(pool, source.id, fingerprint);
+    const { deps, gemini } = makeDeps();
+    await runProjectSourceAnalysisLoop(deps);
+    // Two-pass extraction (strategy + knowledge) — 2 calls for ONE run.
+    expect((gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+
+    const secondJob = await createJob(pool, source.id, fingerprint); // forceReanalysis defaults to false
+    await runProjectSourceAnalysisLoop(deps);
+
+    expect((gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2); // never called again
+    expect((await getJob(pool, secondJob.jobId))?.status).toBe("COMPLETED");
+    expect(Number((await pool.query(`SELECT COUNT(*) AS count FROM project_source_analyses WHERE project_source_id = $1`, [source.id])).rows[0].count)).toBe(1);
+    // The one analysis row still belongs to the FIRST job.
+    const analysis = await getLatestByProjectSource(pool, source.id);
+    expect(analysis?.jobId).toBe(firstJob.jobId);
+  });
+
+  it("2/3: a forceReanalysis:true job does NOT short-circuit on the same fingerprint — it calls Gemini for real", async () => {
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+    const fingerprint = computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL });
+
+    await createJob(pool, source.id, fingerprint);
+    const { deps, gemini } = makeDeps();
+    await runProjectSourceAnalysisLoop(deps);
+    expect((gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+
+    const forcedJob = await createJob(pool, source.id, fingerprint, true);
+    await runProjectSourceAnalysisLoop(deps);
+
+    // Real second execution — Gemini was genuinely called again, never
+    // short-circuited just because a completed analysis already existed
+    // under this fingerprint. 2 more two-pass calls = 4 total.
+    expect((gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls.length).toBe(4);
+    expect((await getJob(pool, forcedJob.jobId))?.status).toBe("COMPLETED");
+  });
+
+  it("4/5: a forced job persists its OWN second project_source_analyses row (its own job_id) while the prior analysis remains intact", async () => {
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+    const fingerprint = computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL });
+
+    const firstJob = await createJob(pool, source.id, fingerprint);
+    const { deps: firstDeps } = makeDeps();
+    await runProjectSourceAnalysisLoop(firstDeps);
+    const firstAnalysis = await getLatestByProjectSource(pool, source.id);
+    expect(firstAnalysis?.jobId).toBe(firstJob.jobId);
+
+    const forcedJob = await createJob(pool, source.id, fingerprint, true);
+    const { deps: secondDeps } = makeDeps(); // a fresh Gemini mock — proves this run's own upload/analyze happened
+    await runProjectSourceAnalysisLoop(secondDeps);
+
+    const rows = await pool.query<{ job_id: string }>(`SELECT job_id FROM project_source_analyses WHERE project_source_id = $1 ORDER BY completed_at ASC`, [source.id]);
+    expect(rows.rows).toHaveLength(2);
+    expect(rows.rows.map((r) => r.job_id)).toEqual([firstJob.jobId, forcedJob.jobId]);
+
+    // The prior analysis is completely untouched (same row, same job_id).
+    const stillFirst = await pool.query(`SELECT job_id FROM project_source_analyses WHERE job_id = $1`, [firstJob.jobId]);
+    expect(stillFirst.rows).toHaveLength(1);
+
+    // getLatestByProjectSource (ordered by completed_at DESC) now returns
+    // the forced job's own row — "latest completed persisted analysis"
+    // behaves correctly with no code change needed there.
+    const latest = await getLatestByProjectSource(pool, source.id);
+    expect(latest?.jobId).toBe(forcedJob.jobId);
+  });
+
 });

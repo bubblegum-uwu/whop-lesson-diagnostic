@@ -23,6 +23,7 @@ const MASTERMIND: ProjectSummary = {
   analyzedLessonCount: 28,
   latestSynthesisStatus: "COMPLETED",
   latestSynthesisCompletedAt: "2026-01-02T00:00:00.000Z",
+  projectSourceCount: 0,
 };
 
 function stubFetch(projects: ProjectSummary[] | "error") {
@@ -95,12 +96,134 @@ describe("ProjectsPage", () => {
       analyzedLessonCount: 0,
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
+      projectSourceCount: 0,
     };
     stubFetch([emptyProject]);
     renderProjects();
     await waitFor(() => expect(screen.getByRole("heading", { name: "SecondProject" })).toBeInTheDocument());
     expect(screen.getByText("No sources yet")).toBeInTheDocument();
     expect(screen.queryByText("Whop")).not.toBeInTheDocument();
+  });
+
+  // Live-validation cleanup — courseCount alone went stale once YouTube/
+  // Discord project_sources became first-class: a project with real
+  // sources but zero Whop courses must never claim "No sources yet."
+  it("C: a project with YouTube/Discord sources but zero Whop courses shows an accurate source count, never 'No sources yet'", async () => {
+    const singleSourceProject: ProjectSummary = {
+      id: 10,
+      name: "One Source",
+      projectType: "GENERAL_KNOWLEDGE",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      courseCount: 0,
+      lessonCount: 0,
+      analyzedLessonCount: 0,
+      latestSynthesisStatus: null,
+      latestSynthesisCompletedAt: null,
+      projectSourceCount: 1,
+    };
+    const multiSourceProject: ProjectSummary = { ...singleSourceProject, id: 11, name: "Discord Knowledge Multi", projectSourceCount: 3 };
+
+    stubFetch([singleSourceProject, multiSourceProject]);
+    renderProjects();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "One Source" })).toBeInTheDocument());
+    expect(screen.getByText("1 source")).toBeInTheDocument();
+    expect(screen.getByText("3 sources")).toBeInTheDocument();
+    expect(screen.queryByText("No sources yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Whop")).not.toBeInTheDocument();
+  });
+
+  it("D: courseCount > 0 still wins over projectSourceCount — 'Whop' is shown, never a raw source count, when a Whop course is connected", async () => {
+    const whopAndDiscord: ProjectSummary = {
+      id: 12,
+      name: "Whop Plus Discord",
+      projectType: "TRADING_STRATEGIES",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      courseCount: 1,
+      lessonCount: 10,
+      analyzedLessonCount: 0,
+      latestSynthesisStatus: null,
+      latestSynthesisCompletedAt: null,
+      projectSourceCount: 5,
+    };
+    stubFetch([whopAndDiscord]);
+    renderProjects();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Whop Plus Discord" })).toBeInTheDocument());
+    expect(screen.getByText("Whop")).toBeInTheDocument();
+    expect(screen.queryByText("5 sources")).not.toBeInTheDocument();
+  });
+
+  // Live-validation Fix 2 — a GENERAL_KNOWLEDGE project must be a fully
+  // openable workspace (sources/catalog/Discord Knowledge inbox); only its
+  // synthesis functionality is unimplemented. Previously the Open button
+  // was disabled and the card showed a bare "Coming Soon" badge that
+  // implied the whole project was unusable, not just its synthesis.
+  describe("GENERAL_KNOWLEDGE projects are openable (only synthesis is not)", () => {
+    const DISCORD_KNOWLEDGE: ProjectSummary = {
+      id: 9,
+      name: "Discord Knowledge",
+      projectType: "GENERAL_KNOWLEDGE",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      courseCount: 0,
+      lessonCount: 0,
+      analyzedLessonCount: 0,
+      latestSynthesisStatus: null,
+      latestSynthesisCompletedAt: null,
+      projectSourceCount: 0,
+    };
+
+    it("shows the real project type label (never a bare 'Coming Soon' in its place) plus a separate, synthesis-scoped note", async () => {
+      stubFetch([DISCORD_KNOWLEDGE]);
+      renderProjects();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Discord Knowledge" })).toBeInTheDocument());
+
+      expect(screen.getByText("General Knowledge")).toBeInTheDocument();
+      expect(screen.getByText("Synthesis Coming Soon")).toBeInTheDocument();
+      // Never the old bare label that implied the whole project was unusable.
+      expect(screen.queryByText("Coming Soon")).not.toBeInTheDocument();
+    });
+
+    // Live-validation cleanup — this project (General Knowledge +
+    // Synthesis Coming Soon, the two longest badges the card ever shows
+    // together) is exactly the case that overflowed the card at narrow
+    // widths. Asserting the wrap-scaffolding classes are on the right
+    // elements is a real regression guard without pixel/screenshot
+    // assertions — same class-level pattern as UsagePage.test.tsx's
+    // `.closest(".knovera-usage-total-card")` checks.
+    it("the heading and badge group carry the wrap-scaffolding classes CSS relies on to keep long badges inside the card", async () => {
+      stubFetch([DISCORD_KNOWLEDGE]);
+      renderProjects();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Discord Knowledge" })).toBeInTheDocument());
+
+      const heading = screen.getByRole("heading", { name: "Discord Knowledge" }).closest(".knovera-project-card-heading");
+      expect(heading).not.toBeNull();
+
+      const badgeGroup = screen.getByText("Synthesis Coming Soon").closest(".knovera-project-card-badges");
+      expect(badgeGroup).not.toBeNull();
+      expect(badgeGroup).toContainElement(screen.getByText("General Knowledge"));
+    });
+
+    it("the Open button is never disabled, and clicking it navigates into the workspace", async () => {
+      stubFetch([DISCORD_KNOWLEDGE]);
+      renderProjects();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Discord Knowledge" })).toBeInTheDocument());
+
+      const openButton = screen.getByRole("button", { name: /Open/ });
+      expect(openButton).not.toBeDisabled();
+      fireEvent.click(openButton);
+      expect(screen.getByText("SOURCES_PAGE_MARKER")).toBeInTheDocument();
+    });
+
+    it("a TRADING_STRATEGIES project never shows the 'Synthesis Coming Soon' note", async () => {
+      stubFetch([MASTERMIND]);
+      renderProjects();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
+      expect(screen.queryByText("Synthesis Coming Soon")).not.toBeInTheDocument();
+    });
   });
 
   it("clicking Open on MasterMind navigates into the project workspace using its real numeric id", async () => {

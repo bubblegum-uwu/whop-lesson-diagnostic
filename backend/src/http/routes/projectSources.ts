@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
+import type { KnoveraAuthedRequest } from "../middleware/knoveraAuth.js";
 import { getProjectById } from "../../db/projectsRepo.js";
 import { getCoursesByProjectId, type CourseRow } from "../../db/coursesRepo.js";
 import { listLessons } from "../../db/lessonsRepo.js";
@@ -10,9 +11,11 @@ import {
   createDiscordSource,
   deleteProjectSource,
   listProjectSourcesByProjectId,
+  getProjectSourceById,
   type ProjectSourceRow,
 } from "../../db/projectSourcesRepo.js";
-import { saveProjectSourceMedia } from "../../db/projectSourceMediaRepo.js";
+import { saveContentAssetMedia, deleteContentAsset, getContentAssetById } from "../../db/contentAssetsRepo.js";
+import { createSourceCollection, getSourceCollectionById } from "../../db/sourceCollectionsRepo.js";
 import { parseYouTubeVideoUrl, YouTubeUrlParseError } from "../../lib/youtubeUrl.js";
 import { parseDiscordVideoUrl, DiscordUrlParseError } from "../../lib/discordUrl.js";
 import {
@@ -328,24 +331,29 @@ export function createAddDiscordSourceHandler(deps: ProjectSourcesRouteDeps) {
       return;
     }
 
-    const { source, created } = await createDiscordSource(deps.pool, {
+    const { source, created, assetCreated, contentAssetId } = await createDiscordSource(deps.pool, {
       projectId,
+      ownerIdentity: (req as KnoveraAuthedRequest).knoveraOperator!,
       externalId: parsed.externalId,
       sourceUrl: parsed.sourceUrl,
     });
 
-    if (created) {
+    // Phase 4K-B (revised) — durable capture is keyed off `assetCreated`,
+    // not `created`: an attachment already captured (à la carte, via Save
+    // to Knovera, or in a different project this identity owns) is NEVER
+    // re-downloaded, even when this is the first time IT lands in THIS
+    // project (created:true, assetCreated:false).
+    if (assetCreated) {
       try {
         const downloadDiscordAttachment = deps.downloadDiscordAttachment ?? defaultDownloadDiscordAttachment;
         const media = await downloadDiscordAttachment(parsed.sourceUrl);
-        await saveProjectSourceMedia(deps.pool, {
-          projectSourceId: source.id,
-          content: media.content,
-          contentType: media.contentType,
-          byteSize: media.byteSize,
-        });
+        await saveContentAssetMedia(deps.pool, { contentAssetId, content: media.content, contentType: media.contentType, byteSize: media.byteSize });
       } catch (err) {
-        await deleteProjectSource(deps.pool, source.id);
+        // Order matters: project_sources.content_asset_id references
+        // content_assets ON DELETE RESTRICT, so the referencing row must
+        // go first.
+        if (created) await deleteProjectSource(deps.pool, source.id);
+        await deleteContentAsset(deps.pool, contentAssetId);
         res.status(502).json({
           error: {
             message: err instanceof DiscordAttachmentDownloadError ? err.message : "Could not download this Discord attachment. Please try again.",
@@ -482,19 +490,33 @@ export function createBatchAddDiscordSourcesHandler(deps: ProjectSourcesRouteDep
         continue;
       }
 
-      const { source, created } = await createDiscordSource(deps.pool, { projectId, externalId: parsed.externalId, sourceUrl: parsed.sourceUrl });
+      const { source, created, assetCreated, contentAssetId } = await createDiscordSource(deps.pool, {
+        projectId,
+        ownerIdentity: (req as KnoveraAuthedRequest).knoveraOperator!,
+        externalId: parsed.externalId,
+        sourceUrl: parsed.sourceUrl,
+      });
       if (!created) {
         results.push({ url, kind: "duplicate", source: toDiscordProjectSource(source) });
+        continue;
+      }
+
+      if (!assetCreated) {
+        // Already-captured media (à la carte elsewhere, Save to Knovera, or
+        // another project this identity owns) — never re-downloaded.
+        results.push({ url, kind: "added", source: toDiscordProjectSource(source) });
         continue;
       }
 
       try {
         const downloadDiscordAttachment = deps.downloadDiscordAttachment ?? defaultDownloadDiscordAttachment;
         const media = await downloadDiscordAttachment(parsed.sourceUrl);
-        await saveProjectSourceMedia(deps.pool, { projectSourceId: source.id, content: media.content, contentType: media.contentType, byteSize: media.byteSize });
+        await saveContentAssetMedia(deps.pool, { contentAssetId, content: media.content, contentType: media.contentType, byteSize: media.byteSize });
         results.push({ url, kind: "added", source: toDiscordProjectSource(source) });
       } catch (err) {
+        // Order matters — see createAddDiscordSourceHandler's identical comment.
         await deleteProjectSource(deps.pool, source.id);
+        await deleteContentAsset(deps.pool, contentAssetId);
         results.push({
           url,
           kind: "invalid",
@@ -504,5 +526,165 @@ export function createBatchAddDiscordSourcesHandler(deps: ProjectSourcesRouteDep
     }
 
     res.status(200).json(summarizeBatch(results));
+  };
+}
+
+export type AddToProjectResultKind = "added" | "already_present" | "unauthorized" | "invalid";
+export interface AddToProjectResultEntry {
+  projectId: number;
+  kind: AddToProjectResultKind;
+  source?: DiscordProjectSource;
+}
+export interface AddToProjectResponse {
+  results: AddToProjectResultEntry[];
+}
+
+interface AddToProjectBody {
+  targetProjectIds?: unknown;
+}
+
+const MAX_ADD_TO_PROJECT_TARGETS = 20;
+
+const SOURCE_NOT_SHAREABLE_RESPONSE = {
+  error: { message: "Only captured Discord sources can be added to other projects right now.", type: "source_not_shareable" },
+} as const;
+
+/**
+ * POST /api/projects/:projectId/sources/:sourceId/add-to-projects — Phase
+ * 4K-B (revised). Makes an already-captured Discord source's durable
+ * content available in one or more OTHER projects, of ANY project type,
+ * without copying media, calling Gemini, or removing it from its current
+ * project (spec sections 40-48). The shared content_assets/
+ * content_asset_media layer (see contentAssetsRepo.ts) is what makes this
+ * possible — every target simply gets its own project_sources row
+ * pointing at the SAME content_asset_id; deleting one never touches the
+ * others (content_assets is only ever deleted once nothing references it —
+ * see deleteContentAsset's doc comment).
+ *
+ * Authorization here is asset-level, not project-level — this app has no
+ * concept of project ownership at all (see projectsRepo.ts /
+ * 1789300000000_project-model.sql: `projects` carries no owner/identity
+ * column, and today's single-Knovera-operator deployment never needs one).
+ * The one authorization dimension that DOES exist is content_assets'
+ * owner_identity (see contentAssetsRepo.ts) — the caller must be the exact
+ * identity that owns the source's underlying asset (ordinarily the
+ * identity that originally captured it). If not, EVERY requested target
+ * comes back "unauthorized" rather than a top-level 403 — this keeps the
+ * response shape uniform regardless of why a given target didn't succeed,
+ * and mirrors the existing batch-add routes' one-result-per-item shape.
+ * Never actually reachable in today's single-operator deployment (there is
+ * only one identity), but fails closed rather than silently ignoring
+ * ownership, for whenever that changes.
+ */
+export function createAddProjectSourceToProjectsHandler(deps: ProjectSourcesRouteDeps) {
+  return async function addProjectSourceToProjectsHandler(req: Request, res: Response): Promise<void> {
+    const projectId = Number(req.params.projectId);
+    const sourceId = Number(req.params.sourceId);
+    if (!Number.isInteger(projectId) || !Number.isInteger(sourceId)) {
+      res.status(404).json({ error: { message: "Unknown project source.", type: "project_source_not_found" } });
+      return;
+    }
+
+    const source = await getProjectSourceById(deps.pool, sourceId);
+    if (!source || source.projectId !== projectId) {
+      res.status(404).json({ error: { message: "Unknown project source.", type: "project_source_not_found" } });
+      return;
+    }
+
+    // Phase 4K-B (revised) scope note (spec section 38): the shared
+    // content_asset layer exists for Discord only — YouTube/Whop sources
+    // never carry a content_asset_id and are never shareable this way.
+    if (source.provider !== "DISCORD" || source.contentAssetId == null) {
+      res.status(400).json(SOURCE_NOT_SHAREABLE_RESPONSE);
+      return;
+    }
+
+    const asset = await getContentAssetById(deps.pool, source.contentAssetId);
+    if (!asset) {
+      // Unreachable — project_sources.content_asset_id references
+      // content_assets ON DELETE RESTRICT, so the asset can never be gone
+      // while this source still exists. Defensive only.
+      res.status(400).json(SOURCE_NOT_SHAREABLE_RESPONSE);
+      return;
+    }
+
+    const requesterIdentity = (req as KnoveraAuthedRequest).knoveraOperator!;
+    const authorized = asset.ownerIdentity === requesterIdentity;
+
+    const body = req.body as AddToProjectBody;
+    if (!Array.isArray(body?.targetProjectIds) || body.targetProjectIds.length === 0) {
+      res.status(400).json({ error: { message: "targetProjectIds is required.", type: "invalid_request" } });
+      return;
+    }
+    if (body.targetProjectIds.length > MAX_ADD_TO_PROJECT_TARGETS) {
+      res.status(400).json({
+        error: { message: `At most ${MAX_ADD_TO_PROJECT_TARGETS} target projects per request.`, type: "invalid_request" },
+      });
+      return;
+    }
+
+    // The original channel collection (if this source has one) is
+    // resolved ONCE up front, never per target — spec section 51: "prefer
+    // creating/reusing the corresponding Discord channel collection in the
+    // target project." Each target gets its own collection row via the
+    // SAME stable (provider, external_id) identity, created or reused —
+    // never enabling refresh there, exactly like the source's own
+    // collection (organizational only; nothing to crawl).
+    const originalCollection = source.collectionId != null ? await getSourceCollectionById(deps.pool, source.collectionId) : null;
+
+    const results: AddToProjectResultEntry[] = [];
+    for (const rawTargetProjectId of body.targetProjectIds) {
+      const targetProjectId = Number(rawTargetProjectId);
+      if (!Number.isInteger(targetProjectId)) {
+        results.push({ projectId: Number.isFinite(targetProjectId) ? targetProjectId : -1, kind: "invalid" });
+        continue;
+      }
+
+      if (!authorized) {
+        results.push({ projectId: targetProjectId, kind: "unauthorized" });
+        continue;
+      }
+
+      const targetProject = await getProjectById(deps.pool, targetProjectId);
+      if (!targetProject) {
+        results.push({ projectId: targetProjectId, kind: "invalid" });
+        continue;
+      }
+
+      let targetCollectionId: number | null = null;
+      if (originalCollection) {
+        const { collection } = await createSourceCollection(deps.pool, {
+          projectId: targetProjectId,
+          provider: originalCollection.provider,
+          externalId: originalCollection.externalId,
+          title: originalCollection.title,
+          sourceUrl: originalCollection.sourceUrl,
+        });
+        targetCollectionId = collection.id;
+      }
+
+      // Never downloads, never touches content_asset_media, never calls
+      // Gemini or creates an analysis job — membership/reference only
+      // (spec section 46/47). createDiscordSource's own upsert is what
+      // makes this idempotent: a target that already has this exact
+      // (project, external_id) source comes back `created:false` —
+      // reported as already_present, never a duplicate row (this is also
+      // exactly what makes re-adding to the SAME project the source is
+      // already in a no-op "already_present", with no special-casing
+      // needed here).
+      const { source: targetSource, created } = await createDiscordSource(deps.pool, {
+        projectId: targetProjectId,
+        ownerIdentity: asset.ownerIdentity,
+        externalId: source.externalId,
+        sourceUrl: source.sourceUrl,
+        collectionId: targetCollectionId,
+        title: source.title,
+      });
+
+      results.push({ projectId: targetProjectId, kind: created ? "added" : "already_present", source: toDiscordProjectSource(targetSource) });
+    }
+
+    const response: AddToProjectResponse = { results };
+    res.status(200).json(response);
   };
 }

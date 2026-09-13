@@ -29,7 +29,7 @@ async function makeYouTubeSource(projectId: number) {
 }
 
 async function makeDiscordSource(projectId: number) {
-  const { source } = await createDiscordSource(pool, { projectId, externalId: randomId("attach"), sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1&is=2&hm=3" });
+  const { source } = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId, externalId: randomId("attach"), sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4?ex=1&is=2&hm=3" });
   return source;
 }
 

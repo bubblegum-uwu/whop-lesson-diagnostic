@@ -7,7 +7,8 @@ import { createJob } from "../src/db/analysisJobsRepo.js";
 import { createSynthesisRun } from "../src/db/synthesisRunsRepo.js";
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import { createGetProjectSourcesHandler, createAddYouTubeSourceHandler, createAddDiscordSourceHandler, type ProjectSource } from "../src/http/routes/projectSources.js";
-import { getProjectSourceMedia } from "../src/db/projectSourceMediaRepo.js";
+import { getProjectSourceById } from "../src/db/projectSourcesRepo.js";
+import { getContentAssetMedia } from "../src/db/contentAssetsRepo.js";
 import { DiscordAttachmentDownloadError } from "../src/discord/downloadDiscordAttachment.js";
 import { listProjects } from "../src/db/projectsRepo.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
@@ -383,10 +384,11 @@ async function callAddDiscordHandler(
   projectId: string,
   url: unknown,
   downloadDiscordAttachment: ReturnType<typeof fakeDownloadDiscordAttachment> = fakeDownloadDiscordAttachment(),
+  knoveraOperator: string = randomId("identity"),
 ) {
   const handler = createAddDiscordSourceHandler({ pool, downloadDiscordAttachment });
   const { res, statusCode, body } = makeResponse();
-  await handler({ params: { projectId }, body: { url } } as unknown as Request, res);
+  await handler({ params: { projectId }, body: { url }, knoveraOperator } as unknown as Request, res);
   return {
     statusCode: statusCode(),
     body: body() as { source?: ProjectSource; duplicate?: boolean; error?: { type: string; message: string } },
@@ -415,7 +417,8 @@ describe("POST /api/projects/:projectId/sources/discord (Phase 4I)", () => {
 
     expect(statusCode).toBe(201);
     expect(download).toHaveBeenCalledWith(DISCORD_URL);
-    const media = await getProjectSourceMedia(pool, body.source!.id);
+    const stored = await getProjectSourceById(pool, body.source!.id);
+    const media = await getContentAssetMedia(pool, stored!.contentAssetId!);
     expect(media?.content.toString()).toBe("real-bytes-here");
     expect(media?.contentType).toBe("video/quicktime");
     expect(media?.byteSize).toBe(15);
@@ -426,8 +429,14 @@ describe("POST /api/projects/:projectId/sources/discord (Phase 4I)", () => {
     const failingDownload = vi.fn(async () => {
       throw new DiscordAttachmentDownloadError("Could not download this Discord attachment (HTTP 403) — the link may already be invalid or expired.");
     });
+    // A never-before-used attachment id (unlike the shared DISCORD_URL
+    // constant other tests in this file already successfully captured) —
+    // otherwise, under the Phase 4K-B (revised) shared-content-asset model,
+    // this identity's asset for DISCORD_URL might already exist from an
+    // earlier test, so the download would never be re-attempted here.
+    const freshDiscordUrl = "https://cdn.discordapp.com/attachments/123456789012345678/555555555555555501/clip.mp4?ex=1&is=2&hm=3";
 
-    const { statusCode, body } = await callAddDiscordHandler(String(project.id), DISCORD_URL, failingDownload);
+    const { statusCode, body } = await callAddDiscordHandler(String(project.id), freshDiscordUrl, failingDownload);
 
     expect(statusCode).toBe(502);
     expect(body.error?.type).toBe("discord_media_unavailable");

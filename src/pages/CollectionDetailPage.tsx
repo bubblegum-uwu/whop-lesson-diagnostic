@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysisDrawer";
+import { RowActionsMenu } from "../components/RowActionsMenu";
+import { AddToProjectDialog } from "../components/AddToProjectDialog";
 import { useResolvedProject } from "../lib/useResolvedProject";
 import {
   getSourceCollection,
@@ -65,9 +67,19 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   const [viewingSourceId, setViewingSourceId] = useState<number | null>(null);
   const [viewingStatus, setViewingStatus] = useState<ProjectSourceAnalysisStatus | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [addToProjectItem, setAddToProjectItem] = useState<CatalogItemSummary | null>(null);
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
   const collectionId = collectionIdParam ? Number(collectionIdParam) : NaN;
+  // Live-validation Fix 3 — the backend rejects Analyze for any project
+  // whose type isn't TRADING_STRATEGIES (see
+  // projectSourceAnalysis.ts's own guard: "Analysis is only available for
+  // Trading Strategies projects right now"), because the worker still runs
+  // trading-specific extraction prompts. A GENERAL_KNOWLEDGE collection
+  // (e.g. Discord Knowledge) must never show an Analyze/Retry/Re-analyze
+  // control that would inevitably 400 — mirrors SourcesPage's own
+  // isTradingStrategies gate exactly, so the two pages stay consistent.
+  const isTradingStrategies = projectState.phase === "resolved" && projectState.project.projectType === "TRADING_STRATEGIES";
 
   async function load(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setState({ phase: "loading" });
@@ -279,14 +291,21 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
             </div>
           )}
 
-          <div className="knovera-synthesis-set-detail-actions">
-            <button type="button" className="link-button" onClick={selectAllUnanalyzed}>
-              Select All Unanalyzed
-            </button>
-            <button type="button" disabled={busy || selected.size === 0} onClick={() => void handleAnalyzeSelected()}>
-              {busy ? "Starting…" : `Analyze Selected (${selected.size})`}
-            </button>
-          </div>
+          {/* Live-validation Fix 3 — never offered for a GENERAL_KNOWLEDGE
+              collection (e.g. Discord Knowledge): there is nothing here
+              that analysis would accept yet (see isTradingStrategies
+              above), and checkbox selection exists only to feed this
+              toolbar. */}
+          {isTradingStrategies && (
+            <div className="knovera-synthesis-set-detail-actions">
+              <button type="button" className="link-button" onClick={selectAllUnanalyzed}>
+                Select All Unanalyzed
+              </button>
+              <button type="button" disabled={busy || selected.size === 0} onClick={() => void handleAnalyzeSelected()}>
+                {busy ? "Starting…" : `Analyze Selected (${selected.size})`}
+              </button>
+            </div>
+          )}
 
           <ul className="knovera-youtube-source-list">
             {state.items.map((item) => {
@@ -294,28 +313,35 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
               const isFailed = item.status === "FAILED";
               const isDone = item.status === "ANALYZED";
               const badgeClass = isFailed ? "kv-badge-danger" : isDone ? "kv-badge-accent" : "kv-badge-muted";
+              const title = item.title ?? item.sourceUrl;
               return (
                 <li key={item.id} className="kv-card knovera-youtube-source-row">
-                  <label className="knovera-synthesis-set-source-checkbox">
-                    <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`Select ${item.title ?? item.sourceUrl}`} />
+                  {isTradingStrategies ? (
+                    <label className="knovera-synthesis-set-source-checkbox">
+                      <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`Select ${title}`} />
+                      <div className="knovera-youtube-source-main">
+                        <span className="knovera-youtube-source-title">{title}</span>
+                      </div>
+                    </label>
+                  ) : (
                     <div className="knovera-youtube-source-main">
-                      <span className="knovera-youtube-source-title">{item.title ?? item.sourceUrl}</span>
+                      <span className="knovera-youtube-source-title">{title}</span>
                     </div>
-                  </label>
+                  )}
                   <div className="knovera-youtube-source-actions">
                     <span className={`kv-badge ${badgeClass}`}>{STATUS_LABELS[item.status]}</span>
-                    {item.status === "NOT_ANALYZED" && (
+                    {isTradingStrategies && item.status === "NOT_ANALYZED" && (
                       <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeOne(item.id)}>
                         Analyze
                       </button>
                     )}
-                    {isPending && <span className="hint">Working…</span>}
-                    {isFailed && (
+                    {isTradingStrategies && isPending && <span className="hint">Working…</span>}
+                    {isTradingStrategies && isFailed && (
                       <button type="button" className="link-button" disabled={busy} onClick={() => void handleRetryOne(item.id)}>
                         Retry
                       </button>
                     )}
-                    {isDone && (
+                    {isTradingStrategies && isDone && (
                       <>
                         <button type="button" className="link-button" onClick={() => void openView(item.id)}>
                           View
@@ -324,6 +350,9 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
                           Re-analyze
                         </button>
                       </>
+                    )}
+                    {item.provider === "DISCORD" && (
+                      <RowActionsMenu items={[{ label: "Add to Project…", onClick: () => setAddToProjectItem(item) }]} />
                     )}
                   </div>
                 </li>
@@ -340,6 +369,17 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
         loading={false}
         onClose={() => setViewingSourceId(null)}
       />
+
+      {addToProjectItem && backendUrl && knoveraToken && resolvedProjectId != null && (
+        <AddToProjectDialog
+          backendUrl={backendUrl}
+          knoveraToken={knoveraToken}
+          projectId={resolvedProjectId}
+          sourceId={addToProjectItem.id}
+          sourceTitle={addToProjectItem.title ?? addToProjectItem.sourceUrl}
+          onClose={() => setAddToProjectItem(null)}
+        />
+      )}
     </div>
   );
 }

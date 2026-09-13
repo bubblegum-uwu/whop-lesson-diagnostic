@@ -106,7 +106,11 @@ export function createAnalyzeProjectSourceHandler(deps: ProjectSourceAnalysisRou
       return;
     }
 
-    const job = await createJob(deps.pool, source.id, fingerprint);
+    // Live-validation Fix 4 — `force` is persisted ON the job itself, not
+    // just used to decide whether to reach this line: the worker needs it
+    // to know this specific episode must bypass its own fingerprint-based
+    // idempotency short-circuit (see worker/projectSourceAnalysisLoop.ts).
+    const job = await createJob(deps.pool, source.id, fingerprint, force);
     try {
       await deps.jobTrigger.triggerRun();
     } catch (err) {
@@ -278,7 +282,7 @@ export function createBatchAnalyzeProjectSourcesHandler(deps: ProjectSourceAnaly
         continue;
       }
 
-      await createJob(deps.pool, source.id, fingerprint);
+      await createJob(deps.pool, source.id, fingerprint, force);
       anyQueued = true;
       results.push({ sourceId, kind: "queued" });
     }

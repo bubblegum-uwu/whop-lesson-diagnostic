@@ -11,9 +11,10 @@ import {
 } from "../src/http/routes/projectSourceAnalysis.js";
 import { issueKnoveraToken } from "../src/lib/knoveraToken.js";
 import { runProjectSourceAnalysisLoop } from "../src/worker/projectSourceAnalysisLoop.js";
-import { getProjectSourceMedia } from "../src/db/projectSourceMediaRepo.js";
+import { getProjectSourceById } from "../src/db/projectSourcesRepo.js";
+import { getContentAssetMedia } from "../src/db/contentAssetsRepo.js";
 import type { GeminiClient, GeminiFileRef } from "../src/gemini/client.js";
-import { createTestPool, randomId } from "./helpers/testDb.js";
+import { createTestPool, randomId, randomSnowflake } from "./helpers/testDb.js";
 
 const pool = createTestPool();
 const SECRET = "test-discord-durability-e2e-secret";
@@ -70,8 +71,14 @@ describe("Discord durability fix — real end-to-end acquisition + re-analysis (
 
     // The pasted URL still has to be a genuine-looking Discord CDN URL —
     // parseDiscordVideoUrl runs for real against this exact string inside
-    // the real route handler below.
-    const pastedDiscordUrl = "https://cdn.discordapp.com/attachments/123456789012345678/987654321098765432/clip.mp4?ex=1&is=2&hm=3";
+    // the real route handler below. The attachment id is freshly random
+    // per run (digits only, per lib/discordUrl.ts's SNOWFLAKE_PATTERN) —
+    // this test uses the REAL, fixed "knovera-operator" identity
+    // (issueKnoveraToken below), so a hardcoded id would collide with the
+    // shared content_assets row a previous run of this same test already
+    // created for that identity, making the download-call assertion below
+    // flaky across repeated runs rather than isolated per invocation.
+    const pastedDiscordUrl = `https://cdn.discordapp.com/attachments/123456789012345678/${randomSnowflake()}/clip.mp4?ex=1&is=2&hm=3`;
 
     // The one injected seam: where bytes are actually fetched FROM. A real
     // HTTP GET, just against the local fixture instead of Discord's real
@@ -126,7 +133,8 @@ describe("Discord durability fix — real end-to-end acquisition + re-analysis (
       expect(realDownloadAgainstFixture).toHaveBeenCalledTimes(1);
       expect(requestCount).toBe(1);
 
-      const persisted = await getProjectSourceMedia(pool, sourceId);
+      const capturedSource = await getProjectSourceById(pool, sourceId);
+      const persisted = await getContentAssetMedia(pool, capturedSource!.contentAssetId!);
       expect(persisted?.content.equals(videoBytes)).toBe(true);
 
       // 4) Analyze.

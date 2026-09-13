@@ -1,9 +1,10 @@
 import { loadConfig } from "./config.js";
 import { createApp } from "./http/app.js";
-import { buildWorkerLoopDeps, buildSynthesisWorkerDeps, buildProjectSourceAnalysisWorkerDeps } from "./workerDeps.js";
+import { buildWorkerLoopDeps, buildSynthesisWorkerDeps, buildProjectSourceAnalysisWorkerDeps, buildDiscordCaptureWorkerDeps } from "./workerDeps.js";
 import { runWorkerLoop } from "./worker/mainLoop.js";
 import { runSynthesisLoop } from "./worker/synthesisLoop.js";
 import { runProjectSourceAnalysisLoop } from "./worker/projectSourceAnalysisLoop.js";
+import { runDiscordCaptureLoop } from "./worker/discordCaptureLoop.js";
 import { globalRedactor } from "./lib/redact.js";
 import { logger } from "./lib/logger.js";
 
@@ -15,6 +16,7 @@ globalRedactor.register(config.geminiApiKey);
 globalRedactor.register(config.db.password);
 globalRedactor.register(config.refreshTokenEncryptionKey);
 if (config.youtubeApiKey) globalRedactor.register(config.youtubeApiKey);
+if (config.discordBotToken) globalRedactor.register(config.discordBotToken);
 
 /**
  * One entrypoint, two roles, same container image — see config.ts. The
@@ -43,6 +45,7 @@ if (config.serviceRole === "worker") {
   runWorkerLoop(buildWorkerLoopDeps(config))
     .then(() => runSynthesisLoop(buildSynthesisWorkerDeps(config)))
     .then(() => runProjectSourceAnalysisLoop(buildProjectSourceAnalysisWorkerDeps(config)))
+    .then(() => runDiscordCaptureLoop(buildDiscordCaptureWorkerDeps(config)))
     .then(() => process.exit(0))
     .catch((err) => {
       logger.error("Worker execution failed", { message: err instanceof Error ? err.message : String(err) });

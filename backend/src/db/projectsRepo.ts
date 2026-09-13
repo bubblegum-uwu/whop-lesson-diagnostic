@@ -23,6 +23,15 @@ export interface ProjectStats {
   analyzedLessonCount: number;
   latestSynthesisStatus: string | null;
   latestSynthesisCompletedAt: Date | null;
+  /**
+   * Live-validation cleanup — a generic count of this project's
+   * `project_sources` rows (YouTube/Discord — see projectSourcesRepo.ts),
+   * independent of `courseCount`/`lessonCount` (which are Whop-only, via
+   * `courses`). Added so the Projects page can show an accurate source
+   * signal for a project whose only sources are YouTube/Discord, instead
+   * of falling back to "No sources yet" just because courseCount is 0.
+   */
+  projectSourceCount: number;
 }
 
 export type ProjectWithStats = Project & ProjectStats;
@@ -94,7 +103,7 @@ export async function getProjectForCourse(pool: Pool, courseId: number): Promise
  * project has at most one course today.
  */
 export async function getProjectStats(pool: Pool, projectId: number): Promise<ProjectStats> {
-  const [courseCountResult, lessonCountResult, analyzedCountResult, latestSynthesisResult] = await Promise.all([
+  const [courseCountResult, lessonCountResult, analyzedCountResult, latestSynthesisResult, projectSourceCountResult] = await Promise.all([
     pool.query<{ count: string }>(`SELECT COUNT(*) AS count FROM courses WHERE project_id = $1`, [projectId]),
     pool.query<{ count: string }>(
       `SELECT COUNT(*) AS count FROM lessons l JOIN courses c ON c.id = l.course_id WHERE c.project_id = $1`,
@@ -117,6 +126,7 @@ export async function getProjectStats(pool: Pool, projectId: number): Promise<Pr
        LIMIT 1`,
       [projectId],
     ),
+    pool.query<{ count: string }>(`SELECT COUNT(*) AS count FROM project_sources WHERE project_id = $1`, [projectId]),
   ]);
 
   const latest = latestSynthesisResult.rows[0];
@@ -126,5 +136,6 @@ export async function getProjectStats(pool: Pool, projectId: number): Promise<Pr
     analyzedLessonCount: Number(analyzedCountResult.rows[0].count),
     latestSynthesisStatus: latest?.status ?? null,
     latestSynthesisCompletedAt: latest?.completed_at ?? null,
+    projectSourceCount: Number(projectSourceCountResult.rows[0].count),
   };
 }

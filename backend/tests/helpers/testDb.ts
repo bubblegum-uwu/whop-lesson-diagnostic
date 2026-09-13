@@ -19,3 +19,21 @@ export function createTestPool(): Pool {
 export function randomId(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 12)}`;
 }
+
+/**
+ * A digits-only fake Discord snowflake, unique per call — for tests that
+ * paste a Discord attachment URL through the real parser (lib/discordUrl.ts's
+ * SNOWFLAKE_PATTERN requires `/^[0-9]{1,20}$/`, so randomId's alphanumeric
+ * output can't be used in a URL path segment). Combines the current time
+ * with a random suffix so it's also unique across repeated test RUNS, not
+ * just within one run — content_assets/project_sources rows created by a
+ * previous run of the same test (e.g. one using the real, fixed
+ * "knovera-operator" identity, which can't itself be randomized) persist
+ * in the shared test database and would otherwise collide with a
+ * hardcoded literal.
+ */
+export function randomSnowflake(): string {
+  return `${Date.now()}${Math.floor(Math.random() * 1000)
+    .toString()
+    .padStart(3, "0")}`;
+}

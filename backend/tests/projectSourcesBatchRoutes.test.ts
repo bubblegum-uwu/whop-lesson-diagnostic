@@ -29,10 +29,18 @@ function callBatchYouTube(projectId: string, urls: unknown) {
   return handler({ params: { projectId }, body: { urls } } as unknown as Request, res).then(() => ({ statusCode: statusCode(), body: body() as BatchAddSourcesResponse & { error?: { type: string } } }));
 }
 
-function callBatchDiscord(projectId: string, urls: unknown, downloadDiscordAttachment = fakeDownloadDiscordAttachment()) {
+function callBatchDiscord(
+  projectId: string,
+  urls: unknown,
+  downloadDiscordAttachment = fakeDownloadDiscordAttachment(),
+  knoveraOperator: string = randomId("identity"),
+) {
   const handler = createBatchAddDiscordSourcesHandler({ pool, downloadDiscordAttachment });
   const { res, statusCode, body } = makeResponse();
-  return handler({ params: { projectId }, body: { urls } } as unknown as Request, res).then(() => ({ statusCode: statusCode(), body: body() as BatchAddSourcesResponse & { error?: { type: string } } }));
+  return handler({ params: { projectId }, body: { urls }, knoveraOperator } as unknown as Request, res).then(() => ({
+    statusCode: statusCode(),
+    body: body() as BatchAddSourcesResponse & { error?: { type: string } },
+  }));
 }
 
 const V1 = "https://www.youtube.com/watch?v=aaaaaaaaaaa";

@@ -11,6 +11,7 @@ import { SynthesisSetDetailPage } from "./pages/SynthesisSetDetailPage";
 import { CollectionDetailPage } from "./pages/CollectionDetailPage";
 import { WhopCourseDetailPage } from "./pages/WhopCourseDetailPage";
 import { UsagePage } from "./pages/UsagePage";
+import { LinkDiscordPage } from "./pages/LinkDiscordPage";
 import type { FindWhopUserIdState } from "./components/FindWhopUserId";
 import {
   startWhopOAuth,
@@ -27,6 +28,7 @@ import { getWhopClientId } from "./lib/scarfaceCourseConfig";
 import { fetchWhopUserInfo } from "./lib/whopIdentify";
 import { knoveraLogin, knoveraLogout, getKnoveraMe, InvalidKnoveraCredentialsError } from "./lib/knoveraAuthApi";
 import { loadKnoveraToken, saveKnoveraToken, clearKnoveraToken } from "./lib/knoveraSession";
+import { takePendingDiscordLinkToken } from "./lib/discordLinkPending";
 import {
   establishAuthSession,
   getAuthStatus,
@@ -461,6 +463,15 @@ export default function App() {
       saveKnoveraToken(token);
       setKnoveraToken(token);
       setKnoveraLoginState({ phase: "idle" });
+      // Phase 4K-B (revised) — if this login was reached via LinkDiscordPage
+      // stashing a one-time Discord link token (because the operator wasn't
+      // signed in yet when they opened the "Save to Knovera" link), resume
+      // that flow instead of landing on /projects — see discordLinkPending.ts.
+      const pendingDiscordLinkToken = takePendingDiscordLinkToken();
+      if (pendingDiscordLinkToken) {
+        navigate(`/link-discord?token=${encodeURIComponent(pendingDiscordLinkToken)}`);
+        return;
+      }
       navigate("/projects");
     } catch (err) {
       setKnoveraLoginState({
@@ -520,6 +531,7 @@ export default function App() {
           )
         }
       />
+      <Route path="/link-discord" element={<LinkDiscordPage backendUrl={backendUrl} knoveraToken={knoveraToken} />} />
       <Route
         element={knoveraToken ? <AppShellLayout onLogout={handleKnoveraLogout} email={knoveraEmail} /> : <Navigate to="/login" replace />}
       >

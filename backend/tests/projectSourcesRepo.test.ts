@@ -148,7 +148,7 @@ describe("createDiscordSource (Phase 4I)", () => {
   it("inserts a new project_sources row with provider DISCORD, status READY, and no title/duration", async () => {
     const project = await makeProject();
     const { source, created } = await createDiscordSource(pool, {
-      projectId: project.id,
+      ownerIdentity: "test-identity", projectId: project.id,
       externalId: "987654321098765432",
       sourceUrl: DISCORD_URL,
     });
@@ -165,8 +165,8 @@ describe("createDiscordSource (Phase 4I)", () => {
 
   it("adding the same Discord attachment twice to the same project is a deterministic duplicate (created: false, same row)", async () => {
     const project = await makeProject();
-    const first = await createDiscordSource(pool, { projectId: project.id, externalId: "dupAttach001", sourceUrl: DISCORD_URL });
-    const second = await createDiscordSource(pool, { projectId: project.id, externalId: "dupAttach001", sourceUrl: DISCORD_URL });
+    const first = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId: project.id, externalId: "dupAttach001", sourceUrl: DISCORD_URL });
+    const second = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId: project.id, externalId: "dupAttach001", sourceUrl: DISCORD_URL });
 
     expect(first.created).toBe(true);
     expect(second.created).toBe(false);
@@ -176,8 +176,8 @@ describe("createDiscordSource (Phase 4I)", () => {
   it("the same Discord attachment id is allowed in two different projects (identity is scoped per-project, same as YouTube)", async () => {
     const projectA = await makeProject();
     const projectB = await makeProject();
-    const inA = await createDiscordSource(pool, { projectId: projectA.id, externalId: "sharedAttach1", sourceUrl: DISCORD_URL });
-    const inB = await createDiscordSource(pool, { projectId: projectB.id, externalId: "sharedAttach1", sourceUrl: DISCORD_URL });
+    const inA = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId: projectA.id, externalId: "sharedAttach1", sourceUrl: DISCORD_URL });
+    const inB = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId: projectB.id, externalId: "sharedAttach1", sourceUrl: DISCORD_URL });
 
     expect(inA.created).toBe(true);
     expect(inB.created).toBe(true);
@@ -187,7 +187,7 @@ describe("createDiscordSource (Phase 4I)", () => {
   it("YouTube and Discord sources with the same external_id string never collide — provider is part of the identity", async () => {
     const project = await makeProject();
     const yt = await createYouTubeSource(pool, { projectId: project.id, externalId: "sameIdString", sourceUrl: "https://www.youtube.com/watch?v=sameIdString" });
-    const disc = await createDiscordSource(pool, { projectId: project.id, externalId: "sameIdString", sourceUrl: DISCORD_URL });
+    const disc = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId: project.id, externalId: "sameIdString", sourceUrl: DISCORD_URL });
 
     expect(yt.created).toBe(true);
     expect(disc.created).toBe(true);
@@ -202,7 +202,7 @@ describe("createDiscordSource (Phase 4I)", () => {
 describe("deleteProjectSource (Phase 4I durability fix — compensating cleanup)", () => {
   it("removes the source so it never appears again", async () => {
     const project = await makeProject();
-    const { source } = await createDiscordSource(pool, { projectId: project.id, externalId: "toDelete1", sourceUrl: DISCORD_URL });
+    const { source } = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId: project.id, externalId: "toDelete1", sourceUrl: DISCORD_URL });
 
     await deleteProjectSource(pool, source.id);
 
@@ -213,8 +213,8 @@ describe("deleteProjectSource (Phase 4I durability fix — compensating cleanup)
   it("deleting one project's source never affects another project's sources", async () => {
     const projectA = await makeProject();
     const projectB = await makeProject();
-    const { source: sourceA } = await createDiscordSource(pool, { projectId: projectA.id, externalId: "toDelete2", sourceUrl: DISCORD_URL });
-    await createDiscordSource(pool, { projectId: projectB.id, externalId: "keepThis1", sourceUrl: DISCORD_URL });
+    const { source: sourceA } = await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId: projectA.id, externalId: "toDelete2", sourceUrl: DISCORD_URL });
+    await createDiscordSource(pool, { ownerIdentity: "test-identity", projectId: projectB.id, externalId: "keepThis1", sourceUrl: DISCORD_URL });
 
     await deleteProjectSource(pool, sourceA.id);
 
