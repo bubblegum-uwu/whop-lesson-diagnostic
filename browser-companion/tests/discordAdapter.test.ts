@@ -306,7 +306,7 @@ describe("findChannelName — metadata normalization", () => {
     }
   });
 
-  it("5: a clean descendant text node wins over the parent's composite label/text — structure preferred over string-stripping", () => {
+  it("normalizes correctly even when status/type/privacy text is split across separate child elements (not just one string)", () => {
     const nav = document.createElement("div");
     nav.setAttribute("aria-selected", "true");
     nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
@@ -342,6 +342,107 @@ describe("findChannelName — metadata normalization", () => {
     document.body.appendChild(nav);
     try {
       expect(findChannelName(document, CHANNEL_ID)).toBeNull();
+    } finally {
+      nav.remove();
+    }
+  });
+});
+
+// PR #32 fourth live-validation follow-up — regression: the "prefer a
+// clean-looking descendant" heuristic from the previous fix let an
+// unread-count badge ("1") win over the real channel name. Replaced with:
+// an element's own aria-label (if present) always wins outright per the
+// ARIA spec; otherwise its accessible text EXCLUDING any aria-hidden="true"
+// descendant (also a real ARIA rule, not a guess) — never a scan that
+// picks "whichever descendant looks clean."
+describe("findChannelName — unread/status badges never win (regression)", () => {
+  function selectedNavItemEl(): HTMLElement {
+    const nav = document.createElement("div");
+    nav.setAttribute("aria-selected", "true");
+    nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
+    return nav;
+  }
+
+  it("1: an aria-hidden unread-count badge (\"1\") alongside the real channel name — the badge never wins", () => {
+    const nav = selectedNavItemEl();
+    const badge = document.createElement("span");
+    badge.setAttribute("aria-hidden", "true");
+    badge.textContent = "1";
+    const name = document.createTextNode("scarface-alerts");
+    nav.append(badge, name);
+
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("2: a composite aria-label plus an unrelated numeric descendant (\"1\") — the aria-label always wins, the descendant is never consulted", () => {
+    const nav = selectedNavItemEl();
+    nav.setAttribute("aria-label", "#unread, 🚨 | scarface-alerts (announcement channel), Private Channel (locked)");
+    const badge = document.createElement("span");
+    badge.textContent = "1";
+    nav.appendChild(badge);
+
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("3: a legitimate channel name containing digits (room-101) is never rejected or mangled", () => {
+    const nav = selectedNavItemEl();
+    nav.textContent = "room-101";
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("room-101");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("4: a legitimate channel name containing digits (options-0dte) is never rejected or mangled", () => {
+    const nav = selectedNavItemEl();
+    nav.textContent = "options-0dte";
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("options-0dte");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("5: an aria-hidden emoji/status descendant rendered BEFORE the real name text never wins", () => {
+    const nav = selectedNavItemEl();
+    const emoji = document.createElement("span");
+    emoji.setAttribute("aria-hidden", "true");
+    emoji.textContent = "🚨";
+    const name = document.createTextNode("scarface-alerts");
+    nav.append(emoji, name);
+
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("6: an aria-hidden lock/privacy descendant never becomes the name", () => {
+    const nav = selectedNavItemEl();
+    const lockStatus = document.createElement("span");
+    lockStatus.setAttribute("aria-hidden", "true");
+    lockStatus.textContent = "🔒 Private Channel (locked)";
+    const name = document.createTextNode("scarface-alerts");
+    nav.append(lockStatus, name);
+
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
     } finally {
       nav.remove();
     }

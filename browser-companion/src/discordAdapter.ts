@@ -203,42 +203,59 @@ function normalizeChannelNameText(text: string): string | null {
 }
 
 /**
- * Prefers DOM structure over string-stripping where possible: looks for a
- * leaf descendant (no nested elements of its own) whose OWN text doesn't
- * itself look composite (no comma/parenthesis/divider/colon) — this is
- * typically the visible channel-name text node rendered separately from a
- * parent element's fuller accessible label/screen-reader text. Returns
- * null (never a guess) when no such clean descendant exists, so the
- * caller falls back to normalizing the element's own label text instead.
+ * Computes an element's accessible text the way assistive tech does: text
+ * from itself and its descendants, EXCLUDING anything under an
+ * `aria-hidden="true"` node. This is a real, spec-defined ARIA rule (not
+ * an invented heuristic) — and it is exactly why it's safe here: a
+ * decorative unread-count badge or status icon is routinely marked
+ * `aria-hidden="true"` precisely because its meaning (if any) is already
+ * folded into the element's own `aria-label`, so a badge marked this way
+ * can never leak into the computed text no matter what it contains (a
+ * count, an emoji, anything).
  */
-function findCleanDescendantText(el: Element): string | null {
-  for (const node of el.querySelectorAll("*")) {
-    if (node.children.length > 0) continue;
-    const text = node.textContent?.trim();
-    if (!text || /[,()|︱:]/.test(text)) continue;
-    const withoutHash = stripDecorativeHash(text);
-    // Require at least one real (Latin-alphanumeric) character — rules out
-    // a lone status icon/emoji glyph (e.g. "🚨") being mistaken for the
-    // channel name simply because it, too, contains no comma/paren/divider.
-    if (withoutHash.length > 0 && /[a-zA-Z0-9]/.test(withoutHash)) return withoutHash;
+function computeAccessibleText(el: Element): string {
+  let text = "";
+  for (const node of Array.from(el.childNodes)) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += node.textContent ?? "";
+    } else if (node.nodeType === Node.ELEMENT_NODE) {
+      const child = node as Element;
+      if (child.getAttribute("aria-hidden") === "true") continue;
+      text += computeAccessibleText(child);
+    }
   }
-  return null;
+  return text;
 }
 
-/** The channel-name candidate for one matched element: a clean descendant text node if one exists, otherwise the element's own aria-label/textContent run through the composite-label normalizer. */
-function extractChannelNameFromElement(el: Element, preferAriaLabel: boolean): string | null {
-  const descendant = findCleanDescendantText(el);
-  if (descendant) return descendant;
-
-  const ariaLabel = preferAriaLabel ? el.getAttribute("aria-label") : null;
-  const raw = (ariaLabel ?? el.textContent)?.trim();
+/**
+ * The channel-name candidate for one matched element. Deliberately NOT a
+ * scan over descendants guessing which one "looks like a name" (that
+ * approach previously let an unrelated unread-count badge win) — instead,
+ * exactly two sources are ever considered, in order:
+ *
+ *   1. The element's own `aria-label`, if present — per the ARIA spec this
+ *      IS the element's accessible name outright, overriding all
+ *      descendant content, which is exactly why Discord (and most UI
+ *      libraries) can safely compose unread/status/type/privacy metadata
+ *      into it: assistive tech reads only this string, never the
+ *      individual child nodes, so normalizing it is the correct move.
+ *   2. Otherwise, this element's own accessible TEXT (computeAccessibleText
+ *      above) — every descendant's text except whatever sits under an
+ *      aria-hidden="true" node.
+ *
+ * Both sources are run through the same normalizeChannelNameText pipeline
+ * to strip whatever status/category/type metadata they still contain.
+ */
+function extractChannelNameFromElement(el: Element): string | null {
+  const ariaLabel = el.getAttribute("aria-label");
+  const raw = (ariaLabel ?? computeAccessibleText(el))?.trim();
   return raw ? normalizeChannelNameText(raw) : null;
 }
 
 function findSelectedNavItemChannelName(root: ParentNode, channelId: string): string | null {
   for (const candidate of root.querySelectorAll(SELECTED_NAV_ITEM_SELECTOR)) {
     if (!isCorrelatedToChannelId(candidate, channelId)) continue;
-    const name = extractChannelNameFromElement(candidate, false);
+    const name = extractChannelNameFromElement(candidate);
     if (name) return name;
   }
   return null;
@@ -247,7 +264,7 @@ function findSelectedNavItemChannelName(root: ParentNode, channelId: string): st
 function findChannelCorrelatedHeaderElementName(root: ParentNode, channelId: string): string | null {
   for (const candidate of root.querySelectorAll(ID_CORRELATED_SELECTOR)) {
     if (!isBeforeMessageList(root, candidate) || !isCorrelatedToChannelId(candidate, channelId)) continue;
-    const name = extractChannelNameFromElement(candidate, true);
+    const name = extractChannelNameFromElement(candidate);
     if (name) return name;
   }
   return null;
@@ -256,11 +273,8 @@ function findChannelCorrelatedHeaderElementName(root: ParentNode, channelId: str
 function findGenericHeadingChannelName(root: ParentNode): string | null {
   for (const heading of root.querySelectorAll(HEADING_SELECTOR)) {
     if (!isBeforeMessageList(root, heading)) continue;
-    const text = heading.textContent?.trim();
-    if (text) {
-      const normalized = normalizeChannelNameText(text);
-      if (normalized) return normalized;
-    }
+    const name = extractChannelNameFromElement(heading);
+    if (name) return name;
   }
   return null;
 }
