@@ -558,3 +558,90 @@ describe("runProjectSourceAnalysisLoop (Phase 4H-B)", () => {
     expect(after).toEqual(before);
   });
 });
+
+/**
+ * Live-validation Fix 4 — `force=true` re-analyze was not actually
+ * re-analyzing: the worker's own fingerprint-based idempotency
+ * short-circuit (see the "second job was skipped, not re-analyzed" test
+ * above, which is the CORRECT behavior for a non-forced repeat) doesn't
+ * know the difference between "this is genuinely the same request
+ * arriving twice" and "the operator explicitly asked to bypass the cached
+ * result." `job.forceReanalysis` (persisted at job-creation time — see
+ * db/projectSourceAnalysisJobsRepo.ts's createJob) is the fix: it lets a
+ * forced job skip the short-circuit while a normal repeat still benefits
+ * from it, without ever weakening analysisFingerprint's meaning.
+ */
+describe("runProjectSourceAnalysisLoop — force=true re-analysis (Fix 4)", () => {
+  it("1: a normal (non-forced) repeated job still reuses the existing analysis — no second Gemini call, no second analysis row", async () => {
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+    const fingerprint = computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL });
+
+    const firstJob = await createJob(pool, source.id, fingerprint);
+    const { deps, gemini } = makeDeps();
+    await runProjectSourceAnalysisLoop(deps);
+    // Two-pass extraction (strategy + knowledge) — 2 calls for ONE run.
+    expect((gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+
+    const secondJob = await createJob(pool, source.id, fingerprint); // forceReanalysis defaults to false
+    await runProjectSourceAnalysisLoop(deps);
+
+    expect((gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2); // never called again
+    expect((await getJob(pool, secondJob.jobId))?.status).toBe("COMPLETED");
+    expect(Number((await pool.query(`SELECT COUNT(*) AS count FROM project_source_analyses WHERE project_source_id = $1`, [source.id])).rows[0].count)).toBe(1);
+    // The one analysis row still belongs to the FIRST job.
+    const analysis = await getLatestByProjectSource(pool, source.id);
+    expect(analysis?.jobId).toBe(firstJob.jobId);
+  });
+
+  it("2/3: a forceReanalysis:true job does NOT short-circuit on the same fingerprint — it calls Gemini for real", async () => {
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+    const fingerprint = computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL });
+
+    await createJob(pool, source.id, fingerprint);
+    const { deps, gemini } = makeDeps();
+    await runProjectSourceAnalysisLoop(deps);
+    expect((gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+
+    const forcedJob = await createJob(pool, source.id, fingerprint, true);
+    await runProjectSourceAnalysisLoop(deps);
+
+    // Real second execution — Gemini was genuinely called again, never
+    // short-circuited just because a completed analysis already existed
+    // under this fingerprint. 2 more two-pass calls = 4 total.
+    expect((gemini.analyzeVideo as ReturnType<typeof vi.fn>).mock.calls.length).toBe(4);
+    expect((await getJob(pool, forcedJob.jobId))?.status).toBe("COMPLETED");
+  });
+
+  it("4/5: a forced job persists its OWN second project_source_analyses row (its own job_id) while the prior analysis remains intact", async () => {
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+    const fingerprint = computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: GEMINI_MODEL });
+
+    const firstJob = await createJob(pool, source.id, fingerprint);
+    const { deps: firstDeps } = makeDeps();
+    await runProjectSourceAnalysisLoop(firstDeps);
+    const firstAnalysis = await getLatestByProjectSource(pool, source.id);
+    expect(firstAnalysis?.jobId).toBe(firstJob.jobId);
+
+    const forcedJob = await createJob(pool, source.id, fingerprint, true);
+    const { deps: secondDeps } = makeDeps(); // a fresh Gemini mock — proves this run's own upload/analyze happened
+    await runProjectSourceAnalysisLoop(secondDeps);
+
+    const rows = await pool.query<{ job_id: string }>(`SELECT job_id FROM project_source_analyses WHERE project_source_id = $1 ORDER BY completed_at ASC`, [source.id]);
+    expect(rows.rows).toHaveLength(2);
+    expect(rows.rows.map((r) => r.job_id)).toEqual([firstJob.jobId, forcedJob.jobId]);
+
+    // The prior analysis is completely untouched (same row, same job_id).
+    const stillFirst = await pool.query(`SELECT job_id FROM project_source_analyses WHERE job_id = $1`, [firstJob.jobId]);
+    expect(stillFirst.rows).toHaveLength(1);
+
+    // getLatestByProjectSource (ordered by completed_at DESC) now returns
+    // the forced job's own row — "latest completed persisted analysis"
+    // behaves correctly with no code change needed there.
+    const latest = await getLatestByProjectSource(pool, source.id);
+    expect(latest?.jobId).toBe(forcedJob.jobId);
+  });
+
+});

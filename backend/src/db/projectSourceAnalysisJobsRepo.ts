@@ -29,6 +29,15 @@ export interface ProjectSourceAnalysisJob {
   nextRetryAt: Date | null;
   errorType: string | null;
   sanitizedError: string | null;
+  /**
+   * Live-validation Fix 4 — true only for a job created by an explicit
+   * `force=true` Analyze/Re-analyze request. `analysisFingerprint` still
+   * identifies analyzer/model/input-version, NOT execution identity — this
+   * is the ONLY signal the worker uses to decide whether its own
+   * fingerprint-based idempotency short-circuit applies to this job (see
+   * worker/projectSourceAnalysisLoop.ts's processOneProjectSourceJob).
+   */
+  forceReanalysis: boolean;
 }
 
 interface JobRow {
@@ -46,6 +55,7 @@ interface JobRow {
   next_retry_at: Date | null;
   error_type: string | null;
   sanitized_error: string | null;
+  force_reanalysis: boolean;
 }
 
 function mapRow(row: JobRow): ProjectSourceAnalysisJob {
@@ -64,20 +74,32 @@ function mapRow(row: JobRow): ProjectSourceAnalysisJob {
     nextRetryAt: row.next_retry_at,
     errorType: row.error_type,
     sanitizedError: row.sanitized_error,
+    forceReanalysis: row.force_reanalysis,
   };
 }
 
 const JOB_COLUMNS = `job_id, project_source_id, analysis_fingerprint, status, attempt_count,
   lease_owner, lease_expires_at, queued_at, started_at, completed_at, last_heartbeat_at,
-  next_retry_at, error_type, sanitized_error`;
+  next_retry_at, error_type, sanitized_error, force_reanalysis`;
 
-/** Creates a fresh QUEUED job for a project source. One row = one processing episode — same convention as analysis_jobs. */
-export async function createJob(db: Queryable, projectSourceId: number, analysisFingerprint: string): Promise<ProjectSourceAnalysisJob> {
+/**
+ * Creates a fresh QUEUED job for a project source. One row = one
+ * processing episode — same convention as analysis_jobs.
+ *
+ * `forceReanalysis` (default false) is persisted on the row itself so the
+ * worker knows — rather than infers from the fingerprint alone — whether
+ * this specific episode must bypass the "already have a completed analysis
+ * under this fingerprint" short-circuit (see
+ * worker/projectSourceAnalysisLoop.ts). A forced job's own
+ * project_source_analyses row is a genuinely new, independent history
+ * entry — the prior one is never touched or removed.
+ */
+export async function createJob(db: Queryable, projectSourceId: number, analysisFingerprint: string, forceReanalysis = false): Promise<ProjectSourceAnalysisJob> {
   const result = await db.query(
-    `INSERT INTO project_source_analysis_jobs (project_source_id, analysis_fingerprint, status)
-     VALUES ($1, $2, 'QUEUED')
+    `INSERT INTO project_source_analysis_jobs (project_source_id, analysis_fingerprint, status, force_reanalysis)
+     VALUES ($1, $2, 'QUEUED', $3)
      RETURNING ${JOB_COLUMNS}`,
-    [projectSourceId, analysisFingerprint],
+    [projectSourceId, analysisFingerprint, forceReanalysis],
   );
   return mapRow(result.rows[0] as JobRow);
 }

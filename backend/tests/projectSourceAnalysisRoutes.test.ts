@@ -158,7 +158,37 @@ describe("POST /api/projects/:projectId/sources/:sourceId/analyze (Phase 4H-B)",
 
     const { statusCode, body } = await callAnalyze(String(project.id), String(source.id), { force: true });
     expect(statusCode).toBe(202);
-    expect((body.job as { jobId: string }).jobId).not.toBe(job.jobId);
+    const newJob = body.job as { jobId: string; forceReanalysis: boolean };
+    expect(newJob.jobId).not.toBe(job.jobId);
+    // Live-validation Fix 4 — the route must persist force ON THE JOB
+    // ITSELF, not just use it to decide whether to create one: the worker
+    // needs this to know its own fingerprint short-circuit must not apply.
+    expect(newJob.forceReanalysis).toBe(true);
+  });
+
+  it("Fix 4 — a normal (non-forced) repeated Analyze creates a QUEUED job with forceReanalysis:false", async () => {
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+
+    const { body } = await callAnalyze(String(project.id), String(source.id));
+    expect((body.job as { forceReanalysis: boolean }).forceReanalysis).toBe(false);
+  });
+
+  it("Fix 4 (item 6) — force=true does NOT bypass the in-flight duplicate guard: a genuinely in-flight job is still returned as alreadyQueued, never a parallel forced job", async () => {
+    const project = await makeProject();
+    const source = await makeSource(project.id);
+
+    const first = await callAnalyze(String(project.id), String(source.id));
+    expect(first.statusCode).toBe(202);
+    const firstJobId = (first.body.job as { jobId: string }).jobId;
+
+    const forced = await callAnalyze(String(project.id), String(source.id), { force: true });
+    expect(forced.statusCode).toBe(202);
+    expect(forced.body.alreadyQueued).toBe(true);
+    expect((forced.body.job as { jobId: string }).jobId).toBe(firstJobId);
+
+    const countResult = await pool.query<{ count: string }>(`SELECT COUNT(*) AS count FROM project_source_analysis_jobs WHERE project_source_id = $1`, [source.id]);
+    expect(Number(countResult.rows[0].count)).toBe(1);
   });
 });
 

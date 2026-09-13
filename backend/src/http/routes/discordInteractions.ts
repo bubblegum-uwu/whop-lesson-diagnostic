@@ -8,6 +8,7 @@ import { createSourceCollection } from "../../db/sourceCollectionsRepo.js";
 import { createDiscordCaptureJob } from "../../db/discordCaptureJobsRepo.js";
 import { isSupportedVideoFilename } from "../../lib/discordUrl.js";
 import { logger } from "../../lib/logger.js";
+import type { JobTrigger } from "../../jobs/runJobTrigger.js";
 
 export interface RawBodyRequest extends Request {
   /** Populated by app.ts's express.json({ verify }) — the exact bytes Discord signed, captured before JSON parsing (spec section 14: signature verification must use the raw body, never a re-serialized one). */
@@ -20,6 +21,17 @@ export interface DiscordInteractionsRouteDeps {
   discordPublicKey?: string;
   /** Where the account-linking page lives — this service's own frontend origin (same value used elsewhere, e.g. discordConnections.ts's allowedOrigin). */
   allowedOrigin: string;
+  /**
+   * The same Cloud Run Job trigger every other enqueue route uses (see
+   * http/routes/analysisJobs.ts) — fire-and-forget, called once after
+   * durably persisting this interaction's capture job(s) so they are
+   * processed promptly instead of waiting for the next scheduled/other
+   * worker execution. A failed trigger call is never fatal to the
+   * interaction response: the jobs are already durably queued in
+   * Postgres, and the Cloud Scheduler safety net
+   * (/internal/ensure-worker-running) recovers a missed trigger.
+   */
+  jobTrigger: JobTrigger;
 }
 
 // Discord Interactions API — verified against current documentation
@@ -194,6 +206,30 @@ export function createDiscordInteractionsHandler(deps: DiscordInteractionsRouteD
         byteSize: attachment.size ?? null,
       });
     }
+
+    // Live-validation Fix 1 — the capture job(s) above are durable the
+    // moment createDiscordCaptureJob's INSERT commits, but nothing
+    // processed them until some OTHER worker execution happened to run
+    // (see worker/discordCaptureLoop.ts). Trigger a Job execution now.
+    //
+    // Deliberately NOT awaited before responding, unlike every other
+    // enqueue route's identical-looking call (analysisJobs.ts,
+    // projectSourceAnalysis.ts): Discord requires an interaction response
+    // within 3 seconds, a hard external deadline none of this codebase's
+    // other HTTP endpoints have. Awaiting a slow (or transiently hanging)
+    // Cloud Run Jobs API call here risks that deadline — Discord would
+    // then show "This interaction failed" even though the capture job was
+    // already durably queued and would still be picked up by the next
+    // scheduled worker execution regardless (see
+    // /internal/ensure-worker-running's safety net). This was identified
+    // as the likely cause of an intermittent "ephemeral response not
+    // consistently visible" symptom observed in live testing. Failure here
+    // is still logged, exactly as before — only the ordering changed.
+    void deps.jobTrigger.triggerRun().catch((err: unknown) => {
+      logger.error("Failed to trigger worker Job execution after Discord capture enqueue", {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    });
 
     // Spec section 27 — truthful, in-progress phrasing only; durable
     // capture has not happened yet at this point (see worker/discordCaptureLoop.ts).

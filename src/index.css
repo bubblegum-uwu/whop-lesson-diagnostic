@@ -1897,6 +1897,13 @@ button.kv-topnav-avatar:hover {
   font-weight: 600;
 }
 
+.knovera-project-card-badges {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--kv-space-2);
+}
+
 .knovera-project-card-source {
   margin: 0;
   font-size: 0.83rem;

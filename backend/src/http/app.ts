@@ -361,7 +361,7 @@ export function createApp(config: AppConfig): Express {
   // verification inside the handler, so it deliberately carries NO
   // knoveraAuth middleware. The account-link routes ARE Knovera-session-
   // gated (spec section 12: linking requires "normal Knovera login").
-  const discordInteractionsDeps = { pool, discordPublicKey: config.discordPublicKey, allowedOrigin: config.allowedOrigin };
+  const discordInteractionsDeps = { pool, discordPublicKey: config.discordPublicKey, allowedOrigin: config.allowedOrigin, jobTrigger };
   app.post("/api/discord/interactions", createDiscordInteractionsHandler(discordInteractionsDeps));
   const discordAccountLinkDeps = { pool };
   app.post("/api/discord/link", knoveraAuth, createConsumeDiscordLinkHandler(discordAccountLinkDeps));

@@ -103,6 +103,55 @@ describe("ProjectsPage", () => {
     expect(screen.queryByText("Whop")).not.toBeInTheDocument();
   });
 
+  // Live-validation Fix 2 — a GENERAL_KNOWLEDGE project must be a fully
+  // openable workspace (sources/catalog/Discord Knowledge inbox); only its
+  // synthesis functionality is unimplemented. Previously the Open button
+  // was disabled and the card showed a bare "Coming Soon" badge that
+  // implied the whole project was unusable, not just its synthesis.
+  describe("GENERAL_KNOWLEDGE projects are openable (only synthesis is not)", () => {
+    const DISCORD_KNOWLEDGE: ProjectSummary = {
+      id: 9,
+      name: "Discord Knowledge",
+      projectType: "GENERAL_KNOWLEDGE",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      courseCount: 0,
+      lessonCount: 0,
+      analyzedLessonCount: 0,
+      latestSynthesisStatus: null,
+      latestSynthesisCompletedAt: null,
+    };
+
+    it("shows the real project type label (never a bare 'Coming Soon' in its place) plus a separate, synthesis-scoped note", async () => {
+      stubFetch([DISCORD_KNOWLEDGE]);
+      renderProjects();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Discord Knowledge" })).toBeInTheDocument());
+
+      expect(screen.getByText("General Knowledge")).toBeInTheDocument();
+      expect(screen.getByText("Synthesis Coming Soon")).toBeInTheDocument();
+      // Never the old bare label that implied the whole project was unusable.
+      expect(screen.queryByText("Coming Soon")).not.toBeInTheDocument();
+    });
+
+    it("the Open button is never disabled, and clicking it navigates into the workspace", async () => {
+      stubFetch([DISCORD_KNOWLEDGE]);
+      renderProjects();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Discord Knowledge" })).toBeInTheDocument());
+
+      const openButton = screen.getByRole("button", { name: /Open/ });
+      expect(openButton).not.toBeDisabled();
+      fireEvent.click(openButton);
+      expect(screen.getByText("SOURCES_PAGE_MARKER")).toBeInTheDocument();
+    });
+
+    it("a TRADING_STRATEGIES project never shows the 'Synthesis Coming Soon' note", async () => {
+      stubFetch([MASTERMIND]);
+      renderProjects();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
+      expect(screen.queryByText("Synthesis Coming Soon")).not.toBeInTheDocument();
+    });
+  });
+
   it("clicking Open on MasterMind navigates into the project workspace using its real numeric id", async () => {
     stubFetch([MASTERMIND]);
     renderProjects();

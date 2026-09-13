@@ -189,8 +189,18 @@ async function processOneProjectSourceJob(job: ProjectSourceAnalysisJob, leaseOw
   // second job was queued for the same source before this one was
   // claimed). Never spend a Gemini call re-deriving it — mirrors
   // worker/mainLoop.ts's processOneJob.
+  //
+  // Live-validation Fix 4 — this short-circuit must NEVER apply to a job
+  // created by an explicit force=true Analyze/Re-analyze request: doing so
+  // silently turned "Re-analyze" into a no-op that just relabeled the
+  // FIRST analysis's result, without ever calling Gemini or persisting a
+  // second project_source_analyses row. `job.forceReanalysis` (persisted
+  // on the job itself at creation time — see
+  // db/projectSourceAnalysisJobsRepo.ts's createJob) is the explicit signal
+  // for this, never inferred from the fingerprint, which continues to mean
+  // only "analyzer/model/input-version identity."
   const existing = await findLatestByFingerprint(deps.pool, job.analysisFingerprint);
-  if (existing && (existing.status === "completed" || existing.status === "no_strategy")) {
+  if (!job.forceReanalysis && existing && (existing.status === "completed" || existing.status === "no_strategy")) {
     await markSucceeded(deps.pool, job.jobId, leaseOwner, existing.status === "completed" ? "COMPLETED" : "NO_STRATEGY");
     return;
   }

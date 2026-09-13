@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { consumeDiscordLinkToken, DiscordLinkApiError } from "../lib/discordAccountLinkApi";
 import { savePendingDiscordLinkToken } from "../lib/discordLinkPending";
@@ -32,6 +32,28 @@ export function LinkDiscordPage({ backendUrl, knoveraToken }: LinkDiscordPagePro
   const navigate = useNavigate();
   const token = searchParams.get("token");
   const [state, setState] = useState<LinkState>({ phase: "linking" });
+  // Fix 6 (live validation) — the token is single-use server-side, so a
+  // SECOND consume call for the same mount (e.g. React StrictMode's
+  // deliberate dev-only double-invoke of effects — see main.tsx) always
+  // comes back "invalid/expired/already used" even though the FIRST call
+  // actually succeeded. A ref (unlike a local `let`/state variable reset on
+  // every effect run) survives across StrictMode's synchronous
+  // mount→cleanup→remount of the SAME component instance, so it
+  // guarantees the consume request is only ever attempted once per mounted
+  // page — never making the backend token itself replayable (the backend
+  // still independently rejects a genuine second consume; this guard is
+  // purely about not ISSUING a redundant one from this browser tab).
+  //
+  // Deliberately no `cancelled`/cleanup-based guard around the setState
+  // calls below: with the ref above ensuring at most one request per
+  // mount, there is no "newer" request whose result the response could
+  // ever race against, and React 18+ safely no-ops a state update from a
+  // component that has genuinely unmounted by the time the promise
+  // settles (no warning, no leak) — adding one back would reintroduce
+  // exactly this bug, since StrictMode's synthetic cleanup would still
+  // fire (and flip a per-invocation `cancelled` flag) before the ONE real
+  // request's promise resolves.
+  const hasAttemptedConsumeRef = useRef(false);
 
   useEffect(() => {
     if (!token) {
@@ -44,23 +66,17 @@ export function LinkDiscordPage({ backendUrl, knoveraToken }: LinkDiscordPagePro
       navigate("/login");
       return;
     }
+    if (hasAttemptedConsumeRef.current) return;
+    hasAttemptedConsumeRef.current = true;
 
-    let cancelled = false;
     consumeDiscordLinkToken(backendUrl, knoveraToken, token)
-      .then(() => {
-        if (!cancelled) setState({ phase: "success" });
-      })
+      .then(() => setState({ phase: "success" }))
       .catch((err) => {
-        if (!cancelled) {
-          setState({
-            phase: "error",
-            message: err instanceof DiscordLinkApiError ? err.message : "Failed to link your Discord account. Please try again.",
-          });
-        }
+        setState({
+          phase: "error",
+          message: err instanceof DiscordLinkApiError ? err.message : "Failed to link your Discord account. Please try again.",
+        });
       });
-    return () => {
-      cancelled = true;
-    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl, knoveraToken, token]);
 

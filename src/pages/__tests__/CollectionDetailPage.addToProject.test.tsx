@@ -124,3 +124,47 @@ describe("CollectionDetailPage — Add to Project (Phase 4K-B revised)", () => {
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/add-to-projects"))).toBe(false);
   });
 });
+
+// Live-validation Fix 3 — the backend rejects Analyze for any project
+// that isn't TRADING_STRATEGIES; a GENERAL_KNOWLEDGE collection (like
+// Discord Knowledge) must never show an actionable Analyze/Retry/
+// Re-analyze control that would inevitably 400 — while "Add to Project…"
+// stays available, since that never touches analysis at all.
+describe("CollectionDetailPage — no actionable analysis controls in GENERAL_KNOWLEDGE (Fix 3)", () => {
+  it("a NOT_ANALYZED item in a GENERAL_KNOWLEDGE collection shows the status but no Analyze button", async () => {
+    stubFetch();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("clip.mp4")).toBeInTheDocument());
+
+    expect(screen.getByText("Not analyzed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Analyze" })).not.toBeInTheDocument();
+    // Add to Project remains available — it never touches analysis.
+    expect(screen.getByRole("button", { name: "More actions" })).toBeInTheDocument();
+  });
+
+  it("never offers the bulk 'Select All Unanalyzed' / 'Analyze Selected' toolbar or per-item checkboxes in a GENERAL_KNOWLEDGE collection", async () => {
+    stubFetch();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("clip.mp4")).toBeInTheDocument());
+
+    expect(screen.queryByRole("button", { name: "Select All Unanalyzed" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Analyze Selected/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Select clip.mp4/ })).not.toBeInTheDocument();
+  });
+
+  it("a FAILED item in a GENERAL_KNOWLEDGE collection never shows a Retry button", async () => {
+    const failedFetch = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT, OTHER_PROJECT] });
+      if (url.includes("/collections/1?") || url.endsWith("/collections/1")) {
+        return jsonResponse(200, { collection: COLLECTION, items: [{ ...DISCORD_ITEM, status: "FAILED" }], pagination: { limit: 200, offset: 0, totalCount: 1 } });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", failedFetch);
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("clip.mp4")).toBeInTheDocument());
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+});
