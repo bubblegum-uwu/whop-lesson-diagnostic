@@ -219,6 +219,12 @@ export async function listProjectSourcesByProjectId(pool: Pool, projectId: numbe
   return result.rows.map(mapRow);
 }
 
+/** Phase 4L — every project_source id currently grouped under this collection, for "Analyze Collection"'s server-side membership resolution (never a caller-supplied list). */
+export async function listProjectSourceIdsByCollectionId(pool: Pool, collectionId: number): Promise<number[]> {
+  const result = await pool.query<{ id: string }>(`SELECT id FROM project_sources WHERE collection_id = $1`, [collectionId]);
+  return result.rows.map((r) => Number(r.id));
+}
+
 /**
  * Phase 4H-B — a single source by id, used by the analyze/retry/analysis
  * routes and the worker. Callers MUST additionally check

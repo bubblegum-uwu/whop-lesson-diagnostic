@@ -34,6 +34,7 @@ const YOUTUBE_SOURCE = {
   durationSeconds: null,
   status: "READY",
   createdAt: "2026-01-05T00:00:00.000Z",
+  collectionId: null,
 };
 
 function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps {

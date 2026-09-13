@@ -11,8 +11,10 @@ import {
   deleteSourceCollection,
   CatalogApiError,
   batchAnalyzeProjectSources,
+  analyzeCollection,
   type CatalogCollectionSummary,
   type CatalogItemSummary,
+  type AnalyzeCollectionResult,
 } from "../lib/catalogApi";
 import {
   analyzeProjectSource,
@@ -68,6 +70,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   const [viewingStatus, setViewingStatus] = useState<ProjectSourceAnalysisStatus | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [addToProjectItem, setAddToProjectItem] = useState<CatalogItemSummary | null>(null);
+  const [analyzeCollectionResult, setAnalyzeCollectionResult] = useState<AnalyzeCollectionResult | null>(null);
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
   const collectionId = collectionIdParam ? Number(collectionIdParam) : NaN;
@@ -126,6 +129,29 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   function selectAllUnanalyzed() {
     if (state.phase !== "loaded") return;
     setSelected(new Set(state.items.filter((i) => i.status === "NOT_ANALYZED" || i.status === "FAILED").map((i) => i.id)));
+  }
+
+  /**
+   * Phase 4L — "Analyze N Remaining." A real server-resolved batch op
+   * (never a client-enumerated id list capped at 50 — see
+   * catalogApi.analyzeCollection's doc comment), so this works regardless
+   * of how many items the collection holds, not just the first page loaded
+   * here. Never selects anything into a Synthesis Set.
+   */
+  async function handleAnalyzeCollection() {
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null) return;
+    setBusy(true);
+    setActionError(null);
+    setAnalyzeCollectionResult(null);
+    try {
+      const result = await analyzeCollection(backendUrl, knoveraToken, resolvedProjectId, collectionId);
+      setAnalyzeCollectionResult(result);
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof CatalogApiError ? err.message : "Failed to start analysis for this collection.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function handleAnalyzeSelected() {
@@ -206,6 +232,8 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
       setBusy(false);
     }
   }
+
+  const remainingCount = state.phase === "loaded" ? state.items.filter((i) => i.status !== "ANALYZED").length : 0;
 
   const viewingItem = state.phase === "loaded" ? state.items.find((i) => i.id === viewingSourceId) : undefined;
   const viewingSourceForDrawer: YouTubeProjectSource | DiscordProjectSource | null = viewingItem
@@ -301,14 +329,30 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
               above), and checkbox selection exists only to feed this
               toolbar. */}
           {isTradingStrategies && (
-            <div className="knovera-synthesis-set-detail-actions">
-              <button type="button" className="link-button" onClick={selectAllUnanalyzed}>
-                Select All Unanalyzed
-              </button>
-              <button type="button" disabled={busy || selected.size === 0} onClick={() => void handleAnalyzeSelected()}>
-                {busy ? "Starting…" : `Analyze Selected (${selected.size})`}
-              </button>
-            </div>
+            <>
+              {remainingCount > 0 && (
+                <div className="knovera-synthesis-set-detail-actions">
+                  <button type="button" disabled={busy} onClick={() => void handleAnalyzeCollection()}>
+                    {busy ? "Starting…" : `Analyze ${remainingCount} Remaining`}
+                  </button>
+                </div>
+              )}
+              {analyzeCollectionResult && (
+                <p className="hint" role="status">
+                  {analyzeCollectionResult.queued} queued · {analyzeCollectionResult.alreadyAnalyzed} already analyzed ·{" "}
+                  {analyzeCollectionResult.alreadyQueued} already queued · {analyzeCollectionResult.processing} processing ·{" "}
+                  {analyzeCollectionResult.failed} failed to queue
+                </p>
+              )}
+              <div className="knovera-synthesis-set-detail-actions">
+                <button type="button" className="link-button" onClick={selectAllUnanalyzed}>
+                  Select All Unanalyzed
+                </button>
+                <button type="button" disabled={busy || selected.size === 0} onClick={() => void handleAnalyzeSelected()}>
+                  {busy ? "Starting…" : `Analyze Selected (${selected.size})`}
+                </button>
+              </div>
+            </>
           )}
 
           <ul className="knovera-youtube-source-list">

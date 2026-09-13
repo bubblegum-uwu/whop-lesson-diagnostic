@@ -54,12 +54,16 @@ import {
   createDeleteSynthesisSetHandler,
   createAddSourceToSynthesisSetHandler,
   createRemoveSourceFromSynthesisSetHandler,
+  createBulkUpdateSynthesisSetSourcesHandler,
+  createBulkAddCollectionToSynthesisSetHandler,
+  createBulkRemoveCollectionFromSynthesisSetHandler,
 } from "./routes/synthesisSets.js";
 import {
   createAnalyzeProjectSourceHandler,
   createGetProjectSourceAnalysisHandler,
   createRetryProjectSourceAnalysisHandler,
   createBatchAnalyzeProjectSourcesHandler,
+  createAnalyzeCollectionHandler,
 } from "./routes/projectSourceAnalysis.js";
 import { createGetUsageHandler } from "./routes/usage.js";
 import { createDiscordInteractionsHandler, type RawBodyRequest } from "./routes/discordInteractions.js";
@@ -320,6 +324,15 @@ export function createApp(config: AppConfig): Express {
     knoveraAuth,
     createBatchAnalyzeProjectSourcesHandler(projectSourceAnalysisDeps),
   );
+  // Phase 4L — "Analyze Collection": resolves the collection's member
+  // source ids SERVER-SIDE (never a caller-supplied list, never capped at
+  // MAX_BATCH_ANALYZE_SOURCES), reusing the exact same queue engine as the
+  // routes above. Never touches Synthesis Set membership.
+  app.post(
+    "/api/projects/:projectId/collections/:collectionId/analyze",
+    knoveraAuth,
+    createAnalyzeCollectionHandler(projectSourceAnalysisDeps),
+  );
 
   // Phase 4J — Synthesis Sets: a persistent, named configuration of which
   // project_sources should be considered together, and its membership.
@@ -338,6 +351,26 @@ export function createApp(config: AppConfig): Express {
     "/api/projects/:projectId/synthesis-sets/:setId/sources/:sourceId",
     knoveraAuth,
     createRemoveSourceFromSynthesisSetHandler(projectsDeps),
+  );
+  // Phase 4L — bulk membership actions: an explicit id list (fine-tune
+  // "select/deselect all visible") and a whole-collection snapshot
+  // add/remove (collection-centric selection). Every id/collection is
+  // still validated server-side (ownership + eligibility) exactly like the
+  // singular route above — never a client-trusted shortcut.
+  app.post(
+    "/api/projects/:projectId/synthesis-sets/:setId/sources/bulk",
+    knoveraAuth,
+    createBulkUpdateSynthesisSetSourcesHandler(projectsDeps),
+  );
+  app.post(
+    "/api/projects/:projectId/synthesis-sets/:setId/collections/:collectionId",
+    knoveraAuth,
+    createBulkAddCollectionToSynthesisSetHandler(projectsDeps),
+  );
+  app.delete(
+    "/api/projects/:projectId/synthesis-sets/:setId/collections/:collectionId",
+    knoveraAuth,
+    createBulkRemoveCollectionFromSynthesisSetHandler(projectsDeps),
   );
 
   // Phase 4E — the project-aware counterpart to /api/course/synthesis*

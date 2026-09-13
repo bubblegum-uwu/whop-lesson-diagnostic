@@ -59,11 +59,23 @@ const ITEM_NOT_ANALYZED = {
   eligibleForSynthesis: false,
 };
 
-function stubFetch(overrides: { onAnalyzeBatch?: (body: unknown) => void; onAnalyzeOne?: (sourceId: string) => void } = {}) {
+function stubFetch(
+  overrides: {
+    onAnalyzeBatch?: (body: unknown) => void;
+    onAnalyzeOne?: (sourceId: string) => void;
+    onAnalyzeCollection?: () => void;
+    projectType?: "TRADING_STRATEGIES" | "GENERAL_KNOWLEDGE";
+  } = {},
+) {
+  const project = overrides.projectType ? { ...PROJECT, projectType: overrides.projectType } : PROJECT;
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-    if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+    if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [project] });
     if (url.includes("/collections/1?") || url.endsWith("/collections/1")) {
       return jsonResponse(200, { collection: COLLECTION, items: [ITEM_ANALYZED, ITEM_NOT_ANALYZED], pagination: { limit: 200, offset: 0, totalCount: 2 } });
+    }
+    if (url.endsWith("/collections/1/analyze") && init?.method === "POST") {
+      overrides.onAnalyzeCollection?.();
+      return jsonResponse(200, { queued: 1, alreadyAnalyzed: 1, alreadyQueued: 0, processing: 0, failed: 0 });
     }
     if (url.endsWith("/sources/analyze-batch") && init?.method === "POST") {
       overrides.onAnalyzeBatch?.(JSON.parse(init.body as string));
@@ -152,5 +164,58 @@ describe("CollectionDetailPage (Phase 4K)", () => {
     await waitFor(() => expect(screen.getByText("This collection doesn't exist.")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /Back to Sources/ }));
     expect(screen.getByText("SOURCES_MARKER")).toBeInTheDocument();
+  });
+});
+
+describe("CollectionDetailPage — Analyze Collection (Phase 4L)", () => {
+  it("shows an 'Analyze N Remaining' button sized to the not-yet-analyzed count", async () => {
+    stubFetch();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Analyze 1 Remaining" })).toBeInTheDocument());
+  });
+
+  it("clicking it calls the collection-analyze endpoint and shows a concise result summary", async () => {
+    let called = false;
+    stubFetch({ onAnalyzeCollection: () => (called = true) });
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Analyze 1 Remaining" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Analyze 1 Remaining" }));
+    await waitFor(() => expect(called).toBe(true));
+    expect(await screen.findByText(/1 queued/)).toBeInTheDocument();
+    expect(screen.getByText(/1 already analyzed/)).toBeInTheDocument();
+  });
+
+  it("is never shown for a GENERAL_KNOWLEDGE collection (no Analyze/Retry controls there at all)", async () => {
+    stubFetch({ projectType: "GENERAL_KNOWLEDGE" });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Not Analyzed Video")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /Analyze.*Remaining/ })).not.toBeInTheDocument();
+  });
+
+  it("is never shown when every item is already analyzed (remaining count is zero)", async () => {
+    const fullyAnalyzedCollection = { ...COLLECTION, itemCount: 1, analyzedCount: 1 };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+        if (url.includes("/collections/1?") || url.endsWith("/collections/1")) {
+          return jsonResponse(200, { collection: fullyAnalyzedCollection, items: [ITEM_ANALYZED], pagination: { limit: 200, offset: 0, totalCount: 1 } });
+        }
+        return jsonResponse(404, {});
+      }),
+    );
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Analyzed Video")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: /Analyze.*Remaining/ })).not.toBeInTheDocument();
+  });
+
+  it("never touches Synthesis Set membership — Analyze Collection is analysis only", async () => {
+    const fetchMock = stubFetch();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Analyze 1 Remaining" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Analyze 1 Remaining" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/collections/1/analyze"), expect.anything()));
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/synthesis-sets"))).toBe(false);
   });
 });

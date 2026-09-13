@@ -143,3 +143,23 @@ export async function getByJobId(db: Queryable, jobId: string): Promise<ProjectS
   const result = await db.query(`SELECT ${COLUMNS} FROM project_source_analyses WHERE job_id = $1`, [jobId]);
   return result.rows[0] ? mapRow(result.rows[0] as ProjectSourceAnalysisRow) : null;
 }
+
+/**
+ * Phase 4L — the batched form of "does this source have a usable
+ * successful analysis" (the exact same rule getLatestByProjectSource's
+ * non-null return already embodies: a completed/no_strategy row exists),
+ * scoped to one collection's members in one round trip. This — not a new
+ * boolean flag anywhere — is the Synthesis Set eligibility rule: because
+ * this table only ever holds terminal-successful rows (a FAILED job never
+ * writes here), an older success plus a newer failed re-analysis attempt
+ * still makes a source eligible.
+ */
+export async function listEligibleProjectSourceIdsInCollection(db: Queryable, collectionId: number): Promise<number[]> {
+  const result = await db.query<{ id: string }>(
+    `SELECT ps.id FROM project_sources ps
+     WHERE ps.collection_id = $1
+       AND EXISTS (SELECT 1 FROM project_source_analyses psa WHERE psa.project_source_id = ps.id AND psa.status IN ('completed', 'no_strategy'))`,
+    [collectionId],
+  );
+  return result.rows.map((r) => Number(r.id));
+}

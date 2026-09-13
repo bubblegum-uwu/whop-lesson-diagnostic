@@ -241,6 +241,7 @@ const YOUTUBE_SOURCE = {
   durationSeconds: null,
   status: "READY",
   createdAt: "2026-01-05T00:00:00.000Z",
+  collectionId: null,
 };
 
 describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {

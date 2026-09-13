@@ -179,6 +179,30 @@ export async function batchAnalyzeProjectSources(backendUrl: string, knoveraToke
   return await res.json();
 }
 
+export interface AnalyzeCollectionResult {
+  queued: number;
+  alreadyAnalyzed: number;
+  alreadyQueued: number;
+  processing: number;
+  failed: number;
+}
+
+/**
+ * POST /api/projects/:projectId/collections/:collectionId/analyze — Phase
+ * 4L's "Analyze Collection"/"Analyze N Remaining." The backend resolves
+ * the collection's members itself (never a client-enumerated id list), so
+ * this works regardless of how many items the collection holds. Never
+ * touches Synthesis Set membership.
+ */
+export async function analyzeCollection(backendUrl: string, knoveraToken: string, projectId: number, collectionId: number): Promise<AnalyzeCollectionResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${collectionId}/analyze`, {
+    method: "POST",
+    headers: authHeaders(knoveraToken),
+  });
+  await throwOnError(res, `Failed to analyze this collection (${res.status}).`);
+  return await res.json();
+}
+
 export interface WhopCourseSummary {
   provider: "WHOP";
   sourceType: "COURSE";

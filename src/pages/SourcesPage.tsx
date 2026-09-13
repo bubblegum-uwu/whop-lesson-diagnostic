@@ -333,6 +333,13 @@ export function SourcesPage(props: SourcesPageProps) {
     sourcesState.phase === "loaded"
       ? sourcesState.sources.filter((s): s is VideoProjectSource => s.provider === "YOUTUBE" || s.provider === "DISCORD")
       : [];
+  // Phase 4L — the main Sources page is collection-first: Collections
+  // render as cards (below), and individual source rows only appear inside
+  // a collection's own detail page. A video source with no collection
+  // (added à la carte, never grouped under a channel/Discord import) would
+  // otherwise vanish entirely, so it gets this one small, clearly-labeled
+  // section instead of reviving the old flat "every video source" list.
+  const uncollectedVideoSources = videoSources.filter((s) => s.collectionId === null);
   // Phase 4K-C — the current YouTube externalIds this project already has,
   // for ImportDiscordChannelDialog's client-side preview estimate only
   // (the backend commit call remains the authoritative dedup source).
@@ -701,16 +708,17 @@ export function SourcesPage(props: SourcesPageProps) {
         </>
       )}
 
-      {videoSources.length > 0 && (
+      {uncollectedVideoSources.length > 0 && (
         <>
-          <h2 className="knovera-section-title">Video Sources</h2>
+          <h2 className="knovera-section-title">Uncollected Sources</h2>
+          <p className="knovera-project-card-source">Added individually, not part of a channel or Discord import — not grouped under any Collection above.</p>
           {analysisActionError && (
             <div className="kv-card knovera-empty-state" role="alert">
               <p>{analysisActionError}</p>
             </div>
           )}
           <ul className="knovera-youtube-source-list">
-            {videoSources.map((source) => {
+            {uncollectedVideoSources.map((source) => {
               const status = analysisStatuses[source.id];
               const job = status?.job ?? null;
               const analysis = status?.analysis ?? null;

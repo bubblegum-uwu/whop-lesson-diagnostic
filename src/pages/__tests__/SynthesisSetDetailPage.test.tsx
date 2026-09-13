@@ -4,6 +4,7 @@ import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { SynthesisSetDetailPage } from "../SynthesisSetDetailPage";
 import type { SynthesisSetDetail } from "../../lib/synthesisSetsApi";
 import type { YouTubeProjectSource, DiscordProjectSource } from "../../lib/sourcesApi";
+import type { CatalogCollectionSummary, CatalogItemSummary } from "../../lib/catalogApi";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -30,33 +31,6 @@ const PROJECT = {
   latestSynthesisCompletedAt: null,
 };
 
-const YT_SOURCE: YouTubeProjectSource = {
-  provider: "YOUTUBE",
-  sourceType: "VIDEO",
-  id: 101,
-  externalId: "dQw4w9WgXcQ",
-  sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-  title: "Scalping Basics",
-  durationSeconds: 600,
-  status: "READY",
-  createdAt: "2026-01-01T00:00:00.000Z",
-  collectionId: null,
-  origins: [],
-};
-
-const DISCORD_SOURCE: DiscordProjectSource = {
-  provider: "DISCORD",
-  sourceType: "VIDEO",
-  id: 102,
-  externalId: "attach-1",
-  sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4",
-  title: "Trade Review Clip",
-  durationSeconds: 120,
-  status: "READY",
-  createdAt: "2026-01-01T00:00:00.000Z",
-  collectionId: null,
-};
-
 function makeSet(overrides: Partial<SynthesisSetDetail> = {}): SynthesisSetDetail {
   return {
     id: 1,
@@ -65,28 +39,154 @@ function makeSet(overrides: Partial<SynthesisSetDetail> = {}): SynthesisSetDetai
     description: "Fast setups",
     createdAt: "2026-01-01T00:00:00.000Z",
     updatedAt: "2026-01-01T00:00:00.000Z",
-    sourceCount: 1,
-    analyzedSourceCount: 1,
+    sourceCount: 0,
+    analyzedSourceCount: 0,
     needsAnalysisCount: 0,
-    sources: [{ ...YT_SOURCE, analyzed: true }],
+    sources: [],
     ...overrides,
   };
 }
 
-function stubFetch(set: SynthesisSetDetail | "not_found", allSources: unknown[]) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (url: string) => {
-      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
-      if (url.endsWith("/synthesis-sets/1")) {
-        return set === "not_found"
-          ? jsonResponse(404, { error: { message: "Unknown synthesis set.", type: "synthesis_set_not_found" } })
-          : jsonResponse(200, set);
-      }
-      if (url.endsWith("/sources")) return jsonResponse(200, { projectId: 7, sources: allSources });
-      return jsonResponse(404, {});
-    }),
-  );
+const COLLECTION: CatalogCollectionSummary = {
+  id: 10,
+  provider: "YOUTUBE",
+  externalId: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
+  title: "SMB Capital",
+  sourceUrl: "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw",
+  status: "READY",
+  sanitizedError: null,
+  lastSyncedAt: "2026-01-01T00:00:00.000Z",
+  itemCount: 2,
+  analyzedCount: 1,
+  hasMoreHistory: false,
+};
+
+const COLLECTION_ITEM_ELIGIBLE: CatalogItemSummary = {
+  id: 201,
+  provider: "YOUTUBE",
+  externalId: "aaaaaaaaaaa",
+  title: "Eligible Collection Video",
+  sourceUrl: "https://www.youtube.com/watch?v=aaaaaaaaaaa",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  status: "ANALYZED",
+  eligibleForSynthesis: true,
+};
+
+const COLLECTION_ITEM_INELIGIBLE: CatalogItemSummary = {
+  id: 202,
+  provider: "YOUTUBE",
+  externalId: "bbbbbbbbbbb",
+  title: "Not Yet Analyzed Collection Video",
+  sourceUrl: "https://www.youtube.com/watch?v=bbbbbbbbbbb",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  status: "NOT_ANALYZED",
+  eligibleForSynthesis: false,
+};
+
+const UNCOLLECTED_YOUTUBE: YouTubeProjectSource = {
+  provider: "YOUTUBE",
+  sourceType: "VIDEO",
+  id: 301,
+  externalId: "ccccccccccc",
+  sourceUrl: "https://www.youtube.com/watch?v=ccccccccccc",
+  title: "Uncollected Eligible Video",
+  durationSeconds: null,
+  status: "READY",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  collectionId: null,
+  origins: [],
+};
+
+interface StubConfig {
+  set: SynthesisSetDetail | "not_found";
+  collections?: CatalogCollectionSummary[];
+  itemsByCollection?: Record<number, CatalogItemSummary[]>;
+  uncollectedSources?: (YouTubeProjectSource | DiscordProjectSource)[];
+  /** sourceId -> whether GET .../sources/:id/analysis reports a usable analysis. */
+  uncollectedEligibility?: Record<number, boolean>;
+  onCollectionBulkAdd?: (collectionId: number) => void;
+  onCollectionBulkRemove?: (collectionId: number) => void;
+  onAddSource?: (sourceId: number) => void;
+  onRemoveSource?: (sourceId: number) => void;
+  onBulkSources?: (body: unknown) => void;
+  onRename?: (body: unknown) => void;
+  onDeleteSet?: () => void;
+}
+
+function stubFetch(config: StubConfig) {
+  const collections = config.collections ?? [];
+  const itemsByCollection = config.itemsByCollection ?? {};
+  const uncollectedSources = config.uncollectedSources ?? [];
+  const uncollectedEligibility = config.uncollectedEligibility ?? {};
+
+  let renamed = false;
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+
+    if (url.endsWith("/synthesis-sets/1") && init?.method === "PATCH") {
+      config.onRename?.(JSON.parse(init.body as string));
+      renamed = true;
+      return jsonResponse(200, { ...makeSet(), name: "Renamed Set", description: "Updated" });
+    }
+    if (url.endsWith("/synthesis-sets/1") && init?.method === "DELETE") {
+      config.onDeleteSet?.();
+      return noContentResponse();
+    }
+    if (url.endsWith("/synthesis-sets/1") && (!init || init.method === undefined)) {
+      if (config.set === "not_found") return jsonResponse(404, { error: { message: "Unknown synthesis set.", type: "synthesis_set_not_found" } });
+      return jsonResponse(200, renamed ? { ...config.set, name: "Renamed Set", description: "Updated" } : config.set);
+    }
+
+    if (url.endsWith("/collections") && (!init || init.method === undefined)) {
+      return jsonResponse(200, { projectId: 7, collections });
+    }
+    const collectionItemsMatch = url.match(/\/collections\/(\d+)(\?|$)/);
+    if (collectionItemsMatch && (!init || init.method === undefined)) {
+      const collectionId = Number(collectionItemsMatch[1]);
+      const collection = collections.find((c) => c.id === collectionId);
+      const items = itemsByCollection[collectionId] ?? [];
+      return jsonResponse(200, { collection, items, pagination: { limit: 200, offset: 0, totalCount: items.length } });
+    }
+
+    if (url.endsWith("/sources") && (!init || init.method === undefined)) {
+      return jsonResponse(200, { projectId: 7, sources: uncollectedSources });
+    }
+    const analysisMatch = url.match(/\/sources\/(\d+)\/analysis$/);
+    if (analysisMatch && (!init || init.method === undefined)) {
+      const sourceId = Number(analysisMatch[1]);
+      const eligible = uncollectedEligibility[sourceId] ?? false;
+      return jsonResponse(200, { sourceId, job: null, analysis: eligible ? { analysisId: 1, status: "no_strategy" } : null });
+    }
+
+    const collectionBulkMatch = url.match(/\/synthesis-sets\/1\/collections\/(\d+)$/);
+    if (collectionBulkMatch && init?.method === "POST") {
+      config.onCollectionBulkAdd?.(Number(collectionBulkMatch[1]));
+      return jsonResponse(200, { collectionId: Number(collectionBulkMatch[1]), eligibleCount: 1, alreadySelectedCount: 0, addedCount: 1, ineligibleCount: 0 });
+    }
+    if (collectionBulkMatch && init?.method === "DELETE") {
+      config.onCollectionBulkRemove?.(Number(collectionBulkMatch[1]));
+      return jsonResponse(200, { collectionId: Number(collectionBulkMatch[1]), removedCount: 1 });
+    }
+
+    if (url.endsWith("/synthesis-sets/1/sources/bulk") && init?.method === "POST") {
+      config.onBulkSources?.(JSON.parse(init.body as string));
+      return jsonResponse(200, { synthesisSetId: 1, addedCount: 1, ineligibleSkippedCount: 0, removedCount: 1 });
+    }
+    if (url.endsWith("/synthesis-sets/1/sources") && init?.method === "POST") {
+      const sourceId = JSON.parse(init.body as string).sourceId as number;
+      config.onAddSource?.(sourceId);
+      return jsonResponse(201, { synthesisSetId: 1, sourceId, added: true });
+    }
+    const removeMatch = url.match(/\/synthesis-sets\/1\/sources\/(\d+)$/);
+    if (removeMatch && init?.method === "DELETE") {
+      config.onRemoveSource?.(Number(removeMatch[1]));
+      return noContentResponse();
+    }
+
+    return jsonResponse(404, {});
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
 }
 
 function renderPage(initialPath = "/projects/7/synthesis-sets/1") {
@@ -100,107 +200,227 @@ function renderPage(initialPath = "/projects/7/synthesis-sets/1") {
   );
 }
 
-describe("SynthesisSetDetailPage (Phase 4J)", () => {
+describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", () => {
   it("shows a not-found state for an unknown/foreign set, with a way back to the list", async () => {
-    stubFetch("not_found", []);
+    stubFetch({ set: "not_found" });
     renderPage();
     await waitFor(() => expect(screen.getByText("This synthesis set doesn't exist.")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /Back to Synthesis Sets/ }));
     expect(screen.getByText("SET_LIST_MARKER")).toBeInTheDocument();
   });
 
-  it("renders the set's name/description, readiness summary, and every project video source with its membership + analysis state shown separately", async () => {
-    stubFetch(makeSet(), [YT_SOURCE, { ...DISCORD_SOURCE }]);
+  it("renders the set's name/description and readiness summary", async () => {
+    stubFetch({ set: makeSet() });
     renderPage();
-
     await waitFor(() => expect(screen.getByRole("heading", { name: "Scalping Playbook" })).toBeInTheDocument());
-    expect(screen.getByText("1 selected · 1 analyzed · 0 needs analysis")).toBeInTheDocument();
-
-    const ytCheckbox = screen.getByLabelText(/Scalping Basics/);
-    expect(ytCheckbox).toBeChecked();
-    expect(screen.getByText("Analyzed")).toBeInTheDocument();
-
-    const discordCheckbox = screen.getByLabelText(/Trade Review Clip/);
-    expect(discordCheckbox).not.toBeChecked();
-    // A non-member source shows no analyzed/not-analyzed badge at all — membership state and analysis state are two separate signals.
+    expect(screen.getByText("Fast setups")).toBeInTheDocument();
+    expect(screen.getByText("0 selected · 0 analyzed · 0 needs analysis")).toBeInTheDocument();
   });
 
-  it("member + NOT analyzed is a fully valid, visible state — never hidden or blocked", async () => {
-    stubFetch(makeSet({ analyzedSourceCount: 0, needsAnalysisCount: 1, sources: [{ ...YT_SOURCE, analyzed: false }] }), [YT_SOURCE]);
+  it("shows an empty state when the project has no collections yet", async () => {
+    stubFetch({ set: makeSet() });
     renderPage();
-    await waitFor(() => expect(screen.getByLabelText(/Scalping Basics/)).toBeChecked());
-    expect(screen.getByText("Not analyzed")).toBeInTheDocument();
-    expect(screen.getByText("1 selected · 0 analyzed · 1 needs analysis")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("No collections in this project yet.")).toBeInTheDocument());
   });
 
-  for (const [label, source] of [
-    ["YouTube", YT_SOURCE],
-    ["Discord", DISCORD_SOURCE],
-  ] as const) {
-    it(`${label}: checking an unselected source calls POST .../sources with its id and NEVER calls the analyze endpoint`, async () => {
-      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
-        if (url.endsWith("/synthesis-sets/1") && (!init || init.method === undefined)) {
-          return jsonResponse(200, makeSet({ sourceCount: 0, analyzedSourceCount: 0, needsAnalysisCount: 0, sources: [] }));
-        }
-        if (url.endsWith("/sources") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, sources: [source] });
-        if (url.endsWith("/synthesis-sets/1/sources") && init?.method === "POST") {
-          expect(JSON.parse(init.body as string)).toEqual({ sourceId: source.id });
-          return jsonResponse(201, { synthesisSetId: 1, sourceId: source.id, added: true });
-        }
-        return jsonResponse(404, {});
-      });
-      vi.stubGlobal("fetch", fetchMock);
-      renderPage();
-
-      const title = source.title!;
-      await waitFor(() => expect(screen.getByLabelText(new RegExp(title))).not.toBeChecked());
-      fireEvent.click(screen.getByLabelText(new RegExp(title)));
-
-      await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("https://backend.example.com/api/projects/7/synthesis-sets/1/sources", expect.objectContaining({ method: "POST" })));
-      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/analyze"))).toBe(false);
+  it("renders a collection row with its 'N/M eligible selected' summary, counting only the eligible members", async () => {
+    stubFetch({
+      set: makeSet(),
+      collections: [COLLECTION],
+      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE, COLLECTION_ITEM_INELIGIBLE] },
     });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("SMB Capital")).toBeInTheDocument());
+    expect(screen.getByText("0/1 eligible selected · 1 available to add")).toBeInTheDocument();
+  });
 
-    it(`${label}: unchecking a selected source calls DELETE .../sources/:sourceId and never touches its analysis`, async () => {
-      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
-        if (url.endsWith("/synthesis-sets/1") && (!init || init.method === undefined)) {
-          return jsonResponse(200, makeSet({ sources: [{ ...source, analyzed: true }] }));
-        }
-        if (url.endsWith("/sources") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, sources: [source] });
-        if (url.endsWith(`/synthesis-sets/1/sources/${source.id}`) && init?.method === "DELETE") return noContentResponse();
-        return jsonResponse(404, {});
-      });
-      vi.stubGlobal("fetch", fetchMock);
-      renderPage();
+  it("the collection checkbox is unchecked when zero eligible members are selected", async () => {
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] } });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).not.toBeChecked());
+  });
 
-      const title = source.title!;
-      await waitFor(() => expect(screen.getByLabelText(new RegExp(title))).toBeChecked());
-      fireEvent.click(screen.getByLabelText(new RegExp(title)));
-
-      await waitFor(() =>
-        expect(fetchMock).toHaveBeenCalledWith(`https://backend.example.com/api/projects/7/synthesis-sets/1/sources/${source.id}`, expect.objectContaining({ method: "DELETE" })),
-      );
-      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/analyze"))).toBe(false);
+  it("the collection checkbox is checked ('all') when every eligible member is already selected", async () => {
+    stubFetch({
+      set: makeSet({ sourceCount: 1, analyzedSourceCount: 1, sources: [{ ...COLLECTION_ITEM_ELIGIBLE, analyzed: true } as never] }),
+      collections: [COLLECTION],
+      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
     });
-  }
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeChecked());
+  });
+
+  it("the collection checkbox is indeterminate when only some eligible members are selected", async () => {
+    const secondEligible = { ...COLLECTION_ITEM_ELIGIBLE, id: 203, title: "Second Eligible Video" };
+    stubFetch({
+      set: makeSet({ sourceCount: 1, sources: [{ ...COLLECTION_ITEM_ELIGIBLE, analyzed: true } as never] }),
+      collections: [COLLECTION],
+      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE, secondEligible] },
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeInTheDocument());
+    const checkbox = screen.getByLabelText("Select all eligible sources in SMB Capital") as HTMLInputElement;
+    await waitFor(() => expect(checkbox.indeterminate).toBe(true));
+  });
+
+  it("clicking an unchecked/partial collection checkbox bulk-selects the whole collection's currently-eligible sources", async () => {
+    let addedCollectionId: number | undefined;
+    stubFetch({
+      set: makeSet(),
+      collections: [COLLECTION],
+      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
+      onCollectionBulkAdd: (id) => (addedCollectionId = id),
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeInTheDocument());
+    fireEvent.click(screen.getByLabelText("Select all eligible sources in SMB Capital"));
+    await waitFor(() => expect(addedCollectionId).toBe(10));
+  });
+
+  it("clicking an all-selected collection checkbox bulk-removes this set's selected sources for that collection", async () => {
+    let removedCollectionId: number | undefined;
+    stubFetch({
+      set: makeSet({ sourceCount: 1, sources: [{ ...COLLECTION_ITEM_ELIGIBLE, analyzed: true } as never] }),
+      collections: [COLLECTION],
+      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
+      onCollectionBulkRemove: (id) => (removedCollectionId = id),
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeChecked());
+    fireEvent.click(screen.getByLabelText("Select all eligible sources in SMB Capital"));
+    await waitFor(() => expect(removedCollectionId).toBe(10));
+  });
+
+  it("a collection with zero eligible members has a disabled checkbox — nothing to select", async () => {
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [COLLECTION_ITEM_INELIGIBLE] } });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeDisabled());
+  });
+
+  it("Fine Tune Sources is collapsed by default; toggling it reveals the flat, filterable source list", async () => {
+    stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE], uncollectedEligibility: { 301: true } });
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Fine Tune Sources" })).toBeInTheDocument());
+    expect(screen.queryByLabelText(/Uncollected Eligible Video/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Fine Tune Sources" }));
+    await waitFor(() => expect(screen.getByLabelText(/Uncollected Eligible Video/)).toBeInTheDocument());
+  });
+
+  it("fine-tune: checking an eligible uncollected source calls POST .../sources with its id and never touches the analyze endpoint", async () => {
+    let addedId: number | undefined;
+    const fetchMock = stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE], uncollectedEligibility: { 301: true }, onAddSource: (id) => (addedId = id) });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    fireEvent.click(await screen.findByLabelText(/Uncollected Eligible Video/));
+
+    await waitFor(() => expect(addedId).toBe(301));
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/analyze"))).toBe(false);
+  });
+
+  it("fine-tune: unchecking a selected source calls DELETE .../sources/:sourceId and never touches its analysis", async () => {
+    let removedId: number | undefined;
+    stubFetch({
+      set: makeSet({ sourceCount: 1, sources: [{ ...UNCOLLECTED_YOUTUBE, analyzed: true }] }),
+      uncollectedSources: [UNCOLLECTED_YOUTUBE],
+      uncollectedEligibility: { 301: true },
+      onRemoveSource: (id) => (removedId = id),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    const checkbox = await screen.findByLabelText(/Uncollected Eligible Video/);
+    await waitFor(() => expect(checkbox).toBeChecked());
+    fireEvent.click(checkbox);
+
+    await waitFor(() => expect(removedId).toBe(301));
+  });
+
+  it("fine-tune: an ineligible source's checkbox is disabled — it cannot be selected", async () => {
+    stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE], uncollectedEligibility: { 301: false } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    expect(await screen.findByLabelText(/Uncollected Eligible Video/)).toBeDisabled();
+  });
+
+  it("fine-tune: search filters the list by title", async () => {
+    const other = { ...UNCOLLECTED_YOUTUBE, id: 302, title: "Completely Different Topic" };
+    stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE, other], uncollectedEligibility: { 301: true, 302: true } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    await screen.findByText("Uncollected Eligible Video");
+    fireEvent.change(screen.getByLabelText("Search sources"), { target: { value: "Different" } });
+    await waitFor(() => expect(screen.queryByText("Uncollected Eligible Video")).not.toBeInTheDocument());
+    expect(screen.getByText("Completely Different Topic")).toBeInTheDocument();
+  });
+
+  it("fine-tune: the 'Eligible' selection filter hides not-yet-eligible sources", async () => {
+    const ineligible = { ...UNCOLLECTED_YOUTUBE, id: 302, title: "Not Eligible Video" };
+    stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE, ineligible], uncollectedEligibility: { 301: true, 302: false } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    await screen.findByText("Not Eligible Video");
+    fireEvent.change(screen.getByLabelText("Filter by selection"), { target: { value: "eligible" } });
+    await waitFor(() => expect(screen.queryByText("Not Eligible Video")).not.toBeInTheDocument());
+    expect(screen.getByText("Uncollected Eligible Video")).toBeInTheDocument();
+  });
+
+  it("fine-tune: the provider filter hides sources of the other provider, without hiding anything else", async () => {
+    stubFetch({
+      set: makeSet(),
+      collections: [COLLECTION],
+      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
+      uncollectedSources: [UNCOLLECTED_YOUTUBE],
+      uncollectedEligibility: { 301: true },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    await screen.findByText("Uncollected Eligible Video");
+    expect(screen.getByText("Eligible Collection Video")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Filter by provider"), { target: { value: "DISCORD" } });
+    await waitFor(() => expect(screen.queryByText("Uncollected Eligible Video")).not.toBeInTheDocument());
+    expect(screen.queryByText("Eligible Collection Video")).not.toBeInTheDocument();
+  });
+
+  it("fine-tune: 'Select All Visible Eligible' bulk-adds only the currently visible, eligible, unselected rows", async () => {
+    let bulkBody: unknown;
+    const secondEligible = { ...UNCOLLECTED_YOUTUBE, id: 302, title: "Second Uncollected Video" };
+    stubFetch({
+      set: makeSet(),
+      uncollectedSources: [UNCOLLECTED_YOUTUBE, secondEligible],
+      uncollectedEligibility: { 301: true, 302: true },
+      onBulkSources: (body) => (bulkBody = body),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    await screen.findByText("Second Uncollected Video");
+
+    fireEvent.click(screen.getByRole("button", { name: "Select All Visible Eligible" }));
+    await waitFor(() => expect(bulkBody).toEqual({ add: [301, 302] }));
+  });
+
+  it("fine-tune: filtering to YouTube and clicking 'Deselect All Visible' never touches a hidden Discord row's selection", async () => {
+    let bulkBody: unknown;
+    const discordSource = { ...UNCOLLECTED_YOUTUBE, id: 303, provider: "DISCORD" as const, title: "Hidden Discord Row" };
+    stubFetch({
+      set: makeSet({ sourceCount: 2, sources: [{ ...UNCOLLECTED_YOUTUBE, analyzed: true }, { ...discordSource, analyzed: true } as never] }),
+      uncollectedSources: [UNCOLLECTED_YOUTUBE, discordSource],
+      uncollectedEligibility: { 301: true, 303: true },
+      onBulkSources: (body) => (bulkBody = body),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    await screen.findByText("Hidden Discord Row");
+    fireEvent.change(screen.getByLabelText("Filter by provider"), { target: { value: "YOUTUBE" } });
+    await waitFor(() => expect(screen.queryByText("Hidden Discord Row")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Deselect All Visible" }));
+    await waitFor(() => expect(bulkBody).toEqual({ remove: [301] }));
+  });
 
   it("Rename edits name and description via PATCH, without touching membership", async () => {
-    let renamed = false;
-    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
-      if (url.endsWith("/synthesis-sets/1") && init?.method === "PATCH") {
-        expect(JSON.parse(init.body as string)).toEqual({ name: "Renamed Set", description: "Updated" });
-        renamed = true;
-        return jsonResponse(200, { ...makeSet(), name: "Renamed Set", description: "Updated" });
-      }
-      if (url.endsWith("/synthesis-sets/1") && (!init || init.method === undefined)) {
-        return jsonResponse(200, renamed ? { ...makeSet(), name: "Renamed Set", description: "Updated" } : makeSet());
-      }
-      if (url.endsWith("/sources")) return jsonResponse(200, { projectId: 7, sources: [YT_SOURCE] });
-      return jsonResponse(404, {});
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    let renameBody: unknown;
+    stubFetch({ set: makeSet(), onRename: (body) => (renameBody = body) });
     renderPage();
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Scalping Playbook" })).toBeInTheDocument());
@@ -210,18 +430,12 @@ describe("SynthesisSetDetailPage (Phase 4J)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Renamed Set" })).toBeInTheDocument());
-    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/sources") && (c[1] as RequestInit | undefined)?.method)).toBe(false);
+    expect(renameBody).toEqual({ name: "Renamed Set", description: "Updated" });
   });
 
   it("Delete Set requires a confirm step, then calls DELETE and navigates back to the list", async () => {
-    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
-      if (url.endsWith("/synthesis-sets/1") && init?.method === "DELETE") return noContentResponse();
-      if (url.endsWith("/synthesis-sets/1") && (!init || init.method === undefined)) return jsonResponse(200, makeSet());
-      if (url.endsWith("/sources")) return jsonResponse(200, { projectId: 7, sources: [YT_SOURCE] });
-      return jsonResponse(404, {});
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    let deleted = false;
+    stubFetch({ set: makeSet(), onDeleteSet: () => (deleted = true) });
     renderPage();
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Scalping Playbook" })).toBeInTheDocument());
@@ -229,12 +443,28 @@ describe("SynthesisSetDetailPage (Phase 4J)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Confirm Delete" }));
 
     await waitFor(() => expect(screen.getByText("SET_LIST_MARKER")).toBeInTheDocument());
-    expect(fetchMock).toHaveBeenCalledWith("https://backend.example.com/api/projects/7/synthesis-sets/1", expect.objectContaining({ method: "DELETE" }));
+    expect(deleted).toBe(true);
   });
 
-  it("shows an empty state when the project has no YouTube/Discord sources to select from yet", async () => {
-    stubFetch(makeSet({ sourceCount: 0, analyzedSourceCount: 0, needsAnalysisCount: 0, sources: [] }), []);
+  it("shows the Phase 4M placeholder for Run History, never a real run/execution control", async () => {
+    stubFetch({ set: makeSet() });
     renderPage();
-    await waitFor(() => expect(screen.getByText("No YouTube or Discord sources in this project yet.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Run History" })).toBeInTheDocument());
+    expect(screen.getByText("Coming in Phase 4M.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Run/ })).not.toBeInTheDocument();
+  });
+
+  it("no selection action on this page ever calls an analyze or synthesis-run endpoint", async () => {
+    const fetchMock = stubFetch({
+      set: makeSet(),
+      collections: [COLLECTION],
+      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeInTheDocument());
+    fireEvent.click(screen.getByLabelText("Select all eligible sources in SMB Capital"));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(3));
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/analyze"))).toBe(false);
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/run"))).toBe(false);
   });
 });
