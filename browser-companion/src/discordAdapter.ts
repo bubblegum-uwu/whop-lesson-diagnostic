@@ -99,10 +99,19 @@ export function findScroller(root: ParentNode): HTMLElement | null {
 // appears before the message-list scroller, LAST because Discord's
 // header sometimes renders a composite label combining the server/
 // category name with the channel name (e.g. "The Accelerator:
-// 🚨︱scarface-alerts") — normalizeCompositeHeading below takes a
+// 🚨︱scarface-alerts") — normalizeChannelNameText below takes a
 // conservative pass at stripping that composite prefix, but a tier that
 // isn't correlated to the channel id at all is inherently less trustworthy
 // than one that is, hence last.
+//
+// Every tier's raw candidate text (an aria-label, a textContent, or a
+// heading's text) is run through the SAME normalizeChannelNameText/
+// normalizeChannelNameSegment pipeline below — Discord's real accessible
+// labels routinely pack unread/notification state, the channel's own
+// type ("announcement channel"/"text channel"), and its privacy/lock
+// status into one comma-separated string (e.g. "#unread, 🚨 |
+// scarface-alerts (announcement channel), Private Channel (locked)") —
+// none of which is part of the channel's actual name.
 const HEADING_SELECTOR = 'h1, [role="heading"]';
 const SELECTED_NAV_ITEM_SELECTOR = '[aria-selected="true"], [class*="selected"]';
 const ID_CORRELATED_SELECTOR = "[id], [href], [data-list-item-id]";
@@ -129,30 +138,108 @@ function stripDecorativeHash(text: string): string {
   return text.replace(/^#\s*/, "");
 }
 
-/**
- * A conservative, last-resort normalization for a composite header label
- * (server/category name + channel name in one string). Takes the text
- * AFTER the LAST ": " (a "Server: category-channel"-style separator) and
- * then after the last "︱" or "|" (Discord's own decorative divider,
- * commonly preceded by an emoji) — e.g. "The Accelerator: 🚨︱scarface-alerts"
- * → "scarface-alerts". A heading with neither separator is returned
- * unchanged; this never invents a name, only trims a label down when a
- * known composite pattern is present.
- */
-function normalizeCompositeHeading(text: string): string {
+// Discord frequently exposes a composite ACCESSIBLE label on the exact
+// element we've correlated to the channel id — e.g.
+// "#unread, 🚨 | scarface-alerts (announcement channel), Private Channel (locked)"
+// — packing unread/notification state, the channel name itself, its
+// channel-type annotation, and its privacy/lock status into one string,
+// comma-separated. None of the status/category/type segments are part of
+// the channel's actual name; only the segment that (after stripping its
+// own decorations) isn't one of those known-metadata phrases is.
+const METADATA_SEGMENT_PATTERN =
+  /^(unread|private channel|public channel|locked|announcement channel|text channel|voice channel|forum channel|stage channel|category)$/i;
+
+/** Repeatedly strips trailing "(...)" annotations — a segment can carry more than one, e.g. "general (text channel) (locked)". */
+function stripTrailingParentheticals(text: string): string {
   let result = text;
-  const colonIndex = result.lastIndexOf(": ");
-  if (colonIndex !== -1) result = result.slice(colonIndex + 2);
-  const dividerMatch = /[︱|]/.exec(result);
-  if (dividerMatch) result = result.slice(dividerMatch.index + 1);
-  return stripDecorativeHash(result.trim());
+  let stripped: string;
+  do {
+    stripped = result.replace(/\s*\([^()]*\)\s*$/, "");
+    if (stripped === result) break;
+    result = stripped;
+  } while (true);
+  return result;
+}
+
+/**
+ * Normalizes ONE comma-separated segment of a (possibly composite)
+ * channel label down to a candidate name, or null if the segment is
+ * itself pure status/category/type metadata with no name left in it.
+ * Order matters: hash/parenthetical stripping happens first (metadata
+ * annotations live in those), then the metadata-phrase check, then
+ * colon-splitting (a "Server: channel" prefix), then divider-splitting
+ * (a "🚨 | channel-name" decorative prefix) — colon before divider so
+ * "The Accelerator: 🚨 | scarface-alerts" resolves to "scarface-alerts"
+ * rather than stopping at "🚨 | scarface-alerts".
+ */
+function normalizeChannelNameSegment(segment: string): string | null {
+  let text = stripDecorativeHash(segment.trim()).trim();
+  text = stripTrailingParentheticals(text).trim();
+  if (text.length === 0 || METADATA_SEGMENT_PATTERN.test(text)) return null;
+
+  const colonIndex = text.lastIndexOf(": ");
+  if (colonIndex !== -1) text = text.slice(colonIndex + 2).trim();
+
+  const dividerMatch = /[︱|]/.exec(text);
+  if (dividerMatch) text = text.slice(dividerMatch.index + 1).trim();
+
+  return text.length > 0 ? text : null;
+}
+
+/**
+ * Splits a full (possibly composite, comma-joined) label into segments
+ * and returns the first one that survives `normalizeChannelNameSegment` —
+ * i.e. the first segment that isn't pure status/category/type metadata.
+ * A plain, uncomposed name (no comma, no divider, no annotation) simply
+ * passes straight through unchanged, so a legitimate hyphenated channel
+ * name like "pre-market-live" is never touched.
+ */
+function normalizeChannelNameText(text: string): string | null {
+  for (const segment of text.split(",")) {
+    const candidate = normalizeChannelNameSegment(segment);
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Prefers DOM structure over string-stripping where possible: looks for a
+ * leaf descendant (no nested elements of its own) whose OWN text doesn't
+ * itself look composite (no comma/parenthesis/divider/colon) — this is
+ * typically the visible channel-name text node rendered separately from a
+ * parent element's fuller accessible label/screen-reader text. Returns
+ * null (never a guess) when no such clean descendant exists, so the
+ * caller falls back to normalizing the element's own label text instead.
+ */
+function findCleanDescendantText(el: Element): string | null {
+  for (const node of el.querySelectorAll("*")) {
+    if (node.children.length > 0) continue;
+    const text = node.textContent?.trim();
+    if (!text || /[,()|︱:]/.test(text)) continue;
+    const withoutHash = stripDecorativeHash(text);
+    // Require at least one real (Latin-alphanumeric) character — rules out
+    // a lone status icon/emoji glyph (e.g. "🚨") being mistaken for the
+    // channel name simply because it, too, contains no comma/paren/divider.
+    if (withoutHash.length > 0 && /[a-zA-Z0-9]/.test(withoutHash)) return withoutHash;
+  }
+  return null;
+}
+
+/** The channel-name candidate for one matched element: a clean descendant text node if one exists, otherwise the element's own aria-label/textContent run through the composite-label normalizer. */
+function extractChannelNameFromElement(el: Element, preferAriaLabel: boolean): string | null {
+  const descendant = findCleanDescendantText(el);
+  if (descendant) return descendant;
+
+  const ariaLabel = preferAriaLabel ? el.getAttribute("aria-label") : null;
+  const raw = (ariaLabel ?? el.textContent)?.trim();
+  return raw ? normalizeChannelNameText(raw) : null;
 }
 
 function findSelectedNavItemChannelName(root: ParentNode, channelId: string): string | null {
   for (const candidate of root.querySelectorAll(SELECTED_NAV_ITEM_SELECTOR)) {
     if (!isCorrelatedToChannelId(candidate, channelId)) continue;
-    const text = candidate.textContent?.trim();
-    if (text) return stripDecorativeHash(text);
+    const name = extractChannelNameFromElement(candidate, false);
+    if (name) return name;
   }
   return null;
 }
@@ -160,9 +247,8 @@ function findSelectedNavItemChannelName(root: ParentNode, channelId: string): st
 function findChannelCorrelatedHeaderElementName(root: ParentNode, channelId: string): string | null {
   for (const candidate of root.querySelectorAll(ID_CORRELATED_SELECTOR)) {
     if (!isBeforeMessageList(root, candidate) || !isCorrelatedToChannelId(candidate, channelId)) continue;
-    const ariaLabel = candidate.getAttribute("aria-label");
-    const text = (ariaLabel ?? candidate.textContent)?.trim();
-    if (text) return stripDecorativeHash(text);
+    const name = extractChannelNameFromElement(candidate, true);
+    if (name) return name;
   }
   return null;
 }
@@ -171,7 +257,10 @@ function findGenericHeadingChannelName(root: ParentNode): string | null {
   for (const heading of root.querySelectorAll(HEADING_SELECTOR)) {
     if (!isBeforeMessageList(root, heading)) continue;
     const text = heading.textContent?.trim();
-    if (text) return normalizeCompositeHeading(text);
+    if (text) {
+      const normalized = normalizeChannelNameText(text);
+      if (normalized) return normalized;
+    }
   }
   return null;
 }

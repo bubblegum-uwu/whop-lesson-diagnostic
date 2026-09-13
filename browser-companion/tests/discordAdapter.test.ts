@@ -252,3 +252,98 @@ describe("findChannelName", () => {
     }
   });
 });
+
+// PR #32 third live-validation follow-up: real Discord composites
+// unread/notification state, the channel's type annotation, and its
+// privacy/lock status into the SAME accessible label/text as the channel
+// name itself — none of that metadata belongs in the persisted name.
+describe("findChannelName — metadata normalization", () => {
+  function selectedNavItem(text: string): HTMLElement {
+    const nav = document.createElement("div");
+    nav.setAttribute("aria-selected", "true");
+    nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
+    nav.textContent = text;
+    return nav;
+  }
+
+  it("1: the exact live-observed composite label normalizes to just the channel name", () => {
+    const nav = selectedNavItem("#unread, 🚨 | scarface-alerts (announcement channel), Private Channel (locked)");
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("2: a channel-type annotation is stripped", () => {
+    const nav = selectedNavItem("#general (text channel)");
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("general");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("3: a trailing privacy/lock annotation is stripped", () => {
+    const nav = selectedNavItem("#general, Private Channel (locked)");
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("general");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("4: a server/category prefix before a colon, then a decorative emoji divider, both resolve down to the channel name", () => {
+    const nav = selectedNavItem("The Accelerator: 🚨 | scarface-alerts");
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("5: a clean descendant text node wins over the parent's composite label/text — structure preferred over string-stripping", () => {
+    const nav = document.createElement("div");
+    nav.setAttribute("aria-selected", "true");
+    nav.setAttribute("data-list-item-id", `channels___${CHANNEL_ID}`);
+
+    const statusSpan = document.createElement("span");
+    statusSpan.textContent = "#unread, 🚨 |";
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = "scarface-alerts";
+    const typeSpan = document.createElement("span");
+    typeSpan.textContent = "(announcement channel), Private Channel (locked)";
+    nav.append(statusSpan, nameSpan, typeSpan);
+
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("scarface-alerts");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("6: a legitimate hyphenated channel name is never mangled by normalization", () => {
+    const nav = selectedNavItem("pre-market-live");
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBe("pre-market-live");
+    } finally {
+      nav.remove();
+    }
+  });
+
+  it("7: a label that is ENTIRELY status/privacy metadata (no real name segment) yields null — the caller falls back to the channel id", () => {
+    const nav = selectedNavItem("#unread, Private Channel (locked)");
+    document.body.appendChild(nav);
+    try {
+      expect(findChannelName(document, CHANNEL_ID)).toBeNull();
+    } finally {
+      nav.remove();
+    }
+  });
+});
