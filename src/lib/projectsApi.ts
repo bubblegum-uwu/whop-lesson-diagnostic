@@ -21,6 +21,8 @@ export interface ProjectSummary {
   analyzedLessonCount: number;
   latestSynthesisStatus: string | null;
   latestSynthesisCompletedAt: string | null;
+  /** Live-validation cleanup — a generic, provider-independent count of this project's YouTube/Discord project_sources rows, distinct from courseCount (Whop-only). See ProjectsPage.tsx's source-line logic. */
+  projectSourceCount: number;
 }
 
 async function readErrorMessage(res: Response, fallback: string): Promise<string> {

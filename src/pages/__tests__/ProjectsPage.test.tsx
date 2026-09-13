@@ -23,6 +23,7 @@ const MASTERMIND: ProjectSummary = {
   analyzedLessonCount: 28,
   latestSynthesisStatus: "COMPLETED",
   latestSynthesisCompletedAt: "2026-01-02T00:00:00.000Z",
+  projectSourceCount: 0,
 };
 
 function stubFetch(projects: ProjectSummary[] | "error") {
@@ -95,12 +96,64 @@ describe("ProjectsPage", () => {
       analyzedLessonCount: 0,
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
+      projectSourceCount: 0,
     };
     stubFetch([emptyProject]);
     renderProjects();
     await waitFor(() => expect(screen.getByRole("heading", { name: "SecondProject" })).toBeInTheDocument());
     expect(screen.getByText("No sources yet")).toBeInTheDocument();
     expect(screen.queryByText("Whop")).not.toBeInTheDocument();
+  });
+
+  // Live-validation cleanup — courseCount alone went stale once YouTube/
+  // Discord project_sources became first-class: a project with real
+  // sources but zero Whop courses must never claim "No sources yet."
+  it("C: a project with YouTube/Discord sources but zero Whop courses shows an accurate source count, never 'No sources yet'", async () => {
+    const singleSourceProject: ProjectSummary = {
+      id: 10,
+      name: "One Source",
+      projectType: "GENERAL_KNOWLEDGE",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      courseCount: 0,
+      lessonCount: 0,
+      analyzedLessonCount: 0,
+      latestSynthesisStatus: null,
+      latestSynthesisCompletedAt: null,
+      projectSourceCount: 1,
+    };
+    const multiSourceProject: ProjectSummary = { ...singleSourceProject, id: 11, name: "Discord Knowledge Multi", projectSourceCount: 3 };
+
+    stubFetch([singleSourceProject, multiSourceProject]);
+    renderProjects();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "One Source" })).toBeInTheDocument());
+    expect(screen.getByText("1 source")).toBeInTheDocument();
+    expect(screen.getByText("3 sources")).toBeInTheDocument();
+    expect(screen.queryByText("No sources yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Whop")).not.toBeInTheDocument();
+  });
+
+  it("D: courseCount > 0 still wins over projectSourceCount — 'Whop' is shown, never a raw source count, when a Whop course is connected", async () => {
+    const whopAndDiscord: ProjectSummary = {
+      id: 12,
+      name: "Whop Plus Discord",
+      projectType: "TRADING_STRATEGIES",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      courseCount: 1,
+      lessonCount: 10,
+      analyzedLessonCount: 0,
+      latestSynthesisStatus: null,
+      latestSynthesisCompletedAt: null,
+      projectSourceCount: 5,
+    };
+    stubFetch([whopAndDiscord]);
+    renderProjects();
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Whop Plus Discord" })).toBeInTheDocument());
+    expect(screen.getByText("Whop")).toBeInTheDocument();
+    expect(screen.queryByText("5 sources")).not.toBeInTheDocument();
   });
 
   // Live-validation Fix 2 — a GENERAL_KNOWLEDGE project must be a fully
@@ -120,6 +173,7 @@ describe("ProjectsPage", () => {
       analyzedLessonCount: 0,
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
+      projectSourceCount: 0,
     };
 
     it("shows the real project type label (never a bare 'Coming Soon' in its place) plus a separate, synthesis-scoped note", async () => {

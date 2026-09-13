@@ -110,15 +110,27 @@ export function ProjectsPage({ backendUrl, knoveraToken }: ProjectsPageProps) {
                   <div className="knovera-project-card-top">
                     <div>
                       <h2>{project.name}</h2>
-                      {/* Phase 4C correction: derived from this project's real courseCount
-                          (from GET /api/projects, the same courses.project_id ownership
-                          GET /api/projects/:projectId/sources itself enforces) — never a
-                          hardcoded "Whop" label. Whop is the only provider that produces a
-                          `courses` row today, so courseCount > 0 reliably means a Whop
-                          source is connected without a second per-card fetch; this stops
-                          being a safe inference the moment a second provider can persist
-                          data of its own. */}
-                      <p className="knovera-project-card-source">{project.courseCount > 0 ? "Whop" : "No sources yet"}</p>
+                      {/* Phase 4C correction, updated by the live-validation
+                          cleanup below: derived from this project's real stats
+                          (from GET /api/projects) — never a hardcoded label,
+                          and never a second per-card fetch. courseCount > 0
+                          still means "Whop" specifically (Whop is the only
+                          provider that produces a `courses` row). Once that
+                          stopped being a safe "any source exists" inference —
+                          YouTube/Discord project_sources are real, first-class
+                          sources with no course row at all — projectSourceCount
+                          (a generic, provider-independent project_sources count;
+                          see projectsRepo.ts's getProjectStats) is what keeps
+                          this line from claiming "No sources yet" on a project
+                          that actually has sources, without guessing which
+                          provider they came from. */}
+                      <p className="knovera-project-card-source">
+                        {project.courseCount > 0
+                          ? "Whop"
+                          : project.projectSourceCount > 0
+                            ? `${project.projectSourceCount} source${project.projectSourceCount === 1 ? "" : "s"}`
+                            : "No sources yet"}
+                      </p>
                     </div>
                     <div className="knovera-project-card-badges">
                       <span className={hasSynthesis ? "kv-badge kv-badge-accent" : "kv-badge kv-badge-muted"}>{PROJECT_TYPE_LABEL[projectType]}</span>
