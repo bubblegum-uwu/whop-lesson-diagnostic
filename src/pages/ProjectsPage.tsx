@@ -108,7 +108,7 @@ export function ProjectsPage({ backendUrl, knoveraToken }: ProjectsPageProps) {
               return (
                 <div key={project.id} className={hasSynthesis ? "kv-card knovera-project-card operational" : "kv-card knovera-project-card"}>
                   <div className="knovera-project-card-top">
-                    <div>
+                    <div className="knovera-project-card-heading">
                       <h2>{project.name}</h2>
                       {/* Phase 4C correction, updated by the live-validation
                           cleanup below: derived from this project's real stats

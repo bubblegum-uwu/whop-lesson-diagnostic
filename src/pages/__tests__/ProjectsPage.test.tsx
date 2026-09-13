@@ -187,6 +187,26 @@ describe("ProjectsPage", () => {
       expect(screen.queryByText("Coming Soon")).not.toBeInTheDocument();
     });
 
+    // Live-validation cleanup — this project (General Knowledge +
+    // Synthesis Coming Soon, the two longest badges the card ever shows
+    // together) is exactly the case that overflowed the card at narrow
+    // widths. Asserting the wrap-scaffolding classes are on the right
+    // elements is a real regression guard without pixel/screenshot
+    // assertions — same class-level pattern as UsagePage.test.tsx's
+    // `.closest(".knovera-usage-total-card")` checks.
+    it("the heading and badge group carry the wrap-scaffolding classes CSS relies on to keep long badges inside the card", async () => {
+      stubFetch([DISCORD_KNOWLEDGE]);
+      renderProjects();
+      await waitFor(() => expect(screen.getByRole("heading", { name: "Discord Knowledge" })).toBeInTheDocument());
+
+      const heading = screen.getByRole("heading", { name: "Discord Knowledge" }).closest(".knovera-project-card-heading");
+      expect(heading).not.toBeNull();
+
+      const badgeGroup = screen.getByText("Synthesis Coming Soon").closest(".knovera-project-card-badges");
+      expect(badgeGroup).not.toBeNull();
+      expect(badgeGroup).toContainElement(screen.getByText("General Knowledge"));
+    });
+
     it("the Open button is never disabled, and clicking it navigates into the workspace", async () => {
       stubFetch([DISCORD_KNOWLEDGE]);
       renderProjects();
