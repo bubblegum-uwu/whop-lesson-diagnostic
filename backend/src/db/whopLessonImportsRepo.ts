@@ -119,3 +119,20 @@ export async function listAlaCarteWhopLessonsByProjectId(pool: Pool, projectId: 
     createdAt: row.created_at,
   }));
 }
+
+/** Batched à-la-carte lesson COUNT per project (same exclusion rule as listAlaCarteWhopLessonsByProjectId — a course later fully connected to the SAME project no longer counts), for the Projects list's collectionCount: one round trip for any number of projects. A project with zero à-la-carte lessons has no entry in the returned map. */
+export async function getAlaCarteWhopLessonCountsByProjectIds(pool: Pool, projectIds: number[]): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  if (projectIds.length === 0) return map;
+  const result = await pool.query<{ project_id: string; count: string }>(
+    `SELECT pwli.project_id, COUNT(*) AS count
+     FROM project_whop_lesson_imports pwli
+     JOIN lessons l ON l.id = pwli.lesson_id
+     JOIN courses c ON c.id = l.course_id
+     WHERE pwli.project_id = ANY($1::bigint[]) AND (c.project_id IS NULL OR c.project_id != pwli.project_id)
+     GROUP BY pwli.project_id`,
+    [projectIds],
+  );
+  for (const row of result.rows) map.set(Number(row.project_id), Number(row.count));
+  return map;
+}

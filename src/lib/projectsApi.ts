@@ -21,8 +21,10 @@ export interface ProjectSummary {
   analyzedLessonCount: number;
   latestSynthesisStatus: string | null;
   latestSynthesisCompletedAt: string | null;
-  /** Live-validation cleanup — a generic, provider-independent count of this project's YouTube/Discord project_sources rows, distinct from courseCount (Whop-only). See ProjectsPage.tsx's source-line logic. */
+  /** Live-validation cleanup — a generic, provider-independent count of this project's YouTube/Discord project_sources rows, distinct from courseCount (Whop-only). Superseded by collectionCount below for display purposes — kept for callers that still want a raw row count. */
   projectSourceCount: number;
+  /** Phase 4L follow-up — the canonical "N collections" count: every card that would render on this project's Sources page (persisted collections, derived groups, Whop courses, Whop à-la-carte if non-empty) — the SAME unified group abstraction the Sources page itself uses. This is what the project card displays, never a raw source-row count. */
+  collectionCount: number;
 }
 
 async function readErrorMessage(res: Response, fallback: string): Promise<string> {

@@ -173,17 +173,8 @@ function titleFor(sourceType: DerivedGroupSourceType, originDisplayLabel: string
   return "Unclassified Sources";
 }
 
-/**
- * Every derived group this project currently has at least one member for —
- * never a fabricated empty group. Groups by groupKey using the shared
- * classifyDerivedGroups() pass; a group's title prefers the first row that
- * actually carries a resolved channel name (a later scan may have enriched
- * an earlier row that only had the raw channel id — see
- * projectSourceOriginsRepo.insertDiscordChannelOrigin's enrichment
- * behavior), falling back to the id-only label otherwise.
- */
-export async function listDerivedGroupsForProject(pool: Pool, projectId: number): Promise<DerivedGroupDescriptor[]> {
-  const rows = await classifyDerivedGroups(pool, projectId);
+/** Shared by listDerivedGroupsForProject and its batched sibling listDerivedGroupsForProjects — groups already-classified rows (from ONE project) by groupKey, preferring a representative row that resolved a real channel name over an id-only fallback. */
+function groupClassificationRows(rows: DerivedGroupClassification[]): DerivedGroupDescriptor[] {
   const byGroup = new Map<string, { rep: DerivedGroupClassification; memberSourceIds: number[] }>();
   for (const row of rows) {
     const existing = byGroup.get(row.groupKey);
@@ -210,6 +201,20 @@ export async function listDerivedGroupsForProject(pool: Pool, projectId: number)
 }
 
 /**
+ * Every derived group this project currently has at least one member for —
+ * never a fabricated empty group. Groups by groupKey using the shared
+ * classifyDerivedGroups() pass; a group's title prefers the first row that
+ * actually carries a resolved channel name (a later scan may have enriched
+ * an earlier row that only had the raw channel id — see
+ * projectSourceOriginsRepo.insertDiscordChannelOrigin's enrichment
+ * behavior), falling back to the id-only label otherwise.
+ */
+export async function listDerivedGroupsForProject(pool: Pool, projectId: number): Promise<DerivedGroupDescriptor[]> {
+  const rows = await classifyDerivedGroups(pool, projectId);
+  return groupClassificationRows(rows);
+}
+
+/**
  * Every project_source id currently classified under `groupKey`, resolved
  * SERVER-SIDE from the exact same classification pass
  * listDerivedGroupsForProject uses — never a caller-supplied list. Returns
@@ -219,6 +224,65 @@ export async function listDerivedGroupsForProject(pool: Pool, projectId: number)
 export async function listDerivedGroupMemberSourceIds(pool: Pool, projectId: number, groupKey: string): Promise<number[]> {
   const rows = await classifyDerivedGroups(pool, projectId);
   return rows.filter((row) => row.groupKey === groupKey).map((row) => row.sourceId);
+}
+
+interface ClassifyMultiProjectDbRow extends ClassifyDbRow {
+  project_id: string;
+}
+
+/**
+ * Phase 4L follow-up — the batched sibling of classifyDerivedGroups(), for
+ * callers that need every project's derived-group members in ONE round
+ * trip (e.g. the Projects list page's `collectionCount`) rather than
+ * looping classifyDerivedGroups() once per project. Identical
+ * classification rule (classifyRow), just scoped by `project_id = ANY($1)`
+ * instead of `project_id = $1` and additionally grouped by project id.
+ */
+export async function classifyDerivedGroupsForProjects(pool: Pool, projectIds: number[]): Promise<Map<number, DerivedGroupClassification[]>> {
+  const map = new Map<number, DerivedGroupClassification[]>();
+  if (projectIds.length === 0) return map;
+
+  const result = await pool.query<ClassifyMultiProjectDbRow>(
+    `SELECT
+       ps.id,
+       ps.project_id,
+       ps.provider,
+       dc.discord_guild_id,
+       dc.discord_channel_id,
+       dc.discord_channel_name,
+       (m.id IS NOT NULL) AS has_manual_origin,
+       ps.created_at
+     FROM project_sources ps
+     LEFT JOIN LATERAL (
+       SELECT discord_guild_id, discord_channel_id, discord_channel_name
+       FROM project_source_origins o
+       WHERE o.project_source_id = ps.id AND o.origin_type = 'DISCORD_CHANNEL'
+       ORDER BY o.created_at ASC, o.id ASC
+       LIMIT 1
+     ) dc ON true
+     LEFT JOIN project_source_origins m ON m.project_source_id = ps.id AND m.origin_type = 'MANUAL'
+     WHERE ps.project_id = ANY($1::bigint[]) AND ps.collection_id IS NULL
+     ORDER BY ps.created_at ASC`,
+    [projectIds],
+  );
+  for (const row of result.rows) {
+    const projectId = Number(row.project_id);
+    const classified = classifyRow(row);
+    const list = map.get(projectId);
+    if (list) list.push(classified);
+    else map.set(projectId, [classified]);
+  }
+  return map;
+}
+
+/** Groups classifyDerivedGroupsForProjects()'s rows into DerivedGroupDescriptors per project — the batched sibling of listDerivedGroupsForProject(), same grouping/title logic, one round trip for any number of projects. */
+export async function listDerivedGroupsForProjects(pool: Pool, projectIds: number[]): Promise<Map<number, DerivedGroupDescriptor[]>> {
+  const byProject = await classifyDerivedGroupsForProjects(pool, projectIds);
+  const result = new Map<number, DerivedGroupDescriptor[]>();
+  for (const [projectId, rows] of byProject) {
+    result.set(projectId, groupClassificationRows(rows));
+  }
+  return result;
 }
 
 export const DERIVED_GROUP_KEY_PREFIX = "derived:";

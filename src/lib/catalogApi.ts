@@ -245,6 +245,47 @@ export async function analyzeCollection(backendUrl: string, knoveraToken: string
   return await res.json();
 }
 
+export type AddCollectionToProjectTargetKind = "invalid" | "ok";
+export interface AddCollectionToProjectTargetResult {
+  targetProjectId: number;
+  kind: AddCollectionToProjectTargetKind;
+  addedCount: number;
+  alreadyPresentCount: number;
+  failedCount: number;
+}
+export interface AddCollectionToProjectResponse {
+  groupKey: string;
+  memberCount: number;
+  results: AddCollectionToProjectTargetResult[];
+}
+
+/**
+ * POST /api/projects/:projectId/collections/:groupKey/add-to-project —
+ * "Add Collection to Project": a ONE-TIME SNAPSHOT copy of this
+ * collection/group's CURRENT members into one or more other projects.
+ * Works identically for a PERSISTED collection and a DERIVED group (see
+ * CatalogCollectionSummary's doc comment) — the backend resolves members
+ * server-side via the same unified resolver every other collection route
+ * uses. Never analyzes anything, never copies analysis results, never
+ * touches Synthesis Set membership. Re-running this later adds only
+ * whatever is newly missing in the destination — it is never a live sync.
+ */
+export async function addCollectionToProject(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  groupKey: string,
+  targetProjectIds: number[],
+): Promise<AddCollectionToProjectResponse> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${encodeURIComponent(groupKey)}/add-to-project`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ targetProjectIds }),
+  });
+  await throwOnError(res, `Failed to add this collection to another project (${res.status}).`);
+  return await res.json();
+}
+
 export interface WhopCourseSummary {
   provider: "WHOP";
   sourceType: "COURSE";

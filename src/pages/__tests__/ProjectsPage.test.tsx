@@ -24,6 +24,7 @@ const MASTERMIND: ProjectSummary = {
   latestSynthesisStatus: "COMPLETED",
   latestSynthesisCompletedAt: "2026-01-02T00:00:00.000Z",
   projectSourceCount: 0,
+  collectionCount: 1,
 };
 
 function stubFetch(projects: ProjectSummary[] | "error") {
@@ -73,18 +74,18 @@ describe("ProjectsPage", () => {
     await waitFor(() => expect(screen.getByText(/Database unavailable/)).toBeInTheDocument());
   });
 
-  it("A: renders the real MasterMind project from GET /api/projects — its real courseCount > 0 is what lets the card say Whop, with type/source/live stats", async () => {
+  it("A: renders the real MasterMind project from GET /api/projects, with its collectionCount, type, and live stats", async () => {
     stubFetch([MASTERMIND]);
     renderProjects();
     await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
     expect(screen.getByText("Trading Strategies")).toBeInTheDocument();
-    expect(screen.getByText("Whop")).toBeInTheDocument();
+    expect(screen.getByText("1 collection")).toBeInTheDocument();
     expect(screen.getByText("28")).toBeInTheDocument();
     expect(screen.getByText("Lessons")).toBeInTheDocument();
     expect(screen.getByText("COMPLETED")).toBeInTheDocument();
   });
 
-  it("B: a project with zero sources (courseCount 0) never displays Whop as its project source — shows a neutral label instead", async () => {
+  it("B: a project with zero collections shows a neutral 'No sources yet' label", async () => {
     const emptyProject: ProjectSummary = {
       id: 8,
       name: "SecondProject",
@@ -97,21 +98,23 @@ describe("ProjectsPage", () => {
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
       projectSourceCount: 0,
+      collectionCount: 0,
     };
     stubFetch([emptyProject]);
     renderProjects();
     await waitFor(() => expect(screen.getByRole("heading", { name: "SecondProject" })).toBeInTheDocument());
     expect(screen.getByText("No sources yet")).toBeInTheDocument();
-    expect(screen.queryByText("Whop")).not.toBeInTheDocument();
   });
 
-  // Live-validation cleanup — courseCount alone went stale once YouTube/
-  // Discord project_sources became first-class: a project with real
-  // sources but zero Whop courses must never claim "No sources yet."
-  it("C: a project with YouTube/Discord sources but zero Whop courses shows an accurate source count, never 'No sources yet'", async () => {
-    const singleSourceProject: ProjectSummary = {
+  // Phase 4L follow-up — the project card shows the SAME canonical
+  // "N collections" abstraction the Sources page itself uses (persisted
+  // collections + derived groups + Whop courses + Whop à-la-carte if
+  // non-empty), never a raw project_sources row count and never a bare
+  // "Whop" literal — see ProjectsPage.tsx's doc comment.
+  it("C: singular/plural collection counts render correctly, independent of provider", async () => {
+    const singleCollectionProject: ProjectSummary = {
       id: 10,
-      name: "One Source",
+      name: "One Collection",
       projectType: "GENERAL_KNOWLEDGE",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
@@ -121,20 +124,25 @@ describe("ProjectsPage", () => {
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
       projectSourceCount: 1,
+      collectionCount: 1,
     };
-    const multiSourceProject: ProjectSummary = { ...singleSourceProject, id: 11, name: "Discord Knowledge Multi", projectSourceCount: 3 };
+    // Mirrors the exact live-validation example: Discord Knowledge with a
+    // DISCORD · CHANNEL group and a derived YOUTUBE · CHANNEL (via Discord)
+    // group — 4 project_sources rows, but 2 collection cards.
+    const discordKnowledge: ProjectSummary = { ...singleCollectionProject, id: 11, name: "Discord Knowledge", projectSourceCount: 4, collectionCount: 2 };
 
-    stubFetch([singleSourceProject, multiSourceProject]);
+    stubFetch([singleCollectionProject, discordKnowledge]);
     renderProjects();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "One Source" })).toBeInTheDocument());
-    expect(screen.getByText("1 source")).toBeInTheDocument();
-    expect(screen.getByText("3 sources")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "One Collection" })).toBeInTheDocument());
+    expect(screen.getByText("1 collection")).toBeInTheDocument();
+    expect(screen.getByText("2 collections")).toBeInTheDocument();
     expect(screen.queryByText("No sources yet")).not.toBeInTheDocument();
-    expect(screen.queryByText("Whop")).not.toBeInTheDocument();
+    // Never the raw project_sources row count.
+    expect(screen.queryByText("4 sources")).not.toBeInTheDocument();
   });
 
-  it("D: courseCount > 0 still wins over projectSourceCount — 'Whop' is shown, never a raw source count, when a Whop course is connected", async () => {
+  it("D: a Whop course counts as ONE collection, folded into the same total as any other collections — never shown as the bare literal 'Whop'", async () => {
     const whopAndDiscord: ProjectSummary = {
       id: 12,
       name: "Whop Plus Discord",
@@ -147,12 +155,14 @@ describe("ProjectsPage", () => {
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
       projectSourceCount: 5,
+      collectionCount: 2, // 1 Whop course + 1 other collection/group
     };
     stubFetch([whopAndDiscord]);
     renderProjects();
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "Whop Plus Discord" })).toBeInTheDocument());
-    expect(screen.getByText("Whop")).toBeInTheDocument();
+    expect(screen.getByText("2 collections")).toBeInTheDocument();
+    expect(screen.queryByText("Whop")).not.toBeInTheDocument();
     expect(screen.queryByText("5 sources")).not.toBeInTheDocument();
   });
 
@@ -173,7 +183,8 @@ describe("ProjectsPage", () => {
       analyzedLessonCount: 0,
       latestSynthesisStatus: null,
       latestSynthesisCompletedAt: null,
-      projectSourceCount: 0,
+      projectSourceCount: 4,
+      collectionCount: 2,
     };
 
     it("shows the real project type label (never a bare 'Coming Soon' in its place) plus a separate, synthesis-scoped note", async () => {
@@ -183,6 +194,7 @@ describe("ProjectsPage", () => {
 
       expect(screen.getByText("General Knowledge")).toBeInTheDocument();
       expect(screen.getByText("Synthesis Coming Soon")).toBeInTheDocument();
+      expect(screen.getByText("2 collections")).toBeInTheDocument();
       // Never the old bare label that implied the whole project was unusable.
       expect(screen.queryByText("Coming Soon")).not.toBeInTheDocument();
     });
@@ -266,6 +278,8 @@ describe("ProjectsPage", () => {
               analyzedLessonCount: 0,
               latestSynthesisStatus: null,
               latestSynthesisCompletedAt: null,
+              projectSourceCount: 0,
+              collectionCount: 0,
             },
           });
         }

@@ -109,6 +109,23 @@ export async function listSourceCollectionsByProjectId(pool: Pool, projectId: nu
   return result.rows.map(mapRow);
 }
 
+/** Batched sibling of listSourceCollectionsByProjectId — every collection for ANY of the given projects, in ONE round trip, grouped by project id. For callers (e.g. the Projects list's collectionCount) that would otherwise call the single-project version once per project. */
+export async function listSourceCollectionsByProjectIds(pool: Pool, projectIds: number[]): Promise<Map<number, SourceCollectionRow[]>> {
+  const map = new Map<number, SourceCollectionRow[]>();
+  if (projectIds.length === 0) return map;
+  const result = await pool.query<CollectionDbRow>(
+    `SELECT ${COLUMNS} FROM source_collections WHERE project_id = ANY($1::bigint[]) ORDER BY created_at ASC`,
+    [projectIds],
+  );
+  for (const row of result.rows) {
+    const mapped = mapRow(row);
+    const list = map.get(mapped.projectId);
+    if (list) list.push(mapped);
+    else map.set(mapped.projectId, [mapped]);
+  }
+  return map;
+}
+
 /**
  * Refresh bookkeeping: updates title (a channel may have been renamed),
  * the discovery pagination cursor (see the migration's doc comment — null

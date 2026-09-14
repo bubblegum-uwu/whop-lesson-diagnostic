@@ -1,5 +1,6 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
+import type { KnoveraAuthedRequest } from "../middleware/knoveraAuth.js";
 import { getProjectById, type Project } from "../../db/projectsRepo.js";
 import {
   createSourceCollection,
@@ -10,9 +11,10 @@ import {
   deleteSourceCollection,
   type SourceCollectionRow,
 } from "../../db/sourceCollectionsRepo.js";
-import { createYouTubeSource } from "../../db/projectSourcesRepo.js";
+import { createYouTubeSource, createDiscordSource, getProjectSourceById, listProjectSourceIdsByCollectionId, type ProjectSourceRow } from "../../db/projectSourcesRepo.js";
+import { getContentAssetById } from "../../db/contentAssetsRepo.js";
 import { getCatalogAnalysisStatusForSources, type CatalogAnalysisStatusEntry } from "../../db/projectSourceCatalogStatusRepo.js";
-import { listOriginsBySourceIds } from "../../db/projectSourceOriginsRepo.js";
+import { listOriginsBySourceIds, insertManualOrigin, insertDiscordChannelOrigin, type ProjectSourceOriginRow } from "../../db/projectSourceOriginsRepo.js";
 import {
   listDerivedGroupsForProject,
   listDerivedGroupMemberSourceIds,
@@ -675,5 +677,193 @@ export function createDeleteSourceCollectionHandler(deps: SourceCollectionsRoute
     }
     await deleteSourceCollection(deps.pool, resolved.collection.id);
     res.status(204).end();
+  };
+}
+
+const MAX_ADD_COLLECTION_TO_PROJECT_TARGETS = 20;
+
+export type AddCollectionToProjectTargetKind = "invalid" | "ok";
+export interface AddCollectionToProjectTargetResult {
+  targetProjectId: number;
+  kind: AddCollectionToProjectTargetKind;
+  addedCount: number;
+  alreadyPresentCount: number;
+  failedCount: number;
+}
+export interface AddCollectionToProjectResponse {
+  groupKey: string;
+  memberCount: number;
+  results: AddCollectionToProjectTargetResult[];
+}
+
+/**
+ * Copies ONE member source into `targetProjectId`, preserving provenance
+ * so the SAME canonical group (persisted or derived) resolves in the
+ * destination — never flattened into Manual/À-la-carte. Reuses the exact
+ * cross-project identity/dedup rules `createAddProjectSourceToProjectsHandler`
+ * already established for a single Discord source (spec section
+ * 40-51): YouTube has no shared-asset layer (its URL is durable/free to
+ * reconstruct) so a plain createYouTubeSource upsert is enough; Discord
+ * MUST go through the shared content_assets layer, asset-ownership-checked,
+ * so durable bytes are reused rather than re-downloaded or duplicated.
+ * `targetCollectionId` is non-null only when copying a PERSISTED
+ * collection's member (see the caller) — a derived group's member gets no
+ * collection_id in the destination, exactly like the source project;
+ * origins copied below are what let the SAME derived group re-form there.
+ * Never touches project_source_analyses/project_source_analysis_jobs/
+ * synthesis_set_sources — this is content availability only.
+ */
+async function copyMemberSourceToProject(
+  pool: Pool,
+  source: ProjectSourceRow,
+  origins: ProjectSourceOriginRow[],
+  targetProjectId: number,
+  targetCollectionId: number | null,
+  requesterIdentity: string,
+): Promise<"added" | "already_present" | "failed"> {
+  if (source.provider === "YOUTUBE") {
+    const { source: targetSource, created } = await createYouTubeSource(pool, {
+      projectId: targetProjectId,
+      externalId: source.externalId,
+      sourceUrl: source.sourceUrl,
+      collectionId: targetCollectionId,
+      title: source.title,
+    });
+    // Copied regardless of `created` — idempotent enrichment either way
+    // (insertManualOrigin/insertDiscordChannelOrigin never duplicate), so
+    // a target that already had this source (added-and-later-reclassified)
+    // still picks up any provenance it was missing.
+    for (const origin of origins) {
+      if (origin.originType === "MANUAL") {
+        await insertManualOrigin(pool, targetSource.id);
+      } else if (origin.originType === "DISCORD_CHANNEL" && origin.discordChannelId && origin.discordMessageId && origin.discordPostedAt) {
+        await insertDiscordChannelOrigin(pool, {
+          projectSourceId: targetSource.id,
+          guildId: origin.discordGuildId ?? "",
+          channelId: origin.discordChannelId,
+          channelName: origin.discordChannelName,
+          messageId: origin.discordMessageId,
+          messageUrl: origin.discordMessageUrl,
+          postedAt: origin.discordPostedAt,
+        });
+      }
+    }
+    return created ? "added" : "already_present";
+  }
+
+  // DISCORD — durable bytes live in content_assets, shared by (owner_identity, provider, external_id) across every project; see contentAssetsRepo.ts.
+  if (source.contentAssetId == null) return "failed";
+  const asset = await getContentAssetById(pool, source.contentAssetId);
+  if (!asset || asset.ownerIdentity !== requesterIdentity) return "failed";
+  const { created } = await createDiscordSource(pool, {
+    projectId: targetProjectId,
+    ownerIdentity: asset.ownerIdentity,
+    externalId: source.externalId,
+    sourceUrl: source.sourceUrl,
+    collectionId: targetCollectionId,
+    title: source.title,
+  });
+  return created ? "added" : "already_present";
+}
+
+/**
+ * POST /api/projects/:projectId/collections/:collectionId/add-to-project —
+ * "Add Collection to Project": a ONE-TIME SNAPSHOT copy of every CURRENT
+ * member of this collection/group into one or more other projects (spec:
+ * never a live/ongoing sync — a source added to the SOURCE collection
+ * afterward never appears in the destination on its own; re-run this
+ * action to add anything newly missing). Works identically for a
+ * PERSISTED collection (YouTube/Discord channel) and a DERIVED group
+ * (YouTube-via-Discord-channel, YouTube à-la-carte, Unclassified) — both
+ * resolve via resolveOwnedCollectionGroup, the SAME resolver Analyze
+ * Collection and Synthesis Set selection already share.
+ *
+ * Idempotent per target: re-running this against a destination that
+ * already has some/all members reports those as `alreadyPresentCount`,
+ * never a duplicate row — createYouTubeSource/createDiscordSource's own
+ * ON CONFLICT upserts are the actual dedup guarantee (by (project_id,
+ * provider, external_id)), never an application-level check-then-insert.
+ *
+ * Deliberately never: analyzes anything, copies analysis jobs/results,
+ * selects anything into a Synthesis Set, or triggers synthesis — the
+ * destination project's own sources follow its own normal analysis rules
+ * from a totally unanalyzed state, exactly like any other newly-added
+ * source (this matters most for GENERAL_KNOWLEDGE → TRADING_STRATEGIES,
+ * where the content becomes available but nothing about it is implied
+ * "already reviewed").
+ */
+export function createAddCollectionToProjectHandler(deps: SourceCollectionsRouteDeps) {
+  return async function addCollectionToProjectHandler(req: Request, res: Response): Promise<void> {
+    const resolved = await resolveOwnedCollectionGroup(deps.pool, req.params.projectId, req.params.collectionId);
+    if (!resolved) {
+      res.status(404).json(NOT_FOUND_COLLECTION);
+      return;
+    }
+
+    const body = req.body as { targetProjectIds?: unknown };
+    if (!Array.isArray(body?.targetProjectIds) || body.targetProjectIds.length === 0) {
+      res.status(400).json({ error: { message: "targetProjectIds is required.", type: "invalid_request" } });
+      return;
+    }
+    if (body.targetProjectIds.length > MAX_ADD_COLLECTION_TO_PROJECT_TARGETS) {
+      res.status(400).json({ error: { message: `At most ${MAX_ADD_COLLECTION_TO_PROJECT_TARGETS} target projects per request.`, type: "invalid_request" } });
+      return;
+    }
+
+    const requesterIdentity = (req as KnoveraAuthedRequest).knoveraOperator!;
+
+    const memberIds = resolved.kind === "PERSISTED" ? await listProjectSourceIdsByCollectionId(deps.pool, resolved.collection.id) : resolved.memberSourceIds;
+    const [memberSources, originsBySource] = await Promise.all([
+      Promise.all(memberIds.map((id) => getProjectSourceById(deps.pool, id))),
+      listOriginsBySourceIds(deps.pool, memberIds),
+    ]);
+    const members = memberSources.filter((s): s is NonNullable<typeof s> => s !== null);
+
+    const results: AddCollectionToProjectTargetResult[] = [];
+    for (const rawTargetProjectId of body.targetProjectIds) {
+      const targetProjectId = Number(rawTargetProjectId);
+      if (!Number.isInteger(targetProjectId) || targetProjectId === resolved.project.id) {
+        results.push({ targetProjectId: Number.isFinite(targetProjectId) ? targetProjectId : -1, kind: "invalid", addedCount: 0, alreadyPresentCount: 0, failedCount: 0 });
+        continue;
+      }
+      const targetProject = await getProjectById(deps.pool, targetProjectId);
+      if (!targetProject) {
+        results.push({ targetProjectId, kind: "invalid", addedCount: 0, alreadyPresentCount: 0, failedCount: 0 });
+        continue;
+      }
+
+      // The destination's PERSISTED collection row (same provider+externalId
+      // identity, create-or-reuse) is resolved ONCE per target, never per
+      // member — mirrors createAddProjectSourceToProjectsHandler's
+      // `originalCollection` pattern. A DERIVED group never gets a
+      // fabricated source_collections row here — its identity re-forms
+      // from the copied origins alone (the taxonomy correction's own rule:
+      // never force a derived grouping into source_collections).
+      let targetCollectionId: number | null = null;
+      if (resolved.kind === "PERSISTED") {
+        const { collection } = await createSourceCollection(deps.pool, {
+          projectId: targetProjectId,
+          provider: resolved.collection.provider,
+          externalId: resolved.collection.externalId,
+          title: resolved.collection.title,
+          sourceUrl: resolved.collection.sourceUrl,
+        });
+        targetCollectionId = collection.id;
+      }
+
+      let addedCount = 0;
+      let alreadyPresentCount = 0;
+      let failedCount = 0;
+      for (const source of members) {
+        const outcome = await copyMemberSourceToProject(deps.pool, source, originsBySource.get(source.id) ?? [], targetProjectId, targetCollectionId, requesterIdentity);
+        if (outcome === "added") addedCount++;
+        else if (outcome === "already_present") alreadyPresentCount++;
+        else failedCount++;
+      }
+      results.push({ targetProjectId, kind: "ok", addedCount, alreadyPresentCount, failedCount });
+    }
+
+    const response: AddCollectionToProjectResponse = { groupKey: resolved.groupKey, memberCount: members.length, results };
+    res.status(200).json(response);
   };
 }

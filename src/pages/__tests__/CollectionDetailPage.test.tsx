@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { CollectionDetailPage } from "../CollectionDetailPage";
 
@@ -322,5 +322,61 @@ describe("CollectionDetailPage — DERIVED groups (Phase 4L taxonomy correction)
     fireEvent.click(screen.getByRole("button", { name: "Analyze 1 Remaining" }));
     await waitFor(() => expect(called).toBe(true));
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes(encodeURIComponent(DERIVED_GROUP_KEY)))).toBe(true);
+  });
+
+  it("offers 'Add Collection to Project' for a DERIVED group too — never hidden just because there's no persisted row", async () => {
+    stubDerivedFetch();
+    renderDerivedPage();
+    expect(await screen.findByRole("button", { name: "Add Collection to Project" })).toBeInTheDocument();
+  });
+});
+
+describe("CollectionDetailPage — Add Collection to Project (Phase 4L follow-up)", () => {
+  const OTHER_PROJECT = { ...PROJECT, id: 8, name: "Discord Knowledge", projectType: "GENERAL_KNOWLEDGE" };
+
+  it("is offered for a PERSISTED collection, and copies its members to the chosen destination", async () => {
+    let addToProjectBody: unknown;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT, OTHER_PROJECT] });
+      if (url.includes("/collections/1?") || url.endsWith("/collections/1")) {
+        return jsonResponse(200, { collection: COLLECTION, items: [ITEM_ANALYZED, ITEM_NOT_ANALYZED], pagination: { limit: 200, offset: 0, totalCount: 2 } });
+      }
+      if (url.endsWith("/collections/1/add-to-project") && init?.method === "POST") {
+        addToProjectBody = JSON.parse(init.body as string);
+        return jsonResponse(200, { groupKey: "1", memberCount: 2, results: [{ targetProjectId: 8, kind: "ok", addedCount: 2, alreadyPresentCount: 0, failedCount: 0 }] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add Collection to Project" }));
+    const dialog = await screen.findByRole("dialog");
+    // The collection's OWN project is never offered as a destination.
+    expect(within(dialog).queryByText("MasterMind")).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("checkbox"));
+    fireEvent.click(within(dialog).getByRole("button", { name: /Add to 1 Project/ }));
+
+    await waitFor(() => expect(addToProjectBody).toEqual({ targetProjectIds: [8] }));
+    expect(await within(dialog).findByText(/2 added/)).toBeInTheDocument();
+  });
+
+  it("Cancel never calls the add-to-project endpoint", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT, OTHER_PROJECT] });
+      if (url.includes("/collections/1?") || url.endsWith("/collections/1")) {
+        return jsonResponse(200, { collection: COLLECTION, items: [ITEM_ANALYZED, ITEM_NOT_ANALYZED], pagination: { limit: 200, offset: 0, totalCount: 2 } });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Add Collection to Project" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("checkbox"));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("add-to-project"))).toBe(false);
   });
 });

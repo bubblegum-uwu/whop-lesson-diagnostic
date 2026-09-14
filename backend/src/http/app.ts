@@ -45,6 +45,7 @@ import {
   createAddYouTubeCollectionHandler,
   createRefreshSourceCollectionHandler,
   createDeleteSourceCollectionHandler,
+  createAddCollectionToProjectHandler,
 } from "./routes/sourceCollections.js";
 import {
   createListSynthesisSetsHandler,
@@ -294,6 +295,7 @@ export function createApp(config: AppConfig): Express {
   app.get("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createGetSourceCollectionHandler(sourceCollectionsDeps));
   app.post("/api/projects/:projectId/collections/:collectionId/refresh", knoveraAuth, createRefreshSourceCollectionHandler(sourceCollectionsDeps));
   app.delete("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createDeleteSourceCollectionHandler(sourceCollectionsDeps));
+  app.post("/api/projects/:projectId/collections/:collectionId/add-to-project", knoveraAuth, createAddCollectionToProjectHandler(sourceCollectionsDeps));
 
   // Phase 4H-B — project-source analysis (YouTube; Discord as of Phase 4I).
   // Same jobTrigger as lesson-analysis enqueueing (one Cloud Run Job, one

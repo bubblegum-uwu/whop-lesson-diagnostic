@@ -5,6 +5,7 @@ import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysis
 import { ProvenanceLine } from "../components/ProvenanceLine";
 import { RowActionsMenu } from "../components/RowActionsMenu";
 import { AddToProjectDialog } from "../components/AddToProjectDialog";
+import { AddCollectionToProjectDialog } from "../components/AddCollectionToProjectDialog";
 import { useResolvedProject } from "../lib/useResolvedProject";
 import {
   getSourceCollection,
@@ -79,6 +80,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   const [viewingStatus, setViewingStatus] = useState<ProjectSourceAnalysisStatus | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [addToProjectItem, setAddToProjectItem] = useState<CatalogItemSummary | null>(null);
+  const [showAddCollectionToProject, setShowAddCollectionToProject] = useState(false);
   const [analyzeCollectionResult, setAnalyzeCollectionResult] = useState<AnalyzeCollectionResult | null>(null);
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
@@ -300,14 +302,21 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
                 {state.collection.analyzedCount} analyzed
               </p>
             </div>
-            {state.collection.kind === "PERSISTED" && (
-              <div className="knovera-synthesis-set-detail-actions">
-                {state.collection.provider === "YOUTUBE" && (
-                  <button type="button" className="link-button" disabled={busy} onClick={() => void handleRefreshCollection()}>
-                    {busy ? "Refreshing…" : "Refresh"}
-                  </button>
-                )}
-                {confirmingDelete ? (
+            <div className="knovera-synthesis-set-detail-actions">
+              {state.collection.kind === "PERSISTED" && state.collection.provider === "YOUTUBE" && (
+                <button type="button" className="link-button" disabled={busy} onClick={() => void handleRefreshCollection()}>
+                  {busy ? "Refreshing…" : "Refresh"}
+                </button>
+              )}
+              {/* Phase 4L follow-up — "Add Collection to Project" is offered
+                  identically for every collection kind (persisted or
+                  derived); the frontend never exposes that internal
+                  distinction as a UI difference here. */}
+              <button type="button" className="link-button" onClick={() => setShowAddCollectionToProject(true)}>
+                Add Collection to Project
+              </button>
+              {state.collection.kind === "PERSISTED" &&
+                (confirmingDelete ? (
                   <>
                     <span className="hint">Remove this collection?</span>
                     <button type="button" className="link-button" onClick={() => setConfirmingDelete(false)} disabled={busy}>
@@ -321,9 +330,8 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
                   <button type="button" className="link-button danger" onClick={() => setConfirmingDelete(true)}>
                     Remove Collection
                   </button>
-                )}
-              </div>
-            )}
+                ))}
+            </div>
           </div>
           {state.collection.kind === "PERSISTED" ? (
             <p className="hint">Removing a collection only removes the grouping — its items and their analyses are kept.</p>
@@ -442,6 +450,17 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
           sourceId={addToProjectItem.id}
           sourceTitle={addToProjectItem.title ?? addToProjectItem.sourceUrl}
           onClose={() => setAddToProjectItem(null)}
+        />
+      )}
+
+      {showAddCollectionToProject && backendUrl && knoveraToken && resolvedProjectId != null && state.phase === "loaded" && (
+        <AddCollectionToProjectDialog
+          backendUrl={backendUrl}
+          knoveraToken={knoveraToken}
+          projectId={resolvedProjectId}
+          groupKey={groupKey}
+          collectionLabel={catalogGroupOriginLine(state.collection)}
+          onClose={() => setShowAddCollectionToProject(false)}
         />
       )}
     </div>

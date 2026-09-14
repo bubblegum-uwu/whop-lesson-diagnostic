@@ -1,4 +1,8 @@
 import type { Pool } from "pg";
+import { listSourceCollectionsByProjectId, listSourceCollectionsByProjectIds } from "./sourceCollectionsRepo.js";
+import { listDerivedGroupsForProject, listDerivedGroupsForProjects } from "./derivedSourceGroupsRepo.js";
+import { getCoursesByProjectId, getCourseCountsByProjectIds } from "./coursesRepo.js";
+import { listAlaCarteWhopLessonsByProjectId, getAlaCarteWhopLessonCountsByProjectIds } from "./whopLessonImportsRepo.js";
 
 export type ProjectType = "TRADING_STRATEGIES" | "GENERAL_KNOWLEDGE";
 
@@ -138,4 +142,57 @@ export async function getProjectStats(pool: Pool, projectId: number): Promise<Pr
     latestSynthesisCompletedAt: latest?.completed_at ?? null,
     projectSourceCount: Number(projectSourceCountResult.rows[0].count),
   };
+}
+
+/**
+ * Phase 4L follow-up — the canonical "N collections" count for ONE project:
+ * every card that would render on that project's Sources page — persisted
+ * `source_collections` rows, derived groups (YouTube-via-Discord-channel,
+ * YouTube à-la-carte, Unclassified) with at least one current member, Whop
+ * courses, and the Whop à-la-carte group counted once if it has any
+ * members. Reuses the EXACT SAME resolvers the Sources page, Analyze
+ * Collection, and Synthesis Set selection already share (see
+ * derivedSourceGroupsRepo.ts's doc comment) — never a second, independently
+ * reconstructed definition of "collection". For the Projects LIST (many
+ * projects at once), use getCollectionCountsForProjects below instead — it
+ * batches every one of these four lookups into one round trip each rather
+ * than looping this function once per project.
+ */
+export async function getCollectionCountForProject(pool: Pool, projectId: number): Promise<number> {
+  const [persisted, derived, courses, alaCarteLessons] = await Promise.all([
+    listSourceCollectionsByProjectId(pool, projectId),
+    listDerivedGroupsForProject(pool, projectId),
+    getCoursesByProjectId(pool, projectId),
+    listAlaCarteWhopLessonsByProjectId(pool, projectId),
+  ]);
+  return persisted.length + derived.length + courses.length + (alaCarteLessons.length > 0 ? 1 : 0);
+}
+
+/**
+ * Batched sibling of getCollectionCountForProject — computes the SAME
+ * canonical collection count for every one of `projectIds` using exactly
+ * four round trips total (never one set of queries per project), so the
+ * Projects list page never N+1s to show its "N collections" cards. A
+ * project with zero collections/groups simply gets 0 (Map.get's default),
+ * never a missing entry that would render as blank.
+ */
+export async function getCollectionCountsForProjects(pool: Pool, projectIds: number[]): Promise<Map<number, number>> {
+  const result = new Map<number, number>();
+  if (projectIds.length === 0) return result;
+
+  const [persistedByProject, derivedByProject, courseCounts, alaCarteCounts] = await Promise.all([
+    listSourceCollectionsByProjectIds(pool, projectIds),
+    listDerivedGroupsForProjects(pool, projectIds),
+    getCourseCountsByProjectIds(pool, projectIds),
+    getAlaCarteWhopLessonCountsByProjectIds(pool, projectIds),
+  ]);
+
+  for (const projectId of projectIds) {
+    const persistedCount = persistedByProject.get(projectId)?.length ?? 0;
+    const derivedCount = derivedByProject.get(projectId)?.length ?? 0;
+    const courseCount = courseCounts.get(projectId) ?? 0;
+    const alaCarteCount = alaCarteCounts.get(projectId) ?? 0;
+    result.set(projectId, persistedCount + derivedCount + courseCount + (alaCarteCount > 0 ? 1 : 0));
+  }
+  return result;
 }

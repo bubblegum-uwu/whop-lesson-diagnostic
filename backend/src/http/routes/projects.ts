@@ -4,10 +4,11 @@ import {
   listProjects,
   getProjectById,
   getProjectStats,
+  getCollectionCountForProject,
+  getCollectionCountsForProjects,
   createProject,
   type Project,
   type ProjectStats,
-  type ProjectWithStats,
   type ProjectType,
 } from "../../db/projectsRepo.js";
 
@@ -15,8 +16,11 @@ export interface ProjectsRouteDeps {
   pool: Pool;
 }
 
-function serialize(project: Project, stats: ProjectStats): ProjectWithStats {
-  return { ...project, ...stats };
+/** The Projects list/detail response shape — ProjectStats plus the canonical collection count (see getCollectionCountForProject's doc comment). Both are always supplied together so a response can never carry stats without a matching collectionCount. */
+type ProjectWithStats = Project & ProjectStats & { collectionCount: number };
+
+function serialize(project: Project, stats: ProjectStats, collectionCount: number): ProjectWithStats {
+  return { ...project, ...stats, collectionCount };
 }
 
 /**
@@ -25,13 +29,21 @@ function serialize(project: Project, stats: ProjectStats): ProjectWithStats {
  * migration); a real multi-project list is what this reads once more
  * projects exist. Gated by the same operatorAuth middleware as every other
  * course/analysis route — no unauthenticated project data.
+ *
+ * Phase 4L follow-up — `collectionCount` is computed via
+ * getCollectionCountsForProjects, batched across every project in ONE set
+ * of round trips rather than once per project, so this list never N+1s
+ * (the pre-existing per-project getProjectStats calls below are an
+ * existing, separate N+1 this change doesn't widen further).
  */
 export function createListProjectsHandler(deps: ProjectsRouteDeps) {
   return async function listProjectsHandler(_req: Request, res: Response): Promise<void> {
     const projects = await listProjects(deps.pool);
-    const withStats = await Promise.all(
-      projects.map(async (project) => serialize(project, await getProjectStats(deps.pool, project.id))),
-    );
+    const [statsList, collectionCounts] = await Promise.all([
+      Promise.all(projects.map((project) => getProjectStats(deps.pool, project.id))),
+      getCollectionCountsForProjects(deps.pool, projects.map((p) => p.id)),
+    ]);
+    const withStats = projects.map((project, i) => serialize(project, statsList[i], collectionCounts.get(project.id) ?? 0));
     res.status(200).json({ projects: withStats });
   };
 }
@@ -51,8 +63,8 @@ export function createGetProjectHandler(deps: ProjectsRouteDeps) {
       return;
     }
 
-    const stats = await getProjectStats(deps.pool, project.id);
-    res.status(200).json({ project: serialize(project, stats) });
+    const [stats, collectionCount] = await Promise.all([getProjectStats(deps.pool, project.id), getCollectionCountForProject(deps.pool, project.id)]);
+    res.status(200).json({ project: serialize(project, stats, collectionCount) });
   };
 }
 
@@ -137,7 +149,11 @@ export function createCreateProjectHandler(deps: ProjectsRouteDeps) {
     }
 
     const project = await createProject(deps.pool, validation.value.name, validation.value.projectType);
-    const stats = await getProjectStats(deps.pool, project.id);
-    res.status(201).json({ project: serialize(project, stats) });
+    // A freshly created project has no sources of any kind yet, so its
+    // collectionCount is trivially 0 — still computed via
+    // getCollectionCountForProject (rather than hand-written as 0) so this
+    // response shape can never silently drift from GET's.
+    const [stats, collectionCount] = await Promise.all([getProjectStats(deps.pool, project.id), getCollectionCountForProject(deps.pool, project.id)]);
+    res.status(201).json({ project: serialize(project, stats, collectionCount) });
   };
 }
