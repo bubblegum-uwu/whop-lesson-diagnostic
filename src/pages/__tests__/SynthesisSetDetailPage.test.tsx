@@ -2,8 +2,8 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { SynthesisSetDetailPage } from "../SynthesisSetDetailPage";
-import type { SynthesisSetDetail } from "../../lib/synthesisSetsApi";
-import type { CatalogCollectionSummary, CatalogItemSummary } from "../../lib/catalogApi";
+import type { SynthesisSetDetail, LegacySynthesisRunSummary, LegacySynthesisPlaybook } from "../../lib/synthesisSetsApi";
+import type { CatalogCollectionSummary, CatalogItemSummary, WhopCourseSummary, WhopLessonItemSummary, AlaCarteWhopLessonSummary } from "../../lib/catalogApi";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -42,6 +42,7 @@ function makeSet(overrides: Partial<SynthesisSetDetail> = {}): SynthesisSetDetai
     analyzedSourceCount: 0,
     needsAnalysisCount: 0,
     sources: [],
+    lessons: [],
     ...overrides,
   };
 }
@@ -168,11 +169,28 @@ interface StubConfig {
   onBulkSources?: (body: unknown) => void;
   onRename?: (body: unknown) => void;
   onDeleteSet?: () => void;
+  /** Pre-4M — Whop courses fully connected to this project, for the "WHOP · COURSE" Collections row. Defaults to none, so existing YouTube/Discord-only tests need no changes. */
+  whopCourses?: WhopCourseSummary[];
+  /** Keyed by courseId. */
+  lessonsByCourse?: Record<number, WhopLessonItemSummary[]>;
+  alaCarteLessons?: AlaCarteWhopLessonSummary[];
+  legacyRuns?: LegacySynthesisRunSummary[];
+  playbooksByRun?: Record<string, LegacySynthesisPlaybook>;
+  onAddLesson?: (lessonId: number) => void;
+  onRemoveLesson?: (lessonId: number) => void;
+  onBulkLessons?: (body: unknown) => void;
+  onCourseBulkAdd?: (courseId: number) => void;
+  onCourseBulkRemove?: (courseId: number) => void;
 }
 
 function stubFetch(config: StubConfig) {
   const collections = config.collections ?? [];
   const itemsByCollection = config.itemsByCollection ?? {};
+  const whopCourses = config.whopCourses ?? [];
+  const lessonsByCourse = config.lessonsByCourse ?? {};
+  const alaCarteLessons = config.alaCarteLessons ?? [];
+  const legacyRuns = config.legacyRuns ?? [];
+  const playbooksByRun = config.playbooksByRun ?? {};
 
   let renamed = false;
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -232,6 +250,58 @@ function stubFetch(config: StubConfig) {
     if (removeMatch && init?.method === "DELETE") {
       config.onRemoveSource?.(Number(removeMatch[1]));
       return noContentResponse();
+    }
+
+    // Pre-4M — Whop lesson/course membership + legacy history. Defaults to
+    // empty so every pre-existing test (none of which mentions Whop) sees
+    // exactly the same YouTube/Discord-only page it always did.
+    if (url.endsWith("/whop-courses") && (!init || init.method === undefined)) {
+      return jsonResponse(200, { courses: whopCourses });
+    }
+    if (url.endsWith("/whop-lessons") && (!init || init.method === undefined)) {
+      return jsonResponse(200, { projectId: 7, items: alaCarteLessons });
+    }
+    const courseLessonsMatch = url.match(/\/whop-courses\/(\d+)\/lessons/);
+    if (courseLessonsMatch && (!init || init.method === undefined)) {
+      const courseId = Number(courseLessonsMatch[1]);
+      const course = whopCourses.find((c) => c.courseId === courseId);
+      const items = lessonsByCourse[courseId] ?? [];
+      return jsonResponse(200, { course, items, pagination: { limit: 200, offset: 0, totalCount: items.length } });
+    }
+    const courseBulkMatch = url.match(/\/synthesis-sets\/1\/whop-courses\/(\d+)$/);
+    if (courseBulkMatch && init?.method === "POST") {
+      const courseId = Number(courseBulkMatch[1]);
+      config.onCourseBulkAdd?.(courseId);
+      return jsonResponse(200, { courseId, eligibleCount: 1, alreadySelectedCount: 0, addedCount: 1, ineligibleCount: 0 });
+    }
+    if (courseBulkMatch && init?.method === "DELETE") {
+      const courseId = Number(courseBulkMatch[1]);
+      config.onCourseBulkRemove?.(courseId);
+      return jsonResponse(200, { courseId, removedCount: 1 });
+    }
+    if (url.endsWith("/synthesis-sets/1/lessons/bulk") && init?.method === "POST") {
+      config.onBulkLessons?.(JSON.parse(init.body as string));
+      return jsonResponse(200, { synthesisSetId: 1, addedCount: 1, ineligibleSkippedCount: 0, removedCount: 1 });
+    }
+    if (url.endsWith("/synthesis-sets/1/lessons") && init?.method === "POST") {
+      const lessonId = JSON.parse(init.body as string).lessonId as number;
+      config.onAddLesson?.(lessonId);
+      return jsonResponse(201, { synthesisSetId: 1, lessonId, added: true });
+    }
+    const removeLessonMatch = url.match(/\/synthesis-sets\/1\/lessons\/(\d+)$/);
+    if (removeLessonMatch && init?.method === "DELETE") {
+      config.onRemoveLesson?.(Number(removeLessonMatch[1]));
+      return noContentResponse();
+    }
+    if (url.endsWith("/legacy-runs") && (!init || init.method === undefined)) {
+      return jsonResponse(200, { synthesisSetId: 1, runs: legacyRuns });
+    }
+    const playbookMatch = url.match(/\/legacy-runs\/([^/]+)\/playbook$/);
+    if (playbookMatch && (!init || init.method === undefined)) {
+      const runId = playbookMatch[1];
+      const playbook = playbooksByRun[runId];
+      if (!playbook) return jsonResponse(404, { error: { message: "No playbook exists for this run.", type: "playbook_not_found" } });
+      return jsonResponse(200, playbook);
     }
 
     return jsonResponse(404, {});
@@ -717,6 +787,7 @@ describe("SynthesisSetDetailPage — Fine Tune with a derived Discord-channel CH
           analyzedSourceCount: analyzedCount,
           needsAnalysisCount: 0,
           sources: memberIds.map((id) => ({ id, analyzed: true })),
+          lessons: [],
         });
       }
       if (url.endsWith("/collections") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, collections: [collection] });
@@ -742,6 +813,9 @@ describe("SynthesisSetDetailPage — Fine Tune with a derived Discord-channel CH
         memberIds = memberIds.filter((id) => id !== Number(removeMatch[1]));
         return new Response(null, { status: 204 });
       }
+      if (url.endsWith("/whop-courses") && (!init || init.method === undefined)) return jsonResponse(200, { courses: [] });
+      if (url.endsWith("/whop-lessons") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, items: [] });
+      if (url.endsWith("/legacy-runs") && (!init || init.method === undefined)) return jsonResponse(200, { synthesisSetId: 1, runs: [] });
       return jsonResponse(404, {});
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -828,5 +902,178 @@ describe("SynthesisSetDetailPage — Fine Tune with a derived Discord-channel CH
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     expect(await screen.findByLabelText("Include YouTube URL 601 in Scalping Playbook")).toBeDisabled();
     expect(screen.getByLabelText("Select all eligible sources in Discord · #scarface-alerts")).toBeDisabled();
+  });
+});
+
+describe("SynthesisSetDetailPage — Pre-4M Whop lesson membership + legacy history (frontend scenarios 22-27)", () => {
+  const WHOP_COURSE: WhopCourseSummary = {
+    provider: "WHOP",
+    sourceType: "COURSE",
+    courseId: 5,
+    externalId: "cors_abc",
+    name: "The Trading Accelerator",
+    lessonCount: 3,
+    analyzedLessonCount: 3,
+    queuedCount: 0,
+    processingCount: 0,
+    failedCount: 0,
+    remainingCount: 0,
+    lastSyncedAt: "2026-01-01T00:00:00.000Z",
+    totalCost: 1.5,
+  };
+
+  function makeLessonItem(id: number, title: string): WhopLessonItemSummary {
+    return { id, title, chapterTitle: null, sourceUrl: "https://whop.com/x", durationSeconds: 600, status: "ANALYZED", eligibleForSynthesis: true };
+  }
+
+  it("22: Strategies renders a WHOP · COURSE Collections row for a fully-connected course", async () => {
+    stubFetch({
+      set: makeSet({ name: "Strategies" }),
+      whopCourses: [WHOP_COURSE],
+      lessonsByCourse: { 5: [makeLessonItem(201, "Lesson A"), makeLessonItem(202, "Lesson B"), makeLessonItem(203, "Lesson C")] },
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("WHOP · COURSE")).toBeInTheDocument());
+    expect(screen.getByText("The Trading Accelerator")).toBeInTheDocument();
+  });
+
+  it("23: shows N/N eligible selected once every lesson is a set member", async () => {
+    stubFetch({
+      set: makeSet({
+        name: "Strategies",
+        sourceCount: 3,
+        analyzedSourceCount: 3,
+        lessons: [
+          { kind: "WHOP_LESSON", id: 201, courseId: 5, title: "Lesson A", chapterTitle: null, sourceUrl: "https://whop.com/x", durationSeconds: 600, analyzed: true },
+          { kind: "WHOP_LESSON", id: 202, courseId: 5, title: "Lesson B", chapterTitle: null, sourceUrl: "https://whop.com/x", durationSeconds: 600, analyzed: true },
+          { kind: "WHOP_LESSON", id: 203, courseId: 5, title: "Lesson C", chapterTitle: null, sourceUrl: "https://whop.com/x", durationSeconds: 600, analyzed: true },
+        ],
+      }),
+      whopCourses: [WHOP_COURSE],
+      lessonsByCourse: { 5: [makeLessonItem(201, "Lesson A"), makeLessonItem(202, "Lesson B"), makeLessonItem(203, "Lesson C")] },
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("3/3 eligible selected")).toBeInTheDocument());
+    expect(screen.getByText("3 selected · 3 analyzed · 0 needs analysis")).toBeInTheDocument();
+  });
+
+  it("24: Fine Tune renders Whop lessons individually, distinctly labeled by course", async () => {
+    stubFetch({
+      set: makeSet(),
+      whopCourses: [WHOP_COURSE],
+      lessonsByCourse: { 5: [makeLessonItem(201, "Lesson A"), makeLessonItem(202, "Lesson B")] },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    expect(await screen.findByText("Lesson A")).toBeInTheDocument();
+    expect(screen.getByText("Lesson B")).toBeInTheDocument();
+    // Once in the Collections WHOP · COURSE row, once per Fine Tune lesson row.
+    expect(screen.getAllByText("The Trading Accelerator")).toHaveLength(3);
+  });
+
+  it("25: legacy history shows both COMPLETED and FAILED runs, never discarding failures", async () => {
+    const runs: LegacySynthesisRunSummary[] = [
+      {
+        runId: "run-completed",
+        status: "COMPLETED",
+        createdAt: "2026-09-01T00:00:00.000Z",
+        completedAt: "2026-09-01T01:00:00.000Z",
+        model: "gemini-3.8-flash",
+        synthesisPromptVersion: "v1",
+        synthesizerVersion: "v1",
+        sourceAnalysisCount: 28,
+        errorType: null,
+        sanitizedError: null,
+        hasPlaybook: true,
+      },
+      {
+        runId: "run-failed",
+        status: "FAILED",
+        createdAt: "2026-08-01T00:00:00.000Z",
+        completedAt: "2026-08-01T00:05:00.000Z",
+        model: "gemini-3.8-flash",
+        synthesisPromptVersion: "v1",
+        synthesizerVersion: "v1",
+        sourceAnalysisCount: 28,
+        errorType: "gemini_error",
+        sanitizedError: "Synthesis failed.",
+        hasPlaybook: false,
+      },
+    ];
+    stubFetch({ set: makeSet(), legacyRuns: runs });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Legacy Synthesis History")).toBeInTheDocument());
+    expect(screen.getByText("COMPLETED")).toBeInTheDocument();
+    expect(screen.getByText("FAILED")).toBeInTheDocument();
+    expect(screen.getByText(/Synthesis failed\./)).toBeInTheDocument();
+  });
+
+  it("26: the latest completed legacy run is clearly marked", async () => {
+    const runs: LegacySynthesisRunSummary[] = [
+      {
+        runId: "run-old",
+        status: "COMPLETED",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        completedAt: "2026-01-01T01:00:00.000Z",
+        model: "m",
+        synthesisPromptVersion: "v1",
+        synthesizerVersion: "v1",
+        sourceAnalysisCount: 10,
+        errorType: null,
+        sanitizedError: null,
+        hasPlaybook: true,
+      },
+      {
+        runId: "run-latest",
+        status: "COMPLETED",
+        createdAt: "2026-09-01T00:00:00.000Z",
+        completedAt: "2026-09-01T01:00:00.000Z",
+        model: "m",
+        synthesisPromptVersion: "v1",
+        synthesizerVersion: "v1",
+        sourceAnalysisCount: 28,
+        errorType: null,
+        sanitizedError: null,
+        hasPlaybook: true,
+      },
+    ];
+    stubFetch({ set: makeSet(), legacyRuns: runs });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Legacy Synthesis History")).toBeInTheDocument());
+    expect(screen.getAllByText("Latest")).toHaveLength(1);
+  });
+
+  it("27: an existing playbook for a completed legacy run can be viewed without creating a new run", async () => {
+    const runs: LegacySynthesisRunSummary[] = [
+      {
+        runId: "run-completed",
+        status: "COMPLETED",
+        createdAt: "2026-09-01T00:00:00.000Z",
+        completedAt: "2026-09-01T01:00:00.000Z",
+        model: "m",
+        synthesisPromptVersion: "v1",
+        synthesizerVersion: "v1",
+        sourceAnalysisCount: 28,
+        errorType: null,
+        sanitizedError: null,
+        hasPlaybook: true,
+      },
+    ];
+    const playbook: LegacySynthesisPlaybook = {
+      runId: "run-completed",
+      title: "Recovered Playbook",
+      coreFramework: { sections: [] },
+      playbook: { title: "Recovered Playbook" },
+      decisionFramework: { nodes: [] },
+    };
+    const fetchMock = stubFetch({ set: makeSet(), legacyRuns: runs, playbooksByRun: { "run-completed": playbook } });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Legacy Synthesis History")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "View Playbook" }));
+    await waitFor(() => expect(screen.getByText("Recovered Playbook")).toBeInTheDocument());
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/legacy-runs/run-completed/playbook"))).toBe(true);
+    // Never a synthesis-execution call.
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/synthesize"))).toBe(false);
   });
 });

@@ -1,4 +1,6 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
+
+export type Queryable = Pool | PoolClient;
 
 /**
  * Phase 4J — a persistent, named configuration: "these sources should be
@@ -44,8 +46,9 @@ export interface CreateSynthesisSetInput {
   description: string | null;
 }
 
-export async function createSynthesisSet(pool: Pool, input: CreateSynthesisSetInput): Promise<SynthesisSetRow> {
-  const result = await pool.query<SynthesisSetDbRow>(
+/** `db` accepts a PoolClient too (widened beyond a plain Pool) so the legacy Whop synthesis recovery script (scripts/recoverLegacyWhopSynthesis.ts) can create a set inside its own explicit transaction alongside the lesson/legacy-run attachment writes. */
+export async function createSynthesisSet(db: Queryable, input: CreateSynthesisSetInput): Promise<SynthesisSetRow> {
+  const result = await db.query<SynthesisSetDbRow>(
     `INSERT INTO synthesis_sets (project_id, name, description) VALUES ($1, $2, $3) RETURNING ${COLUMNS}`,
     [input.projectId, input.name, input.description],
   );

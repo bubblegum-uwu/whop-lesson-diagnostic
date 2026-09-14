@@ -88,6 +88,12 @@ export async function getProjectById(pool: Pool, id: number): Promise<Project | 
   return result.rows[0] ? mapRow(result.rows[0]) : null;
 }
 
+/** Pre-4M — a stable-identifier lookup (name + type, rather than a hardcoded PK) for the legacy Whop synthesis recovery script (scripts/recoverLegacyWhopSynthesis.ts), which must never assume a particular project's database id. `name` is not globally unique by schema, so this returns the first match by id (deterministic, not "latest") — good enough for a single-operator deployment's one MasterMind project. */
+export async function getProjectByName(pool: Pool, name: string, projectType: ProjectType): Promise<Project | null> {
+  const result = await pool.query(`SELECT ${COLUMNS} FROM projects WHERE name = $1 AND project_type = $2 ORDER BY id ASC LIMIT 1`, [name, projectType]);
+  return result.rows[0] ? mapRow(result.rows[0]) : null;
+}
+
 export async function getProjectForCourse(pool: Pool, courseId: number): Promise<Project | null> {
   const result = await pool.query(
     `SELECT p.id, p.name, p.project_type, p.created_at, p.updated_at

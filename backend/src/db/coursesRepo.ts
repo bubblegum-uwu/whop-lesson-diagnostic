@@ -64,6 +64,15 @@ export async function getCourseByWhopId(pool: Pool, whopCourseId: string): Promi
   return result.rows[0] ? mapRow(result.rows[0]) : null;
 }
 
+export async function getCourseById(pool: Pool, id: number): Promise<CourseRow | null> {
+  const result = await pool.query(
+    `SELECT id, whop_course_id, whop_experience_id, slug, title, last_synced_at, project_id
+     FROM courses WHERE id = $1`,
+    [id],
+  );
+  return result.rows[0] ? mapRow(result.rows[0]) : null;
+}
+
 /**
  * Phase 4C — the project-ownership boundary for `GET
  * /api/projects/:projectId/sources`: every course this project actually

@@ -37,8 +37,30 @@ export type SynthesisSetMemberSource = ProjectSource & {
   analyzed: boolean;
 };
 
+/**
+ * Pre-4M — a Whop lesson member of a Synthesis Set. Deliberately a
+ * DISTINCT shape from SynthesisSetMemberSource rather than flattened into
+ * it — a Whop lesson never lived in `project_sources` and this bridge
+ * doesn't pretend otherwise (see backend/src/http/routes/synthesisSets.ts's
+ * "Pre-4M" sections). `kind: "WHOP_LESSON"` is the discriminator the UI
+ * uses to render it distinctly and to keep its id space (lessons.id) from
+ * ever being confused with a project_source id.
+ */
+export interface SynthesisSetMemberLesson {
+  kind: "WHOP_LESSON";
+  id: number;
+  courseId: number;
+  title: string;
+  chapterTitle: string | null;
+  sourceUrl: string;
+  durationSeconds: number | null;
+  analyzed: boolean;
+}
+
 export interface SynthesisSetDetail extends SynthesisSetSummary {
   sources: SynthesisSetMemberSource[];
+  /** Pre-4M — the set's Whop lesson members, kept as a separate typed array (see SynthesisSetMemberLesson's doc comment) rather than merged into `sources`. */
+  lessons: SynthesisSetMemberLesson[];
 }
 
 export class SynthesisSetError extends Error {
@@ -241,4 +263,115 @@ export async function bulkRemoveCollectionFromSynthesisSet(
   });
   await throwOnError(res, `Failed to remove this collection's sources (${res.status}).`);
   return (await res.json()) as { collectionId: string; removedCount: number };
+}
+
+// =============================================================================
+// Pre-4M — Whop lesson membership. Mirrors the project_source membership
+// functions above exactly in shape/semantics; only the underlying id space
+// (lessons.id, never project_sources.id) differs. See
+// backend/src/http/routes/synthesisSets.ts's own "Pre-4M" section comment.
+// =============================================================================
+
+/** POST .../synthesis-sets/:setId/lessons — adds a Whop lesson to this set. Idempotent; never analyzes, never enqueues anything. */
+export async function addLessonToSynthesisSet(backendUrl: string, knoveraToken: string, projectId: number, setId: number, lessonId: number): Promise<void> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/lessons`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ lessonId }),
+  });
+  await throwOnError(res, `Failed to add lesson to synthesis set (${res.status}).`);
+}
+
+/** DELETE .../synthesis-sets/:setId/lessons/:lessonId — removes membership only; never deletes the lesson or its analysis. */
+export async function removeLessonFromSynthesisSet(backendUrl: string, knoveraToken: string, projectId: number, setId: number, lessonId: number): Promise<void> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/lessons/${lessonId}`, {
+    method: "DELETE",
+    headers: authHeaders(knoveraToken),
+  });
+  await throwOnError(res, `Failed to remove lesson from synthesis set (${res.status}).`);
+}
+
+/** POST .../synthesis-sets/:setId/lessons/bulk — the Fine-Tune editor's "select/deselect all visible" actions applied to Whop lesson rows, mirroring bulkUpdateSynthesisSetSources. */
+export async function bulkUpdateSynthesisSetLessons(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  setId: number,
+  update: { add?: number[]; remove?: number[] },
+): Promise<BulkUpdateSynthesisSetSourcesResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/lessons/bulk`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  await throwOnError(res, `Failed to update lesson selection (${res.status}).`);
+  return (await res.json()) as BulkUpdateSynthesisSetSourcesResult;
+}
+
+/**
+ * POST .../synthesis-sets/:setId/whop-courses/:courseId — "select this
+ * whole Whop course": a ONE-TIME snapshot bulk-add of every CURRENTLY
+ * eligible lesson of a course fully connected to this project. Never a
+ * live rule, mirrors bulkAddCollectionToSynthesisSet exactly.
+ */
+export async function bulkAddCourseToSynthesisSet(backendUrl: string, knoveraToken: string, projectId: number, setId: number, courseId: number): Promise<BulkCollectionSelectionResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/whop-courses/${courseId}`, {
+    method: "POST",
+    headers: authHeaders(knoveraToken),
+  });
+  await throwOnError(res, `Failed to select this course (${res.status}).`);
+  return (await res.json()) as BulkCollectionSelectionResult;
+}
+
+/** DELETE .../synthesis-sets/:setId/whop-courses/:courseId — removes ONLY this course's currently-selected lessons from THIS set. */
+export async function bulkRemoveCourseFromSynthesisSet(backendUrl: string, knoveraToken: string, projectId: number, setId: number, courseId: number): Promise<{ courseId: number; removedCount: number }> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/whop-courses/${courseId}`, {
+    method: "DELETE",
+    headers: authHeaders(knoveraToken),
+  });
+  await throwOnError(res, `Failed to remove this course's lessons (${res.status}).`);
+  return (await res.json()) as { courseId: number; removedCount: number };
+}
+
+// =============================================================================
+// Pre-4M — legacy Whop synthesis history. VIEW-ONLY: nothing here triggers
+// a run or mutates historical data. Attachment happens only via the
+// backend's recovery script (scripts/recoverLegacyWhopSynthesis.ts).
+// =============================================================================
+
+export interface LegacySynthesisRunSummary {
+  runId: string;
+  status: "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED";
+  createdAt: string;
+  completedAt: string | null;
+  model: string;
+  synthesisPromptVersion: string;
+  synthesizerVersion: string;
+  sourceAnalysisCount: number;
+  errorType: string | null;
+  sanitizedError: string | null;
+  hasPlaybook: boolean;
+}
+
+/** GET .../synthesis-sets/:setId/legacy-runs — every legacy synthesis_runs row attached to this set, newest first, COMPLETED and FAILED alike. Never includes the playbook JSON itself. */
+export async function listLegacySynthesisRuns(backendUrl: string, knoveraToken: string, projectId: number, setId: number): Promise<LegacySynthesisRunSummary[]> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/legacy-runs`, { headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to load legacy synthesis history (${res.status}).`);
+  const body = (await res.json()) as { runs: LegacySynthesisRunSummary[] };
+  return body.runs;
+}
+
+export interface LegacySynthesisPlaybook {
+  runId: string;
+  title: string;
+  coreFramework: unknown;
+  playbook: unknown;
+  decisionFramework: unknown;
+}
+
+/** GET .../synthesis-sets/:setId/legacy-runs/:runId/playbook — the existing, immutable course_playbooks content for one attached COMPLETED legacy run. 404s for a FAILED run or one with no playbook. */
+export async function getLegacySynthesisPlaybook(backendUrl: string, knoveraToken: string, projectId: number, setId: number, runId: string): Promise<LegacySynthesisPlaybook> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/legacy-runs/${runId}/playbook`, { headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to load playbook (${res.status}).`);
+  return (await res.json()) as LegacySynthesisPlaybook;
 }

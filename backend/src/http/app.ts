@@ -57,6 +57,13 @@ import {
   createBulkUpdateSynthesisSetSourcesHandler,
   createBulkAddCollectionToSynthesisSetHandler,
   createBulkRemoveCollectionFromSynthesisSetHandler,
+  createAddLessonToSynthesisSetHandler,
+  createRemoveLessonFromSynthesisSetHandler,
+  createBulkUpdateSynthesisSetLessonsHandler,
+  createBulkAddCourseToSynthesisSetHandler,
+  createBulkRemoveCourseFromSynthesisSetHandler,
+  createListLegacySynthesisRunsHandler,
+  createGetLegacySynthesisPlaybookHandler,
 } from "./routes/synthesisSets.js";
 import {
   createAnalyzeProjectSourceHandler,
@@ -371,6 +378,44 @@ export function createApp(config: AppConfig): Express {
     "/api/projects/:projectId/synthesis-sets/:setId/collections/:collectionId",
     knoveraAuth,
     createBulkRemoveCollectionFromSynthesisSetHandler(projectsDeps),
+  );
+  // Pre-4M — the Whop lesson membership bridge (synthesis_set_lessons),
+  // mirroring the project_source membership routes above exactly. See
+  // http/routes/synthesisSets.ts's own section comment for the full
+  // reasoning.
+  app.post("/api/projects/:projectId/synthesis-sets/:setId/lessons", knoveraAuth, createAddLessonToSynthesisSetHandler(projectsDeps));
+  app.delete(
+    "/api/projects/:projectId/synthesis-sets/:setId/lessons/:lessonId",
+    knoveraAuth,
+    createRemoveLessonFromSynthesisSetHandler(projectsDeps),
+  );
+  app.post(
+    "/api/projects/:projectId/synthesis-sets/:setId/lessons/bulk",
+    knoveraAuth,
+    createBulkUpdateSynthesisSetLessonsHandler(projectsDeps),
+  );
+  app.post(
+    "/api/projects/:projectId/synthesis-sets/:setId/whop-courses/:courseId",
+    knoveraAuth,
+    createBulkAddCourseToSynthesisSetHandler(projectsDeps),
+  );
+  app.delete(
+    "/api/projects/:projectId/synthesis-sets/:setId/whop-courses/:courseId",
+    knoveraAuth,
+    createBulkRemoveCourseFromSynthesisSetHandler(projectsDeps),
+  );
+  // Pre-4M — legacy Whop synthesis history, view-only (see
+  // http/routes/synthesisSets.ts's section comment: attachment happens
+  // only via scripts/recoverLegacyWhopSynthesis.ts, never through the API).
+  app.get(
+    "/api/projects/:projectId/synthesis-sets/:setId/legacy-runs",
+    knoveraAuth,
+    createListLegacySynthesisRunsHandler(projectsDeps),
+  );
+  app.get(
+    "/api/projects/:projectId/synthesis-sets/:setId/legacy-runs/:runId/playbook",
+    knoveraAuth,
+    createGetLegacySynthesisPlaybookHandler(projectsDeps),
   );
 
   // Phase 4E — the project-aware counterpart to /api/course/synthesis*
