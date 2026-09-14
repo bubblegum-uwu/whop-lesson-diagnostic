@@ -3,7 +3,6 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { SynthesisSetDetailPage } from "../SynthesisSetDetailPage";
 import type { SynthesisSetDetail } from "../../lib/synthesisSetsApi";
-import type { YouTubeProjectSource, DiscordProjectSource } from "../../lib/sourcesApi";
 import type { CatalogCollectionSummary, CatalogItemSummary } from "../../lib/catalogApi";
 
 afterEach(() => {
@@ -47,9 +46,15 @@ function makeSet(overrides: Partial<SynthesisSetDetail> = {}): SynthesisSetDetai
   };
 }
 
+/** A real, persisted YouTube-channel collection — unaffected by the Phase 4L taxonomy correction. Origin line: "YouTube · SMB Capital". */
 const COLLECTION: CatalogCollectionSummary = {
+  groupKey: "10",
+  kind: "PERSISTED",
   id: 10,
   provider: "YOUTUBE",
+  sourceType: "CHANNEL",
+  originProvider: null,
+  originContainerId: null,
   externalId: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
   title: "SMB Capital",
   sourceUrl: "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw",
@@ -58,6 +63,46 @@ const COLLECTION: CatalogCollectionSummary = {
   lastSyncedAt: "2026-01-01T00:00:00.000Z",
   itemCount: 2,
   analyzedCount: 1,
+  hasMoreHistory: false,
+};
+
+/** A DERIVED group — genuinely manual YouTube à-la-carte adds (Phase 4L taxonomy correction: never a generic "Uncollected" bucket). Origin line: "Manual YouTube". */
+const DERIVED_ALA_CARTE: CatalogCollectionSummary = {
+  groupKey: "derived:youtube-ala-carte",
+  kind: "DERIVED",
+  id: null,
+  provider: "YOUTUBE",
+  sourceType: "A_LA_CARTE",
+  originProvider: "MANUAL",
+  originContainerId: null,
+  externalId: null,
+  title: "Manual YouTube",
+  sourceUrl: null,
+  status: null,
+  sanitizedError: null,
+  lastSyncedAt: null,
+  itemCount: 1,
+  analyzedCount: 0,
+  hasMoreHistory: false,
+};
+
+/** A DERIVED group for genuinely unclassifiable sources (e.g. a raw-Discord-CDN-URL-paste add with no channel provenance) — never mislabeled as Discord à-la-carte. */
+const DERIVED_UNCLASSIFIED: CatalogCollectionSummary = {
+  groupKey: "derived:unclassified",
+  kind: "DERIVED",
+  id: null,
+  provider: null,
+  sourceType: "UNCLASSIFIED",
+  originProvider: null,
+  originContainerId: null,
+  externalId: null,
+  title: "Unclassified Sources",
+  sourceUrl: null,
+  status: null,
+  sanitizedError: null,
+  lastSyncedAt: null,
+  itemCount: 1,
+  analyzedCount: 0,
   hasMoreHistory: false,
 };
 
@@ -85,29 +130,39 @@ const COLLECTION_ITEM_INELIGIBLE: CatalogItemSummary = {
   origins: [],
 };
 
-const UNCOLLECTED_YOUTUBE: YouTubeProjectSource = {
-  provider: "YOUTUBE",
-  sourceType: "VIDEO",
+/** A member of the DERIVED_ALA_CARTE group — formerly an "uncollected" YouTube source. */
+const ALA_CARTE_ITEM_ELIGIBLE: CatalogItemSummary = {
   id: 301,
+  provider: "YOUTUBE",
   externalId: "ccccccccccc",
-  sourceUrl: "https://www.youtube.com/watch?v=ccccccccccc",
   title: "Uncollected Eligible Video",
-  durationSeconds: null,
-  status: "READY",
+  sourceUrl: "https://www.youtube.com/watch?v=ccccccccccc",
   createdAt: "2026-01-01T00:00:00.000Z",
-  collectionId: null,
+  status: "ANALYZED",
+  eligibleForSynthesis: true,
+  origins: [],
+};
+
+/** A member of the DERIVED_UNCLASSIFIED group. */
+const UNCLASSIFIED_DISCORD_ITEM: CatalogItemSummary = {
+  id: 303,
+  provider: "DISCORD",
+  externalId: "dddddddddddddddddd",
+  title: "Hidden Discord Row",
+  sourceUrl: "https://cdn.discordapp.com/attachments/1/2/clip.mp4",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  status: "ANALYZED",
+  eligibleForSynthesis: true,
   origins: [],
 };
 
 interface StubConfig {
   set: SynthesisSetDetail | "not_found";
   collections?: CatalogCollectionSummary[];
-  itemsByCollection?: Record<number, CatalogItemSummary[]>;
-  uncollectedSources?: (YouTubeProjectSource | DiscordProjectSource)[];
-  /** sourceId -> whether GET .../sources/:id/analysis reports a usable analysis. */
-  uncollectedEligibility?: Record<number, boolean>;
-  onCollectionBulkAdd?: (collectionId: number) => void;
-  onCollectionBulkRemove?: (collectionId: number) => void;
+  /** Keyed by groupKey (Phase 4L taxonomy correction — persisted and derived groups share one identity space). */
+  itemsByCollection?: Record<string, CatalogItemSummary[]>;
+  onCollectionBulkAdd?: (groupKey: string) => void;
+  onCollectionBulkRemove?: (groupKey: string) => void;
   onAddSource?: (sourceId: number) => void;
   onRemoveSource?: (sourceId: number) => void;
   onBulkSources?: (body: unknown) => void;
@@ -118,8 +173,6 @@ interface StubConfig {
 function stubFetch(config: StubConfig) {
   const collections = config.collections ?? [];
   const itemsByCollection = config.itemsByCollection ?? {};
-  const uncollectedSources = config.uncollectedSources ?? [];
-  const uncollectedEligibility = config.uncollectedEligibility ?? {};
 
   let renamed = false;
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -142,32 +195,28 @@ function stubFetch(config: StubConfig) {
     if (url.endsWith("/collections") && (!init || init.method === undefined)) {
       return jsonResponse(200, { projectId: 7, collections });
     }
-    const collectionItemsMatch = url.match(/\/collections\/(\d+)(\?|$)/);
-    if (collectionItemsMatch && (!init || init.method === undefined)) {
-      const collectionId = Number(collectionItemsMatch[1]);
-      const collection = collections.find((c) => c.id === collectionId);
-      const items = itemsByCollection[collectionId] ?? [];
-      return jsonResponse(200, { collection, items, pagination: { limit: 200, offset: 0, totalCount: items.length } });
-    }
 
-    if (url.endsWith("/sources") && (!init || init.method === undefined)) {
-      return jsonResponse(200, { projectId: 7, sources: uncollectedSources });
-    }
-    const analysisMatch = url.match(/\/sources\/(\d+)\/analysis$/);
-    if (analysisMatch && (!init || init.method === undefined)) {
-      const sourceId = Number(analysisMatch[1]);
-      const eligible = uncollectedEligibility[sourceId] ?? false;
-      return jsonResponse(200, { sourceId, job: null, analysis: eligible ? { analysisId: 1, status: "no_strategy" } : null });
-    }
-
-    const collectionBulkMatch = url.match(/\/synthesis-sets\/1\/collections\/(\d+)$/);
+    // Phase 4L taxonomy correction — a groupKey may be a plain numeric id
+    // (persisted collection) or a URL-encoded "derived:..." key; both are
+    // one opaque path segment, so this matches either and decodes it.
+    const collectionBulkMatch = url.match(/\/synthesis-sets\/1\/collections\/([^/?]+)$/);
     if (collectionBulkMatch && init?.method === "POST") {
-      config.onCollectionBulkAdd?.(Number(collectionBulkMatch[1]));
-      return jsonResponse(200, { collectionId: Number(collectionBulkMatch[1]), eligibleCount: 1, alreadySelectedCount: 0, addedCount: 1, ineligibleCount: 0 });
+      const groupKey = decodeURIComponent(collectionBulkMatch[1]);
+      config.onCollectionBulkAdd?.(groupKey);
+      return jsonResponse(200, { collectionId: groupKey, eligibleCount: 1, alreadySelectedCount: 0, addedCount: 1, ineligibleCount: 0 });
     }
     if (collectionBulkMatch && init?.method === "DELETE") {
-      config.onCollectionBulkRemove?.(Number(collectionBulkMatch[1]));
-      return jsonResponse(200, { collectionId: Number(collectionBulkMatch[1]), removedCount: 1 });
+      const groupKey = decodeURIComponent(collectionBulkMatch[1]);
+      config.onCollectionBulkRemove?.(groupKey);
+      return jsonResponse(200, { collectionId: groupKey, removedCount: 1 });
+    }
+
+    const collectionItemsMatch = url.match(/\/collections\/([^/?]+)(\?|$)/);
+    if (collectionItemsMatch && (!init || init.method === undefined)) {
+      const groupKey = decodeURIComponent(collectionItemsMatch[1]);
+      const collection = collections.find((c) => c.groupKey === groupKey);
+      const items = itemsByCollection[groupKey] ?? [];
+      return jsonResponse(200, { collection, items, pagination: { limit: 200, offset: 0, totalCount: items.length } });
     }
 
     if (url.endsWith("/synthesis-sets/1/sources/bulk") && init?.method === "POST") {
@@ -202,7 +251,7 @@ function renderPage(initialPath = "/projects/7/synthesis-sets/1") {
   );
 }
 
-describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", () => {
+describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L taxonomy correction)", () => {
   it("shows a not-found state for an unknown/foreign set, with a way back to the list", async () => {
     stubFetch({ set: "not_found" });
     renderPage();
@@ -225,31 +274,43 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
     await waitFor(() => expect(screen.getByText("No collections in this project yet.")).toBeInTheDocument());
   });
 
-  it("renders a collection row with its 'N/M eligible selected' summary, counting only the eligible members", async () => {
+  it("renders a persisted collection row with its PROVIDER · TYPE label and 'N/M eligible selected' summary, counting only the eligible members", async () => {
     stubFetch({
       set: makeSet(),
       collections: [COLLECTION],
-      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE, COLLECTION_ITEM_INELIGIBLE] },
+      itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE, COLLECTION_ITEM_INELIGIBLE] },
     });
     renderPage();
-    await waitFor(() => expect(screen.getByText("SMB Capital")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("YOUTUBE · CHANNEL")).toBeInTheDocument());
+    expect(screen.getByText("YouTube · SMB Capital")).toBeInTheDocument();
     expect(screen.getByText("0/1 eligible selected · 1 available to add")).toBeInTheDocument();
   });
 
-  it("the collection checkbox is unchecked when zero eligible members are selected", async () => {
-    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] } });
+  it("renders a DERIVED group row (e.g. manual YouTube à-la-carte) using the SAME unified group list and labels as the Sources page", async () => {
+    stubFetch({
+      set: makeSet(),
+      collections: [DERIVED_ALA_CARTE],
+      itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE] },
+    });
     renderPage();
-    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).not.toBeChecked());
+    await waitFor(() => expect(screen.getByText("YOUTUBE · À-LA-CARTE")).toBeInTheDocument());
+    expect(screen.getByText("Manual YouTube")).toBeInTheDocument();
+  });
+
+  it("the collection checkbox is unchecked when zero eligible members are selected", async () => {
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE] } });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital")).not.toBeChecked());
   });
 
   it("the collection checkbox is checked ('all') when every eligible member is already selected", async () => {
     stubFetch({
       set: makeSet({ sourceCount: 1, analyzedSourceCount: 1, sources: [{ ...COLLECTION_ITEM_ELIGIBLE, analyzed: true } as never] }),
       collections: [COLLECTION],
-      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
+      itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE] },
     });
     renderPage();
-    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeChecked());
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital")).toBeChecked());
   });
 
   it("the collection checkbox is indeterminate when only some eligible members are selected", async () => {
@@ -257,50 +318,64 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
     stubFetch({
       set: makeSet({ sourceCount: 1, sources: [{ ...COLLECTION_ITEM_ELIGIBLE, analyzed: true } as never] }),
       collections: [COLLECTION],
-      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE, secondEligible] },
+      itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE, secondEligible] },
     });
     renderPage();
-    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeInTheDocument());
-    const checkbox = screen.getByLabelText("Select all eligible sources in SMB Capital") as HTMLInputElement;
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital")).toBeInTheDocument());
+    const checkbox = screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital") as HTMLInputElement;
     await waitFor(() => expect(checkbox.indeterminate).toBe(true));
   });
 
-  it("clicking an unchecked/partial collection checkbox bulk-selects the whole collection's currently-eligible sources", async () => {
-    let addedCollectionId: number | undefined;
+  it("clicking an unchecked/partial collection checkbox bulk-selects the whole collection's currently-eligible sources, by groupKey", async () => {
+    let addedGroupKey: string | undefined;
     stubFetch({
       set: makeSet(),
       collections: [COLLECTION],
-      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
-      onCollectionBulkAdd: (id) => (addedCollectionId = id),
+      itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE] },
+      onCollectionBulkAdd: (id) => (addedGroupKey = id),
     });
     renderPage();
-    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeInTheDocument());
-    fireEvent.click(screen.getByLabelText("Select all eligible sources in SMB Capital"));
-    await waitFor(() => expect(addedCollectionId).toBe(10));
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital")).toBeInTheDocument());
+    fireEvent.click(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital"));
+    await waitFor(() => expect(addedGroupKey).toBe("10"));
+  });
+
+  it("clicking a DERIVED group's unchecked checkbox bulk-selects using its derived groupKey", async () => {
+    let addedGroupKey: string | undefined;
+    stubFetch({
+      set: makeSet(),
+      collections: [DERIVED_ALA_CARTE],
+      itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE] },
+      onCollectionBulkAdd: (id) => (addedGroupKey = id),
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in Manual YouTube")).toBeInTheDocument());
+    fireEvent.click(screen.getByLabelText("Select all eligible sources in Manual YouTube"));
+    await waitFor(() => expect(addedGroupKey).toBe("derived:youtube-ala-carte"));
   });
 
   it("clicking an all-selected collection checkbox bulk-removes this set's selected sources for that collection", async () => {
-    let removedCollectionId: number | undefined;
+    let removedGroupKey: string | undefined;
     stubFetch({
       set: makeSet({ sourceCount: 1, sources: [{ ...COLLECTION_ITEM_ELIGIBLE, analyzed: true } as never] }),
       collections: [COLLECTION],
-      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
-      onCollectionBulkRemove: (id) => (removedCollectionId = id),
+      itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE] },
+      onCollectionBulkRemove: (id) => (removedGroupKey = id),
     });
     renderPage();
-    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeChecked());
-    fireEvent.click(screen.getByLabelText("Select all eligible sources in SMB Capital"));
-    await waitFor(() => expect(removedCollectionId).toBe(10));
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital")).toBeChecked());
+    fireEvent.click(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital"));
+    await waitFor(() => expect(removedGroupKey).toBe("10"));
   });
 
   it("a collection with zero eligible members has a disabled checkbox — nothing to select", async () => {
-    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [COLLECTION_ITEM_INELIGIBLE] } });
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { "10": [COLLECTION_ITEM_INELIGIBLE] } });
     renderPage();
-    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeDisabled());
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital")).toBeDisabled());
   });
 
-  it("Fine Tune Sources is collapsed by default; toggling it reveals the flat, filterable source list", async () => {
-    stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE], uncollectedEligibility: { 301: true } });
+  it("Fine Tune Sources is collapsed by default; toggling it reveals the flat, filterable source list, which includes DERIVED group members too", async () => {
+    stubFetch({ set: makeSet(), collections: [DERIVED_ALA_CARTE], itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE] } });
     renderPage();
     await waitFor(() => expect(screen.getByRole("button", { name: "Fine Tune Sources" })).toBeInTheDocument());
     expect(screen.queryByLabelText(/Uncollected Eligible Video/)).not.toBeInTheDocument();
@@ -309,9 +384,14 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
     await waitFor(() => expect(screen.getByLabelText(/Uncollected Eligible Video/)).toBeInTheDocument());
   });
 
-  it("fine-tune: checking an eligible uncollected source calls POST .../sources with its id and never touches the analyze endpoint", async () => {
+  it("fine-tune: checking an eligible derived-group source calls POST .../sources with its id and never touches the analyze endpoint", async () => {
     let addedId: number | undefined;
-    const fetchMock = stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE], uncollectedEligibility: { 301: true }, onAddSource: (id) => (addedId = id) });
+    const fetchMock = stubFetch({
+      set: makeSet(),
+      collections: [DERIVED_ALA_CARTE],
+      itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE] },
+      onAddSource: (id) => (addedId = id),
+    });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     fireEvent.click(await screen.findByLabelText(/Uncollected Eligible Video/));
@@ -323,9 +403,9 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
   it("fine-tune: unchecking a selected source calls DELETE .../sources/:sourceId and never touches its analysis", async () => {
     let removedId: number | undefined;
     stubFetch({
-      set: makeSet({ sourceCount: 1, sources: [{ ...UNCOLLECTED_YOUTUBE, analyzed: true }] }),
-      uncollectedSources: [UNCOLLECTED_YOUTUBE],
-      uncollectedEligibility: { 301: true },
+      set: makeSet({ sourceCount: 1, sources: [{ ...ALA_CARTE_ITEM_ELIGIBLE, analyzed: true } as never] }),
+      collections: [DERIVED_ALA_CARTE],
+      itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE] },
       onRemoveSource: (id) => (removedId = id),
     });
     renderPage();
@@ -338,15 +418,16 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
   });
 
   it("fine-tune: an ineligible source's checkbox is disabled — it cannot be selected", async () => {
-    stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE], uncollectedEligibility: { 301: false } });
+    const ineligible = { ...ALA_CARTE_ITEM_ELIGIBLE, status: "NOT_ANALYZED" as const, eligibleForSynthesis: false };
+    stubFetch({ set: makeSet(), collections: [DERIVED_ALA_CARTE], itemsByCollection: { "derived:youtube-ala-carte": [ineligible] } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     expect(await screen.findByLabelText(/Uncollected Eligible Video/)).toBeDisabled();
   });
 
   it("fine-tune: search filters the list by title", async () => {
-    const other = { ...UNCOLLECTED_YOUTUBE, id: 302, title: "Completely Different Topic" };
-    stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE, other], uncollectedEligibility: { 301: true, 302: true } });
+    const other = { ...ALA_CARTE_ITEM_ELIGIBLE, id: 302, title: "Completely Different Topic" };
+    stubFetch({ set: makeSet(), collections: [DERIVED_ALA_CARTE], itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE, other] } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     await screen.findByText("Uncollected Eligible Video");
@@ -356,8 +437,8 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
   });
 
   it("fine-tune: the 'Eligible' selection filter hides not-yet-eligible sources", async () => {
-    const ineligible = { ...UNCOLLECTED_YOUTUBE, id: 302, title: "Not Eligible Video" };
-    stubFetch({ set: makeSet(), uncollectedSources: [UNCOLLECTED_YOUTUBE, ineligible], uncollectedEligibility: { 301: true, 302: false } });
+    const ineligible = { ...ALA_CARTE_ITEM_ELIGIBLE, id: 302, title: "Not Eligible Video", status: "NOT_ANALYZED" as const, eligibleForSynthesis: false };
+    stubFetch({ set: makeSet(), collections: [DERIVED_ALA_CARTE], itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE, ineligible] } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     await screen.findByText("Not Eligible Video");
@@ -369,10 +450,8 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
   it("fine-tune: the provider filter hides sources of the other provider, without hiding anything else", async () => {
     stubFetch({
       set: makeSet(),
-      collections: [COLLECTION],
-      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
-      uncollectedSources: [UNCOLLECTED_YOUTUBE],
-      uncollectedEligibility: { 301: true },
+      collections: [COLLECTION, DERIVED_ALA_CARTE],
+      itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE], "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE] },
     });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
@@ -386,11 +465,11 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
 
   it("fine-tune: 'Select All Visible Eligible' bulk-adds only the currently visible, eligible, unselected rows", async () => {
     let bulkBody: unknown;
-    const secondEligible = { ...UNCOLLECTED_YOUTUBE, id: 302, title: "Second Uncollected Video" };
+    const secondEligible = { ...ALA_CARTE_ITEM_ELIGIBLE, id: 302, title: "Second Uncollected Video" };
     stubFetch({
       set: makeSet(),
-      uncollectedSources: [UNCOLLECTED_YOUTUBE, secondEligible],
-      uncollectedEligibility: { 301: true, 302: true },
+      collections: [DERIVED_ALA_CARTE],
+      itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE, secondEligible] },
       onBulkSources: (body) => (bulkBody = body),
     });
     renderPage();
@@ -401,13 +480,12 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
     await waitFor(() => expect(bulkBody).toEqual({ add: [301, 302] }));
   });
 
-  it("fine-tune: filtering to YouTube and clicking 'Deselect All Visible' never touches a hidden Discord row's selection", async () => {
+  it("fine-tune: filtering to YouTube and clicking 'Deselect All Visible' never touches a hidden UNCLASSIFIED Discord row's selection", async () => {
     let bulkBody: unknown;
-    const discordSource = { ...UNCOLLECTED_YOUTUBE, id: 303, provider: "DISCORD" as const, title: "Hidden Discord Row" };
     stubFetch({
-      set: makeSet({ sourceCount: 2, sources: [{ ...UNCOLLECTED_YOUTUBE, analyzed: true }, { ...discordSource, analyzed: true } as never] }),
-      uncollectedSources: [UNCOLLECTED_YOUTUBE, discordSource],
-      uncollectedEligibility: { 301: true, 303: true },
+      set: makeSet({ sourceCount: 2, sources: [{ ...ALA_CARTE_ITEM_ELIGIBLE, analyzed: true } as never, { ...UNCLASSIFIED_DISCORD_ITEM, analyzed: true } as never] }),
+      collections: [DERIVED_ALA_CARTE, DERIVED_UNCLASSIFIED],
+      itemsByCollection: { "derived:youtube-ala-carte": [ALA_CARTE_ITEM_ELIGIBLE], "derived:unclassified": [UNCLASSIFIED_DISCORD_ITEM] },
       onBulkSources: (body) => (bulkBody = body),
     });
     renderPage();
@@ -460,12 +538,12 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L)", (
     const fetchMock = stubFetch({
       set: makeSet(),
       collections: [COLLECTION],
-      itemsByCollection: { 10: [COLLECTION_ITEM_ELIGIBLE] },
+      itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE] },
     });
     renderPage();
-    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in SMB Capital")).toBeInTheDocument());
-    fireEvent.click(screen.getByLabelText("Select all eligible sources in SMB Capital"));
-    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(3));
+    await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital")).toBeInTheDocument());
+    fireEvent.click(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital"));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(2));
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/analyze"))).toBe(false);
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/run"))).toBe(false);
   });
@@ -479,7 +557,7 @@ describe("SynthesisSetDetailPage — Fine-Tune provenance display (Phase 4L foll
         { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "c1", discordChannelName: "scarface-alerts", discordMessageId: "m1", discordMessageUrl: null, discordPostedAt: "2026-09-12T00:00:00.000Z" },
       ],
     };
-    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [withOrigin] } });
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { "10": [withOrigin] } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     expect(await screen.findByText("Source: Discord · #scarface-alerts")).toBeInTheDocument();
@@ -491,7 +569,7 @@ describe("SynthesisSetDetailPage — Fine-Tune provenance display (Phase 4L foll
       ...COLLECTION_ITEM_ELIGIBLE,
       origins: [{ originType: "MANUAL", discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }],
     };
-    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [manual] } });
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { "10": [manual] } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     expect(await screen.findByText("Source: Manual")).toBeInTheDocument();
@@ -505,7 +583,7 @@ describe("SynthesisSetDetailPage — Fine-Tune provenance display (Phase 4L foll
         { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "c1", discordChannelName: "scarface-alerts", discordMessageId: "m1", discordMessageUrl: null, discordPostedAt: "2026-09-12T00:00:00.000Z" },
       ],
     };
-    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [mixed] } });
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { "10": [mixed] } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     expect(await screen.findByText("Source: Manual + Discord · #scarface-alerts")).toBeInTheDocument();
@@ -520,16 +598,19 @@ describe("SynthesisSetDetailPage — Fine-Tune provenance display (Phase 4L foll
         { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "c2", discordChannelName: "trade-ideas", discordMessageId: "m2", discordMessageUrl: null, discordPostedAt: "2026-09-13T00:00:00.000Z" },
       ],
     };
-    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: [multi] } });
+    stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { "10": [multi] } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     expect(await screen.findByText("Source: 2 Discord posts")).toBeInTheDocument();
     expect(screen.getByText("Latest posted: Sep 13, 2026")).toBeInTheDocument();
   });
 
-  it("an uncollected YouTube source's own provenance (already loaded from GET /sources) renders in Fine-Tune too", async () => {
-    const withOrigin = { ...UNCOLLECTED_YOUTUBE, origins: [{ originType: "MANUAL" as const, discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }] };
-    stubFetch({ set: makeSet(), uncollectedSources: [withOrigin], uncollectedEligibility: { 301: true } });
+  it("a derived-group YouTube source's own provenance renders in Fine-Tune too", async () => {
+    const withOrigin = {
+      ...ALA_CARTE_ITEM_ELIGIBLE,
+      origins: [{ originType: "MANUAL" as const, discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }],
+    };
+    stubFetch({ set: makeSet(), collections: [DERIVED_ALA_CARTE], itemsByCollection: { "derived:youtube-ala-carte": [withOrigin] } });
     renderPage();
     fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
     expect(await screen.findByText("Source: Manual")).toBeInTheDocument();
@@ -542,9 +623,9 @@ describe("SynthesisSetDetailPage — Fine-Tune provenance display (Phase 4L foll
       title: `Video ${i}`,
       origins: [{ originType: "MANUAL", discordGuildId: null, discordChannelId: null, discordChannelName: null, discordMessageId: null, discordMessageUrl: null, discordPostedAt: null }],
     }));
-    const fetchMock = stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { 10: items } });
+    const fetchMock = stubFetch({ set: makeSet(), collections: [COLLECTION], itemsByCollection: { "10": items } });
     renderPage();
-    await waitFor(() => expect(screen.getByText("SMB Capital")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("YouTube · SMB Capital")).toBeInTheDocument());
 
     const collectionItemsCalls = fetchMock.mock.calls.filter(([url]) => String(url).includes("/collections/10"));
     expect(collectionItemsCalls).toHaveLength(1); // one GET for the whole collection's items+origins, not five

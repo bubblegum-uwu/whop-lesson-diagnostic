@@ -146,7 +146,7 @@ describe("Synthesis Set collection-centric bulk selection (Phase 4L)", () => {
 
     const { statusCode, body } = await callBulkAddCollection(String(project.id), setId, String(collection.id));
     expect(statusCode).toBe(200);
-    expect(body).toEqual({ collectionId: collection.id, eligibleCount: 2, alreadySelectedCount: 0, addedCount: 2, ineligibleCount: 1 });
+    expect(body).toEqual({ collectionId: String(collection.id), eligibleCount: 2, alreadySelectedCount: 0, addedCount: 2, ineligibleCount: 1 });
 
     const { body: detail } = await callGet(String(project.id), setId);
     expect(detail.sourceCount).toBe(2);
@@ -164,7 +164,7 @@ describe("Synthesis Set collection-centric bulk selection (Phase 4L)", () => {
 
     await callBulkAddCollection(String(project.id), setId, String(collection.id));
     const { body: second } = await callBulkAddCollection(String(project.id), setId, String(collection.id));
-    expect(second).toEqual({ collectionId: collection.id, eligibleCount: 1, alreadySelectedCount: 1, addedCount: 0, ineligibleCount: 0 });
+    expect(second).toEqual({ collectionId: String(collection.id), eligibleCount: 1, alreadySelectedCount: 1, addedCount: 0, ineligibleCount: 0 });
 
     const membershipCount = await pool.query<{ count: string }>(
       `SELECT COUNT(*) AS count FROM synthesis_set_sources WHERE synthesis_set_id = $1 AND project_source_id = $2`,
@@ -245,7 +245,7 @@ describe("Synthesis Set collection-centric bulk selection (Phase 4L)", () => {
 
     const { statusCode, body } = await callBulkRemoveCollection(String(project.id), String(setA.id), String(collection.id));
     expect(statusCode).toBe(200);
-    expect(body).toEqual({ collectionId: collection.id, removedCount: 1 });
+    expect(body).toEqual({ collectionId: String(collection.id), removedCount: 1 });
 
     const detailA = (await callGet(String(project.id), String(setA.id))).body;
     expect((detailA.sources as Array<{ id: number }>).map((s) => s.id)).toEqual([outsideSource.id]);

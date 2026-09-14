@@ -24,39 +24,15 @@ const PROJECT = {
   latestSynthesisCompletedAt: null,
 };
 
-const GENERAL_KNOWLEDGE_PROJECT = { ...PROJECT, projectType: "GENERAL_KNOWLEDGE" };
-
-const COLLECTED_SOURCE = {
-  provider: "YOUTUBE",
-  sourceType: "VIDEO",
-  id: 201,
-  externalId: "ccccccccccc",
-  sourceUrl: "https://www.youtube.com/watch?v=ccccccccccc",
-  title: "Inside a Channel",
-  durationSeconds: null,
-  status: "READY",
-  createdAt: "2026-01-05T00:00:00.000Z",
-  collectionId: 1,
-  origins: [],
-};
-
-const UNCOLLECTED_SOURCE = {
-  provider: "YOUTUBE",
-  sourceType: "VIDEO",
-  id: 202,
-  externalId: "ddddddddddd",
-  sourceUrl: "https://www.youtube.com/watch?v=ddddddddddd",
-  title: "A La Carte Video",
-  durationSeconds: null,
-  status: "READY",
-  createdAt: "2026-01-05T00:00:00.000Z",
-  collectionId: null,
-  origins: [],
-};
-
-const COLLECTION_SUMMARY = {
+/** A real, persisted YouTube-channel collection (Phase 4K) — unaffected by the Phase 4L taxonomy correction. */
+const PERSISTED_YOUTUBE_COLLECTION = {
+  groupKey: "1",
+  kind: "PERSISTED",
   id: 1,
   provider: "YOUTUBE",
+  sourceType: "CHANNEL",
+  originProvider: null,
+  originContainerId: null,
   externalId: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
   title: "SMB Capital",
   sourceUrl: "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw",
@@ -65,6 +41,58 @@ const COLLECTION_SUMMARY = {
   lastSyncedAt: "2026-01-01T00:00:00.000Z",
   itemCount: 1,
   analyzedCount: 0,
+  hasMoreHistory: false,
+};
+
+/** A DERIVED group — YouTube videos discovered by scanning a Discord channel (Phase 4L taxonomy correction: never a generic "Uncollected/À-la-carte" bucket). */
+const DERIVED_DISCORD_CHANNEL_GROUP = {
+  groupKey: "derived:youtube-discord-channel:998877",
+  kind: "DERIVED",
+  id: null,
+  provider: "YOUTUBE",
+  sourceType: "CHANNEL",
+  originProvider: "DISCORD",
+  originContainerId: "998877",
+  externalId: null,
+  title: "Discord · #scarface-alerts",
+  sourceUrl: null,
+  status: null,
+  sanitizedError: null,
+  lastSyncedAt: null,
+  itemCount: 3,
+  analyzedCount: 0,
+  hasMoreHistory: false,
+};
+
+/** A DERIVED group — genuinely manual YouTube à-la-carte adds. */
+const DERIVED_MANUAL_ALA_CARTE_GROUP = {
+  groupKey: "derived:youtube-ala-carte",
+  kind: "DERIVED",
+  id: null,
+  provider: "YOUTUBE",
+  sourceType: "A_LA_CARTE",
+  originProvider: "MANUAL",
+  originContainerId: null,
+  externalId: null,
+  title: "Manual YouTube",
+  sourceUrl: null,
+  status: null,
+  sanitizedError: null,
+  lastSyncedAt: null,
+  itemCount: 1,
+  analyzedCount: 0,
+  hasMoreHistory: false,
+};
+
+const ALA_CARTE_WHOP_LESSON = {
+  id: 501,
+  courseId: 9,
+  courseTitle: "Scarface Mastermind",
+  title: "Risk Management 101",
+  sourceUrl: "https://whop.com/lessons/501",
+  durationSeconds: null,
+  status: "NOT_ANALYZED",
+  eligibleForSynthesis: false,
 };
 
 function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps {
@@ -96,13 +124,14 @@ function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps 
   };
 }
 
-function stubFetch(sources: unknown[], collections: unknown[], projects: unknown[] = [PROJECT]) {
+function stubFetch(collections: unknown[], projects: unknown[] = [PROJECT], alaCarteWhopLessons: unknown[] = []) {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
       if (url.endsWith("/api/projects")) return jsonResponse(200, { projects });
-      if (url.endsWith("/sources")) return jsonResponse(200, { projectId: 7, sources });
+      if (url.endsWith("/sources")) return jsonResponse(200, { projectId: 7, sources: [] });
       if (url.endsWith("/collections")) return jsonResponse(200, { projectId: 7, collections });
+      if (url.endsWith("/whop-lessons")) return jsonResponse(200, { projectId: 7, items: alaCarteWhopLessons });
       return jsonResponse(404, {});
     }),
   );
@@ -113,97 +142,104 @@ function renderSources(initialPath: string, props: Partial<SourcesPageProps> = {
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route path="/projects/:projectId/sources" element={<SourcesPage {...baseProps(props)} />} />
-        <Route path="/projects/:projectId/collections/uncollected" element={<div>UNCOLLECTED_DETAIL_MARKER</div>} />
+        <Route path="/projects/:projectId/whop-ala-carte" element={<div>WHOP_ALA_CARTE_DETAIL_MARKER</div>} />
         <Route path="/projects/:projectId/collections/:collectionId" element={<div>COLLECTION_DETAIL_MARKER</div>} />
       </Routes>
     </MemoryRouter>,
   );
 }
 
-describe("SourcesPage — collection-first Sources UI (Phase 4L)", () => {
-  it("renders a Collection card (not a flat per-item row) for a collection, with item/analyzed counts", async () => {
-    stubFetch([COLLECTED_SOURCE], [COLLECTION_SUMMARY]);
+describe("SourcesPage — collection/group-first Sources UI (Phase 4L taxonomy correction)", () => {
+  it("renders a PERSISTED collection card with its PROVIDER · TYPE label, item/analyzed counts", async () => {
+    stubFetch([PERSISTED_YOUTUBE_COLLECTION]);
     renderSources("/projects/7/sources");
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "SMB Capital" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · CHANNEL" })).toBeInTheDocument());
+    expect(screen.getByText(/YouTube · SMB Capital/)).toBeInTheDocument();
     expect(screen.getByText(/1 item.*0 analyzed/)).toBeInTheDocument();
-    // The collected source's own row must never render flatly on this page.
-    expect(screen.queryByText("Inside a Channel")).not.toBeInTheDocument();
   });
 
-  it("clicking Open on a collection card navigates to that collection's detail page", async () => {
-    stubFetch([COLLECTED_SOURCE], [COLLECTION_SUMMARY]);
+  it("clicking Open on a persisted collection card navigates to its detail page by groupKey", async () => {
+    stubFetch([PERSISTED_YOUTUBE_COLLECTION]);
     renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "SMB Capital" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · CHANNEL" })).toBeInTheDocument());
 
     fireEvent.click(screen.getByRole("button", { name: /Open/ }));
     expect(screen.getByText("COLLECTION_DETAIL_MARKER")).toBeInTheDocument();
   });
 
-  it("shows an à-la-carte (uncollected) source under its own 'Uncollected Sources' section", async () => {
-    stubFetch([UNCOLLECTED_SOURCE], []);
+  it("a YouTube-via-Discord-channel DERIVED group renders as its own card — never a generic 'Uncollected/À-la-carte' bucket", async () => {
+    stubFetch([DERIVED_DISCORD_CHANNEL_GROUP]);
     renderSources("/projects/7/sources");
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
-    // The main Sources page is collection-only — the individual source
-    // title/row never renders here, only the virtual card's summary.
-    expect(screen.queryByText("A La Carte Video")).not.toBeInTheDocument();
-    expect(screen.getByText(/À-la-carte · 1 item/)).toBeInTheDocument();
-  });
-
-  it("the Uncollected Sources card still renders for a GENERAL_KNOWLEDGE project, without an analyzed-count clause (Analyze isn't available there)", async () => {
-    stubFetch([UNCOLLECTED_SOURCE], [], [GENERAL_KNOWLEDGE_PROJECT]);
-    renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
-    expect(screen.getByText("À-la-carte · 1 item")).toBeInTheDocument();
-  });
-
-  it("a collected source never inflates the Uncollected Sources card's count", async () => {
-    stubFetch([COLLECTED_SOURCE, UNCOLLECTED_SOURCE], [COLLECTION_SUMMARY]);
-    renderSources("/projects/7/sources");
-
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
-    expect(screen.getByText(/À-la-carte · 1 item/)).toBeInTheDocument();
-    expect(screen.queryByText("Inside a Channel")).not.toBeInTheDocument();
-    expect(screen.queryByText("A La Carte Video")).not.toBeInTheDocument();
-  });
-
-  it("no Uncollected Sources card renders when every video source belongs to a collection", async () => {
-    stubFetch([COLLECTED_SOURCE], [COLLECTION_SUMMARY]);
-    renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "SMB Capital" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · CHANNEL" })).toBeInTheDocument());
+    expect(screen.getByText(/Discord · #scarface-alerts/)).toBeInTheDocument();
+    expect(screen.getByText(/3 items/)).toBeInTheDocument();
+    expect(screen.queryByText(/À-la-carte/)).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Uncollected Sources" })).not.toBeInTheDocument();
   });
 
-  it("clicking Open on the Uncollected Sources card navigates to its virtual detail route", async () => {
-    stubFetch([UNCOLLECTED_SOURCE], []);
+  it("a manual YouTube à-la-carte DERIVED group renders as YOUTUBE · À-LA-CARTE / Manual YouTube", async () => {
+    stubFetch([DERIVED_MANUAL_ALA_CARTE_GROUP]);
     renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: /Open/ }));
-    expect(screen.getByText("UNCOLLECTED_DETAIL_MARKER")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · À-LA-CARTE" })).toBeInTheDocument());
+    expect(screen.getByText(/Manual YouTube/)).toBeInTheDocument();
   });
 
-  it("multiple collections each render their own card with independent counts", async () => {
-    const secondCollection = { ...COLLECTION_SUMMARY, id: 2, title: "Another Channel", itemCount: 3, analyzedCount: 3 };
-    stubFetch([], [COLLECTION_SUMMARY, secondCollection]);
+  it("a persisted collection and a derived group never merge into one card, even when both hold YOUTUBE items", async () => {
+    stubFetch([PERSISTED_YOUTUBE_COLLECTION, DERIVED_DISCORD_CHANNEL_GROUP]);
     renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "SMB Capital" })).toBeInTheDocument());
-    expect(screen.getByRole("heading", { name: "Another Channel" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole("heading", { name: "YOUTUBE · CHANNEL" })).toHaveLength(2));
+    expect(screen.getByText(/YouTube · SMB Capital/)).toBeInTheDocument();
+    expect(screen.getByText(/Discord · #scarface-alerts/)).toBeInTheDocument();
+  });
+
+  it("clicking Open on a derived group card navigates using its URL-encoded groupKey", async () => {
+    stubFetch([DERIVED_DISCORD_CHANNEL_GROUP]);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · CHANNEL" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /Open/ }));
+    expect(screen.getByText("COLLECTION_DETAIL_MARKER")).toBeInTheDocument();
+  });
+
+  it("a WHOP · À-LA-CARTE card renders only when qualifying à-la-carte Whop lessons exist — never a fabricated empty card", async () => {
+    stubFetch([], [PROJECT], []);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
+    expect(screen.queryByRole("heading", { name: "WHOP · À-LA-CARTE" })).not.toBeInTheDocument();
+  });
+
+  it("a WHOP · À-LA-CARTE card renders with its item count when qualifying lessons exist, and Open navigates to its own detail page", async () => {
+    stubFetch([], [PROJECT], [ALA_CARTE_WHOP_LESSON]);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByRole("heading", { name: "WHOP · À-LA-CARTE" })).toBeInTheDocument());
+    expect(screen.getByText(/Individual Whop Content · 1 item · 0 analyzed/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Open/ }));
+    expect(screen.getByText("WHOP_ALA_CARTE_DETAIL_MARKER")).toBeInTheDocument();
+  });
+
+  it("multiple collections/groups each render their own card with independent counts", async () => {
+    const secondCollection = { ...PERSISTED_YOUTUBE_COLLECTION, groupKey: "2", id: 2, title: "Another Channel", itemCount: 3, analyzedCount: 3 };
+    stubFetch([PERSISTED_YOUTUBE_COLLECTION, secondCollection]);
+    renderSources("/projects/7/sources");
+    await waitFor(() => expect(screen.getByText(/YouTube · SMB Capital/)).toBeInTheDocument());
+    expect(screen.getByText(/YouTube · Another Channel/)).toBeInTheDocument();
     expect(screen.getByText(/3 item.*3 analyzed/)).toBeInTheDocument();
   });
 
-  it("neither Collections nor Uncollected Sources sections render when the project has no video sources at all", async () => {
-    stubFetch([], []);
+  it("no Collections section renders when the project has no collections/groups and no à-la-carte Whop lessons", async () => {
+    stubFetch([], [PROJECT], []);
     renderSources("/projects/7/sources");
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
-    expect(screen.queryByRole("heading", { name: "Uncollected Sources" })).not.toBeInTheDocument();
     expect(screen.queryByText("Collections")).not.toBeInTheDocument();
   });
 
-  it("a SYNC_FAILED collection surfaces its sanitized error on the card", async () => {
-    const failed = { ...COLLECTION_SUMMARY, status: "SYNC_FAILED", sanitizedError: "Channel is private." };
-    stubFetch([], [failed]);
+  it("a SYNC_FAILED persisted collection surfaces its sanitized error on the card", async () => {
+    const failed = { ...PERSISTED_YOUTUBE_COLLECTION, status: "SYNC_FAILED", sanitizedError: "Channel is private." };
+    stubFetch([failed]);
     renderSources("/projects/7/sources");
     await waitFor(() => expect(screen.getByText("Channel is private.")).toBeInTheDocument());
   });

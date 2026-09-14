@@ -25,8 +25,13 @@ const PROJECT = {
 };
 
 const COLLECTION = {
+  groupKey: "1",
+  kind: "PERSISTED",
   id: 1,
   provider: "YOUTUBE",
+  sourceType: "CHANNEL",
+  originProvider: null,
+  originContainerId: null,
   externalId: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
   title: "SMB Capital",
   sourceUrl: "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw",
@@ -35,6 +40,7 @@ const COLLECTION = {
   lastSyncedAt: "2026-01-01T00:00:00.000Z",
   itemCount: 2,
   analyzedCount: 1,
+  hasMoreHistory: false,
 };
 
 const ITEM_ANALYZED = {
@@ -46,6 +52,7 @@ const ITEM_ANALYZED = {
   createdAt: "2026-01-01T00:00:00.000Z",
   status: "ANALYZED",
   eligibleForSynthesis: true,
+  origins: [],
 };
 
 const ITEM_NOT_ANALYZED = {
@@ -57,6 +64,7 @@ const ITEM_NOT_ANALYZED = {
   createdAt: "2026-01-01T00:00:00.000Z",
   status: "NOT_ANALYZED",
   eligibleForSynthesis: false,
+  origins: [],
 };
 
 function stubFetch(
@@ -107,7 +115,7 @@ describe("CollectionDetailPage (Phase 4K)", () => {
   it("shows analyzed and not-analyzed items with distinct status badges", async () => {
     stubFetch();
     renderPage();
-    await waitFor(() => expect(screen.getByRole("heading", { name: "SMB Capital" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · CHANNEL" })).toBeInTheDocument());
     expect(screen.getByText("Analyzed")).toBeInTheDocument();
     expect(screen.getByText("Not analyzed")).toBeInTheDocument();
   });
@@ -161,7 +169,7 @@ describe("CollectionDetailPage (Phase 4K)", () => {
       }),
     );
     renderPage();
-    await waitFor(() => expect(screen.getByText("This collection doesn't exist.")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("This collection doesn't exist, or currently has no sources.")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: /Back to Sources/ }));
     expect(screen.getByText("SOURCES_MARKER")).toBeInTheDocument();
   });
@@ -217,5 +225,102 @@ describe("CollectionDetailPage — Analyze Collection (Phase 4L)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Analyze 1 Remaining" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/collections/1/analyze"), expect.anything()));
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/synthesis-sets"))).toBe(false);
+  });
+});
+
+describe("CollectionDetailPage — DERIVED groups (Phase 4L taxonomy correction)", () => {
+  const DERIVED_GROUP_KEY = "derived:youtube-discord-channel:998877";
+  const DERIVED_GROUP = {
+    groupKey: DERIVED_GROUP_KEY,
+    kind: "DERIVED",
+    id: null,
+    provider: "YOUTUBE",
+    sourceType: "CHANNEL",
+    originProvider: "DISCORD",
+    originContainerId: "998877",
+    externalId: null,
+    title: "Discord · #scarface-alerts",
+    sourceUrl: null,
+    status: null,
+    sanitizedError: null,
+    lastSyncedAt: null,
+    itemCount: 1,
+    analyzedCount: 0,
+    hasMoreHistory: false,
+  };
+  const DERIVED_ITEM_WITH_ORIGIN = {
+    id: 401,
+    provider: "YOUTUBE",
+    externalId: "eeeeeeeeeee",
+    title: "Alert Recap",
+    sourceUrl: "https://www.youtube.com/watch?v=eeeeeeeeeee",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    status: "NOT_ANALYZED",
+    eligibleForSynthesis: false,
+    origins: [
+      { originType: "DISCORD_CHANNEL", discordGuildId: "g1", discordChannelId: "998877", discordChannelName: "scarface-alerts", discordMessageId: "m1", discordMessageUrl: null, discordPostedAt: "2026-09-12T00:00:00.000Z" },
+    ],
+  };
+
+  function stubDerivedFetch(overrides: { onAnalyzeCollection?: () => void } = {}) {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      // The frontend URL-encodes the groupKey (it contains colons).
+      if (url.includes(`/collections/${encodeURIComponent(DERIVED_GROUP_KEY)}/analyze`) && init?.method === "POST") {
+        overrides.onAnalyzeCollection?.();
+        return jsonResponse(200, { queued: 1, alreadyAnalyzed: 0, alreadyQueued: 0, processing: 0, failed: 0 });
+      }
+      if (url.includes(`/collections/${encodeURIComponent(DERIVED_GROUP_KEY)}`)) {
+        return jsonResponse(200, { collection: DERIVED_GROUP, items: [DERIVED_ITEM_WITH_ORIGIN], pagination: { limit: 200, offset: 0, totalCount: 1 } });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  function renderDerivedPage() {
+    return render(
+      <MemoryRouter initialEntries={[`/projects/7/collections/${encodeURIComponent(DERIVED_GROUP_KEY)}`]}>
+        <Routes>
+          <Route path="/projects/:projectId/sources" element={<div>SOURCES_MARKER</div>} />
+          <Route path="/projects/:projectId/collections/:collectionId" element={<CollectionDetailPage backendUrl="https://backend.example.com" knoveraToken="token" />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("opening a derived group's URL shows exactly its members, with its PROVIDER · TYPE header and origin line", async () => {
+    stubDerivedFetch();
+    renderDerivedPage();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · CHANNEL" })).toBeInTheDocument());
+    // Appears both in the page header's origin line and in the item's own provenance row.
+    expect(screen.getAllByText(/Discord · #scarface-alerts/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText("Alert Recap")).toBeInTheDocument();
+  });
+
+  it("never shows Refresh or Remove Collection for a derived group — there is no row to refresh or delete", async () => {
+    stubDerivedFetch();
+    renderDerivedPage();
+    await waitFor(() => expect(screen.getByText("Alert Recap")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove Collection" })).not.toBeInTheDocument();
+  });
+
+  it("shows each item's provenance (Discord channel + posted date), same rules as a persisted collection", async () => {
+    stubDerivedFetch();
+    renderDerivedPage();
+    expect(await screen.findByText("Source: Discord · #scarface-alerts")).toBeInTheDocument();
+    expect(screen.getByText("Posted: Sep 12, 2026")).toBeInTheDocument();
+  });
+
+  it("Analyze Collection on a derived group posts to its URL-encoded groupKey and resolves exactly its members server-side", async () => {
+    let called = false;
+    const fetchMock = stubDerivedFetch({ onAnalyzeCollection: () => (called = true) });
+    renderDerivedPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Analyze 1 Remaining" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Analyze 1 Remaining" }));
+    await waitFor(() => expect(called).toBe(true));
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes(encodeURIComponent(DERIVED_GROUP_KEY)))).toBe(true);
   });
 });

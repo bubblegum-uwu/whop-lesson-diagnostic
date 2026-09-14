@@ -125,12 +125,13 @@ describe("SourcesPage — Discord project sources (Phase 4I)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Video" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add Discord Video" })).not.toBeInTheDocument());
-    // Phase 4L follow-up — the main Sources page is collection-only: the
-    // newly-added source never renders as a row here (see
-    // UncollectedSourcesDetailPage.tsx for the per-row Discord Video
-    // identity/analysis behavior), only the virtual card's count.
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
-    expect(screen.getByText(/À-la-carte · 1 item/)).toBeInTheDocument();
+    // Phase 4L taxonomy correction — the main Sources page is
+    // collection/group-only, driven entirely by GET /collections (see
+    // CollectionDetailPage.tsx and the taxonomy-correction group model),
+    // never by the raw /sources list — so a newly-added source never
+    // renders as a row here regardless of grouping; this only verifies the
+    // dialog closed and the sources list was refreshed (sourcesCallCount).
+    await waitFor(() => expect(sourcesCallCount).toBeGreaterThan(1));
   });
 
   it("a malformed Discord URL is rejected client-side (never reaches the network) with the parser's own message", async () => {

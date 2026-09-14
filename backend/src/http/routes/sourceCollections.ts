@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
-import { getProjectById } from "../../db/projectsRepo.js";
+import { getProjectById, type Project } from "../../db/projectsRepo.js";
 import {
   createSourceCollection,
   getSourceCollectionById,
@@ -13,6 +13,14 @@ import {
 import { createYouTubeSource } from "../../db/projectSourcesRepo.js";
 import { getCatalogAnalysisStatusForSources, type CatalogAnalysisStatusEntry } from "../../db/projectSourceCatalogStatusRepo.js";
 import { listOriginsBySourceIds } from "../../db/projectSourceOriginsRepo.js";
+import {
+  listDerivedGroupsForProject,
+  listDerivedGroupMemberSourceIds,
+  isDerivedGroupKey,
+  type DerivedGroupDescriptor,
+  type DerivedGroupSourceType,
+  type DerivedGroupOriginProvider,
+} from "../../db/derivedSourceGroupsRepo.js";
 import { toOriginSummary, type ProjectSourceOriginSummary } from "./projectSources.js";
 import { parseYouTubeChannelRef, YouTubeChannelUrlParseError } from "../../lib/youtubeChannelUrl.js";
 import { resolveYouTubeChannelId, YouTubeChannelResolveError } from "../../youtube/resolveYoutubeChannel.js";
@@ -40,6 +48,14 @@ const NOT_FOUND_COLLECTION = { error: { message: "Unknown source collection.", t
  * resolveOwnedSynthesisSet doc comment): the collection must exist AND
  * belong to the requested project, checked together, one deterministic
  * 404 regardless of which failed.
+ *
+ * PERSISTED-collection-only (a numeric collectionId) — used by the three
+ * handlers below that only ever make sense for a real, mutable
+ * source_collections row (add-channel discovery continuation via refresh,
+ * delete). A derived group is neither refreshable nor deletable — it isn't
+ * a row at all — so those routes never need to resolve one; see
+ * resolveOwnedCollectionGroup below for the routes that DO need to accept
+ * either kind (GET, analyze, Synthesis Set collection-selection).
  */
 async function resolveOwnedCollection(pool: Pool, projectIdParam: string | string[], collectionIdParam: string | string[]) {
   const projectId = Number(projectIdParam);
@@ -52,22 +68,85 @@ async function resolveOwnedCollection(pool: Pool, projectIdParam: string | strin
   return { project, collection };
 }
 
+/**
+ * Phase 4L taxonomy correction — the ONE ownership resolver every route
+ * that must accept EITHER a real persisted collection OR a derived group
+ * uses (GET /collections/:groupKey, POST /collections/:groupKey/analyze,
+ * the Synthesis Set collection-selection routes): a plain-integer groupKey
+ * resolves as a persisted collection (unchanged behavior), a
+ * "derived:"-prefixed groupKey resolves via listDerivedGroupMemberSourceIds
+ * — the exact same classification pass the Sources-page group list uses,
+ * so a group's membership can never differ between "what the card shows"
+ * and "what Analyze/Select actually acts on". Same deterministic 404 for
+ * an unknown project, an unknown/foreign persisted collection, or a
+ * derived groupKey with zero current members (nothing to distinguish an
+ * "unknown" derived key from one that simply has no members right now —
+ * both are equally not-actionable).
+ */
+export type ResolvedCollectionGroup =
+  | { project: Project; kind: "PERSISTED"; collection: SourceCollectionRow; groupKey: string }
+  | { project: Project; kind: "DERIVED"; groupKey: string; memberSourceIds: number[] };
+
+export async function resolveOwnedCollectionGroup(
+  pool: Pool,
+  projectIdParam: string | string[],
+  groupKeyParam: string | string[],
+): Promise<ResolvedCollectionGroup | null> {
+  const projectId = Number(projectIdParam);
+  if (!Number.isInteger(projectId)) return null;
+  const project = await getProjectById(pool, projectId);
+  if (!project) return null;
+
+  const groupKey = Array.isArray(groupKeyParam) ? groupKeyParam[0] : groupKeyParam;
+  if (groupKey === undefined) return null;
+
+  if (isDerivedGroupKey(groupKey)) {
+    const memberSourceIds = await listDerivedGroupMemberSourceIds(pool, projectId, groupKey);
+    if (memberSourceIds.length === 0) return null;
+    return { project, kind: "DERIVED", groupKey, memberSourceIds };
+  }
+
+  const collectionId = Number(groupKey);
+  if (!Number.isInteger(collectionId)) return null;
+  const collection = await getSourceCollectionById(pool, collectionId);
+  if (!collection || collection.projectId !== projectId) return null;
+  return { project, kind: "PERSISTED", collection, groupKey: String(collection.id) };
+}
+
+/**
+ * Unified read model for the Sources page's collection grid — Phase 4K's
+ * persisted `source_collections` rows AND Phase 4L taxonomy correction's
+ * derived groups (see derivedSourceGroupsRepo.ts) share this exact same
+ * shape, so the frontend never needs two different card renderers or two
+ * different "collection" concepts. `kind` distinguishes them; `groupKey` is
+ * the opaque identity every other route (GET/analyze/Synthesis Set
+ * selection) accepts back — never parse it client-side, and never assume
+ * it's numeric.
+ */
 export interface CatalogCollectionSummary {
-  id: number;
-  provider: "YOUTUBE" | "DISCORD";
-  externalId: string;
+  groupKey: string;
+  kind: "PERSISTED" | "DERIVED";
+  /** The real source_collections.id — non-null only for a PERSISTED group. Kept alongside groupKey for any caller that still wants the raw numeric id (e.g. building a direct collection-detail link). */
+  id: number | null;
+  provider: "YOUTUBE" | "DISCORD" | null;
+  /** The SOURCE TYPE dimension (see derivedSourceGroupsRepo.ts's doc comment) — every persisted collection is a CHANNEL (a YouTube-channel or Discord-channel connection); A_LA_CARTE and UNCLASSIFIED only ever occur for a DERIVED group. */
+  sourceType: DerivedGroupSourceType;
+  /** The ORIGIN/CONTAINER dimension — non-null only for a DERIVED group discovered through another provider's container (e.g. a YouTube video found via a Discord channel scan). Null for a PERSISTED collection (its own provider IS its origin) and for UNCLASSIFIED. */
+  originProvider: DerivedGroupOriginProvider;
+  originContainerId: string | null;
+  externalId: string | null;
   title: string;
-  sourceUrl: string;
-  status: SourceCollectionRow["status"];
+  sourceUrl: string | null;
+  status: SourceCollectionRow["status"] | null;
   sanitizedError: string | null;
   lastSyncedAt: Date | null;
   itemCount: number;
   analyzedCount: number;
-  /** Phase 4K follow-up — true when a previous discovery/refresh pass stopped partway through this channel's upload history (hit its per-call page cap) and there are still older, undiscovered videos; Refresh will continue from where it left off. Always false for DISCORD. */
+  /** Phase 4K follow-up — true when a previous discovery/refresh pass stopped partway through this channel's upload history (hit its per-call page cap) and there are still older, undiscovered videos; Refresh will continue from where it left off. Always false for DISCORD and for every DERIVED group. */
   hasMoreHistory: boolean;
 }
 
-/** Batch-computes itemCount/analyzedCount for every collection in one round trip each — never N+1 per collection (spec section 46/63). */
+/** Batch-computes itemCount/analyzedCount for every PERSISTED collection in one round trip each — never N+1 per collection (spec section 46/63). */
 async function summarizeCollections(pool: Pool, collections: SourceCollectionRow[]): Promise<CatalogCollectionSummary[]> {
   if (collections.length === 0) return [];
   const collectionIds = collections.map((c) => c.id);
@@ -89,8 +168,13 @@ async function summarizeCollections(pool: Pool, collections: SourceCollectionRow
     const sourceIds = sourceIdsByCollection.get(collection.id) ?? [];
     const analyzedCount = sourceIds.filter((id) => statusBySource.get(id)?.eligibleForSynthesis).length;
     return {
+      groupKey: String(collection.id),
+      kind: "PERSISTED",
       id: collection.id,
       provider: collection.provider,
+      sourceType: "CHANNEL",
+      originProvider: null,
+      originContainerId: null,
       externalId: collection.externalId,
       title: collection.title,
       sourceUrl: collection.sourceUrl,
@@ -104,7 +188,42 @@ async function summarizeCollections(pool: Pool, collections: SourceCollectionRow
   });
 }
 
-/** GET /api/projects/:projectId/collections — every YouTube/Discord collection this project owns, with lightweight item/analyzed counts. Never returns full analysis payloads (section 47). */
+/** Batch-computes itemCount/analyzedCount for every DERIVED group in one round trip — same non-N+1 guarantee as summarizeCollections above. */
+async function summarizeDerivedGroups(pool: Pool, groups: DerivedGroupDescriptor[]): Promise<CatalogCollectionSummary[]> {
+  if (groups.length === 0) return [];
+  const allSourceIds = groups.flatMap((g) => g.memberSourceIds);
+  const statusBySource = await getCatalogAnalysisStatusForSources(pool, allSourceIds);
+  return groups.map((group) => {
+    const analyzedCount = group.memberSourceIds.filter((id) => statusBySource.get(id)?.eligibleForSynthesis).length;
+    return {
+      groupKey: group.groupKey,
+      kind: "DERIVED",
+      id: null,
+      provider: group.provider,
+      sourceType: group.sourceType,
+      originProvider: group.originProvider,
+      originContainerId: group.originContainerId,
+      externalId: null,
+      title: group.title,
+      sourceUrl: null,
+      status: null,
+      sanitizedError: null,
+      lastSyncedAt: null,
+      itemCount: group.memberSourceIds.length,
+      analyzedCount,
+      hasMoreHistory: false,
+    };
+  });
+}
+
+/**
+ * GET /api/projects/:projectId/collections — every group this project's
+ * sources fall into: real YouTube/Discord `source_collections` rows AND
+ * (Phase 4L taxonomy correction) every DERIVED group with at least one
+ * current member — never a flat "Uncollected"/"À-la-carte" bucket keyed
+ * off `collection_id IS NULL` (see derivedSourceGroupsRepo.ts). Never
+ * returns full analysis payloads (section 47).
+ */
 export function createListSourceCollectionsHandler(deps: SourceCollectionsRouteDeps) {
   return async function listSourceCollectionsHandler(req: Request, res: Response): Promise<void> {
     const projectId = Number(req.params.projectId);
@@ -117,8 +236,15 @@ export function createListSourceCollectionsHandler(deps: SourceCollectionsRouteD
       res.status(404).json(NOT_FOUND_PROJECT);
       return;
     }
-    const collections = await listSourceCollectionsByProjectId(deps.pool, projectId);
-    res.status(200).json({ projectId, collections: await summarizeCollections(deps.pool, collections) });
+    const [collections, derivedGroups] = await Promise.all([
+      listSourceCollectionsByProjectId(deps.pool, projectId),
+      listDerivedGroupsForProject(deps.pool, projectId),
+    ]);
+    const [persistedSummaries, derivedSummaries] = await Promise.all([
+      summarizeCollections(deps.pool, collections),
+      summarizeDerivedGroups(deps.pool, derivedGroups),
+    ]);
+    res.status(200).json({ projectId, collections: [...persistedSummaries, ...derivedSummaries] });
   };
 }
 
@@ -144,6 +270,39 @@ export interface CatalogItemSummary {
   origins: ProjectSourceOriginSummary[];
 }
 
+interface CatalogItemDbRow {
+  id: number;
+  provider: string;
+  external_id: string;
+  title: string | null;
+  source_url: string;
+  created_at: Date;
+}
+
+/** Shared item-row → CatalogItemSummary assembly, batched (never N+1) regardless of whether the page's ids came from a persisted collection query or a derived group's member list. */
+async function buildCatalogItems(pool: Pool, rows: CatalogItemDbRow[]): Promise<CatalogItemSummary[]> {
+  const sourceIds = rows.map((r) => r.id);
+  const [statusBySource, originsBySource] = await Promise.all([
+    getCatalogAnalysisStatusForSources(pool, sourceIds),
+    listOriginsBySourceIds(pool, sourceIds),
+  ]);
+  return rows.map((row) => {
+    const entry = statusBySource.get(row.id) ?? { status: "NOT_ANALYZED" as const, eligibleForSynthesis: false };
+    const origins = originsBySource.get(row.id) ?? [];
+    return {
+      id: row.id,
+      provider: row.provider as "YOUTUBE" | "DISCORD",
+      externalId: row.external_id,
+      title: row.title,
+      sourceUrl: row.source_url,
+      createdAt: row.created_at,
+      status: entry.status,
+      eligibleForSynthesis: entry.eligibleForSynthesis,
+      origins: origins.map(toOriginSummary),
+    };
+  });
+}
+
 /**
  * GET /api/projects/:projectId/collections/:collectionId — collection
  * metadata plus a PAGE of its items (default 50, `?cursor=`/`?limit=` —
@@ -151,49 +310,81 @@ export interface CatalogItemSummary {
  * load them all into one response). Item entries carry status only, never
  * `validated_json` (section 47) — open the existing per-source analysis
  * detail endpoint/drawer for that.
+ *
+ * Phase 4L taxonomy correction — `:collectionId` (kept as the route param
+ * name for URL stability) now accepts either a persisted numeric id or a
+ * derived groupKey (see resolveOwnedCollectionGroup). Both kinds render
+ * through this exact same paginated response shape; only how the item ids
+ * are resolved differs.
  */
 export function createGetSourceCollectionHandler(deps: SourceCollectionsRouteDeps) {
   return async function getSourceCollectionHandler(req: Request, res: Response): Promise<void> {
-    const resolved = await resolveOwnedCollection(deps.pool, req.params.projectId, req.params.collectionId);
+    const resolved = await resolveOwnedCollectionGroup(deps.pool, req.params.projectId, req.params.collectionId);
     if (!resolved) {
       res.status(404).json(NOT_FOUND_COLLECTION);
       return;
     }
-    const { collection } = resolved;
 
     const limit = Math.min(Math.max(Number(req.query.limit) || ITEMS_PAGE_SIZE, 1), 200);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
 
-    const itemsResult = await deps.pool.query<{ id: string; provider: string; external_id: string; title: string | null; source_url: string; created_at: Date; total_count: string }>(
-      `SELECT id, provider, external_id, title, source_url, created_at, COUNT(*) OVER () AS total_count
-       FROM project_sources WHERE collection_id = $1 ORDER BY created_at ASC LIMIT $2 OFFSET $3`,
-      [collection.id, limit, offset],
-    );
-    const sourceIds = itemsResult.rows.map((r) => Number(r.id));
-    const [statusBySource, originsBySource] = await Promise.all([
-      getCatalogAnalysisStatusForSources(deps.pool, sourceIds),
-      listOriginsBySourceIds(deps.pool, sourceIds),
-    ]);
-    const totalCount = itemsResult.rows[0] ? Number(itemsResult.rows[0].total_count) : 0;
+    let rows: CatalogItemDbRow[];
+    let totalCount: number;
+    let summary: CatalogCollectionSummary;
 
-    const items: CatalogItemSummary[] = itemsResult.rows.map((row) => {
-      const entry = statusBySource.get(Number(row.id)) ?? { status: "NOT_ANALYZED" as const, eligibleForSynthesis: false };
-      const origins = originsBySource.get(Number(row.id)) ?? [];
-      return {
-        id: Number(row.id),
-        provider: row.provider as "YOUTUBE" | "DISCORD",
-        externalId: row.external_id,
-        title: row.title,
-        sourceUrl: row.source_url,
-        createdAt: row.created_at,
-        status: entry.status,
-        eligibleForSynthesis: entry.eligibleForSynthesis,
-        origins: origins.map(toOriginSummary),
+    if (resolved.kind === "PERSISTED") {
+      const itemsResult = await deps.pool.query<{
+        id: string;
+        provider: string;
+        external_id: string;
+        title: string | null;
+        source_url: string;
+        created_at: Date;
+        total_count: string;
+      }>(
+        `SELECT id, provider, external_id, title, source_url, created_at, COUNT(*) OVER () AS total_count
+         FROM project_sources WHERE collection_id = $1 ORDER BY created_at ASC LIMIT $2 OFFSET $3`,
+        [resolved.collection.id, limit, offset],
+      );
+      rows = itemsResult.rows.map((r) => ({ id: Number(r.id), provider: r.provider, external_id: r.external_id, title: r.title, source_url: r.source_url, created_at: r.created_at }));
+      totalCount = itemsResult.rows[0] ? Number(itemsResult.rows[0].total_count) : 0;
+      summary = (await summarizeCollections(deps.pool, [resolved.collection]))[0];
+    } else {
+      totalCount = resolved.memberSourceIds.length;
+      // memberSourceIds is already ordered oldest-first (classifyDerivedGroups
+      // orders by ps.created_at ASC) — slicing here is equivalent to the
+      // persisted branch's ORDER BY created_at ASC LIMIT/OFFSET.
+      const pageIds = resolved.memberSourceIds.slice(offset, offset + limit);
+      if (pageIds.length > 0) {
+        const pageResult = await deps.pool.query<{ id: string; provider: string; external_id: string; title: string | null; source_url: string; created_at: Date }>(
+          `SELECT id, provider, external_id, title, source_url, created_at FROM project_sources WHERE id = ANY($1::bigint[])`,
+          [pageIds],
+        );
+        const byId = new Map(pageResult.rows.map((r) => [Number(r.id), r]));
+        rows = pageIds.map((id) => {
+          const r = byId.get(id)!;
+          return { id, provider: r.provider, external_id: r.external_id, title: r.title, source_url: r.source_url, created_at: r.created_at };
+        });
+      } else {
+        rows = [];
+      }
+      const allGroups = await listDerivedGroupsForProject(deps.pool, resolved.project.id);
+      const group = allGroups.find((g) => g.groupKey === resolved.groupKey) ?? {
+        groupKey: resolved.groupKey,
+        provider: null,
+        sourceType: "UNCLASSIFIED" as DerivedGroupSourceType,
+        originProvider: null,
+        originContainerId: null,
+        title: "Unclassified Sources",
+        memberSourceIds: resolved.memberSourceIds,
       };
-    });
+      summary = (await summarizeDerivedGroups(deps.pool, [group]))[0];
+    }
+
+    const items = await buildCatalogItems(deps.pool, rows);
 
     res.status(200).json({
-      collection: (await summarizeCollections(deps.pool, [collection]))[0],
+      collection: summary,
       items,
       pagination: { limit, offset, totalCount },
     });
@@ -474,7 +665,7 @@ export function createRefreshSourceCollectionHandler(deps: SourceCollectionsRout
   };
 }
 
-/** DELETE /api/projects/:projectId/collections/:collectionId — removes the collection association only; every member item and its analysis history is preserved (spec section 40). */
+/** DELETE /api/projects/:projectId/collections/:collectionId — removes the collection association only; every member item and its analysis history is preserved (spec section 40). PERSISTED-only — a derived group has no row to delete; its members simply stay classified the same way until their real provenance changes. */
 export function createDeleteSourceCollectionHandler(deps: SourceCollectionsRouteDeps) {
   return async function deleteSourceCollectionHandler(req: Request, res: Response): Promise<void> {
     const resolved = await resolveOwnedCollection(deps.pool, req.params.projectId, req.params.collectionId);

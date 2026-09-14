@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { ProjectSourceAnalysisDrawer } from "../components/ProjectSourceAnalysisDrawer";
+import { ProvenanceLine } from "../components/ProvenanceLine";
 import { RowActionsMenu } from "../components/RowActionsMenu";
 import { AddToProjectDialog } from "../components/AddToProjectDialog";
 import { useResolvedProject } from "../lib/useResolvedProject";
@@ -12,6 +13,8 @@ import {
   CatalogApiError,
   batchAnalyzeProjectSources,
   analyzeCollection,
+  catalogGroupTypeLabel,
+  catalogGroupOriginLine,
   type CatalogCollectionSummary,
   type CatalogItemSummary,
   type AnalyzeCollectionResult,
@@ -49,18 +52,24 @@ const STATUS_LABELS: Record<CatalogItemSummary["status"], string> = {
 const PENDING_STATUSES = new Set<CatalogItemSummary["status"]>(["QUEUED", "ANALYZING", "VALIDATING"]);
 
 /**
- * "/projects/:projectId/collections/:collectionId" — Phase 4K. A YouTube
- * channel's (or, if ever populated, a Discord collection's) discovered
- * items: checkbox selection + explicit "Analyze Selected" (never
- * automatic — see the Phase 4K spec's core invariants), individual
- * Analyze/View/Retry per item reusing the exact same
- * project-source-analysis endpoints and ProjectSourceAnalysisDrawer
- * SourcesPage already uses — analysis semantics are completely unchanged
- * here, only where items are browsed from.
+ * "/projects/:projectId/collections/:collectionId" — Phase 4K, extended in
+ * the Phase 4L taxonomy correction to also cover DERIVED groups (see
+ * derivedSourceGroupsRepo.ts and CatalogCollectionSummary's doc comment):
+ * a real persisted YouTube/Discord channel collection, or a group computed
+ * purely from provenance (e.g. YouTube videos discovered by scanning a
+ * Discord channel, or genuinely manual à-la-carte YouTube adds). Both
+ * kinds render through this exact same page — checkbox selection +
+ * explicit "Analyze Selected" (never automatic — see the Phase 4K spec's
+ * core invariants), individual Analyze/View/Retry per item reusing the
+ * exact same project-source-analysis endpoints and
+ * ProjectSourceAnalysisDrawer SourcesPage already uses. Refresh/Remove
+ * only ever apply to a PERSISTED collection — a derived group has no row
+ * to refresh or delete; it simply reflects whatever the sources' real
+ * provenance currently is.
  */
 export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDetailPageProps) {
   const navigate = useNavigate();
-  const { collectionId: collectionIdParam } = useParams<{ collectionId: string }>();
+  const { collectionId: groupKeyParam } = useParams<{ collectionId: string }>();
   const { state: projectState } = useResolvedProject(backendUrl, knoveraToken);
   const [state, setState] = useState<LoadState>({ phase: "idle" });
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -73,7 +82,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   const [analyzeCollectionResult, setAnalyzeCollectionResult] = useState<AnalyzeCollectionResult | null>(null);
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
-  const collectionId = collectionIdParam ? Number(collectionIdParam) : NaN;
+  const groupKey = groupKeyParam ?? "";
   // Live-validation Fix 3 — the backend rejects Analyze for any project
   // whose type isn't TRADING_STRATEGIES (see
   // projectSourceAnalysis.ts's own guard: "Analysis is only available for
@@ -87,7 +96,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   async function load(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setState({ phase: "loading" });
     try {
-      const result = await getSourceCollection(url, token, projectId, collectionId, { limit: 200 });
+      const result = await getSourceCollection(url, token, projectId, groupKey, { limit: 200 });
       if (!cancelledRef.current) setState({ phase: "loaded", collection: result.collection, items: result.items });
     } catch (err) {
       if (cancelledRef.current) return;
@@ -100,7 +109,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   }
 
   useEffect(() => {
-    if (!backendUrl || !knoveraToken || resolvedProjectId == null || !Number.isInteger(collectionId)) {
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || groupKey.length === 0) {
       setState({ phase: "idle" });
       return;
     }
@@ -110,7 +119,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
       cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, knoveraToken, resolvedProjectId, collectionId]);
+  }, [backendUrl, knoveraToken, resolvedProjectId, groupKey]);
 
   function refresh() {
     if (backendUrl && knoveraToken && resolvedProjectId != null) void load(backendUrl, knoveraToken, resolvedProjectId, { current: false });
@@ -144,7 +153,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
     setActionError(null);
     setAnalyzeCollectionResult(null);
     try {
-      const result = await analyzeCollection(backendUrl, knoveraToken, resolvedProjectId, collectionId);
+      const result = await analyzeCollection(backendUrl, knoveraToken, resolvedProjectId, groupKey);
       setAnalyzeCollectionResult(result);
       refresh();
     } catch (err) {
@@ -207,12 +216,13 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
     }
   }
 
+  /** Only ever called when state.collection.kind === "PERSISTED" (its `id` is then guaranteed non-null) — see the Refresh button's own guard below. A derived group has no row to refresh. */
   async function handleRefreshCollection() {
-    if (!backendUrl || !knoveraToken || resolvedProjectId == null) return;
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || state.phase !== "loaded" || state.collection.id == null) return;
     setBusy(true);
     setActionError(null);
     try {
-      await refreshSourceCollection(backendUrl, knoveraToken, resolvedProjectId, collectionId);
+      await refreshSourceCollection(backendUrl, knoveraToken, resolvedProjectId, state.collection.id);
       refresh();
     } catch (err) {
       setActionError(err instanceof CatalogApiError ? err.message : "Failed to refresh collection.");
@@ -221,11 +231,12 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
     }
   }
 
+  /** Only ever called when state.collection.kind === "PERSISTED" — see the Remove Collection button's own guard below. A derived group has no row to delete. */
   async function handleDeleteCollection() {
-    if (!backendUrl || !knoveraToken || resolvedProjectId == null) return;
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || state.phase !== "loaded" || state.collection.id == null) return;
     setBusy(true);
     try {
-      await deleteSourceCollection(backendUrl, knoveraToken, resolvedProjectId, collectionId);
+      await deleteSourceCollection(backendUrl, knoveraToken, resolvedProjectId, state.collection.id);
       navigate(`/projects/${resolvedProjectId}/sources`);
     } catch (err) {
       setActionError(err instanceof CatalogApiError ? err.message : "Failed to remove collection.");
@@ -260,7 +271,7 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
 
       {state.phase === "not_found" && (
         <div className="kv-card knovera-empty-state" role="alert">
-          <p>This collection doesn't exist.</p>
+          <p>This collection doesn't exist, or currently has no sources.</p>
           {resolvedProjectId != null && (
             <button type="button" className="link-button" onClick={() => navigate(`/projects/${resolvedProjectId}/sources`)}>
               ← Back to Sources
@@ -283,36 +294,42 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
 
           <div className="knovera-page-header">
             <div>
-              <h2 className="knovera-section-title">{state.collection.title}</h2>
+              <h2 className="knovera-section-title">{catalogGroupTypeLabel(state.collection)}</h2>
               <p className="knovera-project-card-source">
-                {state.collection.provider === "YOUTUBE" ? "YouTube Channel" : "Discord Collection"} · {state.items.length} item{state.items.length === 1 ? "" : "s"} ·{" "}
+                {catalogGroupOriginLine(state.collection)} · {state.items.length} item{state.items.length === 1 ? "" : "s"} ·{" "}
                 {state.collection.analyzedCount} analyzed
               </p>
             </div>
-            <div className="knovera-synthesis-set-detail-actions">
-              {state.collection.provider === "YOUTUBE" && (
-                <button type="button" className="link-button" disabled={busy} onClick={() => void handleRefreshCollection()}>
-                  {busy ? "Refreshing…" : "Refresh"}
-                </button>
-              )}
-              {confirmingDelete ? (
-                <>
-                  <span className="hint">Remove this collection?</span>
-                  <button type="button" className="link-button" onClick={() => setConfirmingDelete(false)} disabled={busy}>
-                    Cancel
+            {state.collection.kind === "PERSISTED" && (
+              <div className="knovera-synthesis-set-detail-actions">
+                {state.collection.provider === "YOUTUBE" && (
+                  <button type="button" className="link-button" disabled={busy} onClick={() => void handleRefreshCollection()}>
+                    {busy ? "Refreshing…" : "Refresh"}
                   </button>
-                  <button type="button" className="link-button danger" onClick={() => void handleDeleteCollection()} disabled={busy}>
-                    {busy ? "Removing…" : "Confirm Remove"}
+                )}
+                {confirmingDelete ? (
+                  <>
+                    <span className="hint">Remove this collection?</span>
+                    <button type="button" className="link-button" onClick={() => setConfirmingDelete(false)} disabled={busy}>
+                      Cancel
+                    </button>
+                    <button type="button" className="link-button danger" onClick={() => void handleDeleteCollection()} disabled={busy}>
+                      {busy ? "Removing…" : "Confirm Remove"}
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" className="link-button danger" onClick={() => setConfirmingDelete(true)}>
+                    Remove Collection
                   </button>
-                </>
-              ) : (
-                <button type="button" className="link-button danger" onClick={() => setConfirmingDelete(true)}>
-                  Remove Collection
-                </button>
-              )}
-            </div>
+                )}
+              </div>
+            )}
           </div>
-          <p className="hint">Removing a collection only removes the grouping — its items and their analyses are kept.</p>
+          {state.collection.kind === "PERSISTED" ? (
+            <p className="hint">Removing a collection only removes the grouping — its items and their analyses are kept.</p>
+          ) : (
+            <p className="hint">This group is computed from each source's own provenance — there's no separate grouping to remove.</p>
+          )}
 
           {actionError && (
             <div className="kv-card knovera-empty-state" role="alert">
@@ -366,11 +383,13 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
                       <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`Select ${title}`} />
                       <div className="knovera-youtube-source-main">
                         <span className="knovera-youtube-source-title">{title}</span>
+                        {item.provider === "YOUTUBE" && <ProvenanceLine origins={item.origins} />}
                       </div>
                     </label>
                   ) : (
                     <div className="knovera-youtube-source-main">
                       <span className="knovera-youtube-source-title">{title}</span>
+                      {item.provider === "YOUTUBE" && <ProvenanceLine origins={item.origins} />}
                     </div>
                   )}
                   <div className="knovera-youtube-source-actions">

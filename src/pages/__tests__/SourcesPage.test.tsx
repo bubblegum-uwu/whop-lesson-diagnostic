@@ -285,21 +285,19 @@ describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Video" }));
 
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add YouTube Video" })).not.toBeInTheDocument());
+    // Phase 4L taxonomy correction — the main Sources page is
+    // collection/group-only, driven entirely by GET /collections, never by
+    // the raw /sources list (see CollectionDetailPage.tsx and the
+    // taxonomy-correction group model) — this only verifies the dialog
+    // closed and the sources list was refreshed.
     await waitFor(() => expect(sourcesCallCount).toBeGreaterThanOrEqual(2));
-    // Phase 4L follow-up — the main Sources page is collection-only: the
-    // newly-added à-la-carte source never renders as a row here, it's
-    // reflected in the virtual Uncollected Sources card's count instead
-    // (per-row analysis status lives on UncollectedSourcesDetailPage now).
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
-    expect(screen.getByText(/À-la-carte · 1 item/)).toBeInTheDocument();
   });
 
   it("K: no fake Whop lesson-table controls (Sync Course/lesson counts) appear for a YouTube-only source, even though real per-source Analyze status now does (Phase 4H-B)", async () => {
     stubFetch([YOUTUBE_SOURCE]);
     renderSources("/projects/7/sources");
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
 
-    expect(screen.queryByText("Sync Course")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("Sync Course")).not.toBeInTheDocument());
     expect(screen.queryByText("Analyze All Unanalyzed")).not.toBeInTheDocument();
     expect(screen.queryByText(/lessons? analyzed/i)).not.toBeInTheDocument();
   });
@@ -308,9 +306,8 @@ describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
     stubFetch([YOUTUBE_SOURCE]);
     renderSources("/projects/7/sources", { courseTitle: "The Trading Accelerator" });
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Sync Course")).not.toBeInTheDocument());
     expect(screen.queryByText("No sources connected yet.")).not.toBeInTheDocument();
-    expect(screen.queryByText("Sync Course")).not.toBeInTheDocument();
   });
 
   it("I: adding a YouTube video works while Whop is disconnected (no live Whop connection)", async () => {
@@ -345,6 +342,6 @@ describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
     renderSources("/projects/7/sources");
 
     await waitFor(() => expect(screen.getByText(/The Trading Accelerator — course lessons/)).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Uncollected Sources" })).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("Loading sources…")).not.toBeInTheDocument());
   });
 });

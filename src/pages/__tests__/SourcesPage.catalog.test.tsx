@@ -43,8 +43,13 @@ function whopSource(courseId: number, name: string) {
 }
 
 const COLLECTION = {
+  groupKey: "9",
+  kind: "PERSISTED",
   id: 9,
   provider: "YOUTUBE",
+  sourceType: "CHANNEL",
+  originProvider: null,
+  originContainerId: null,
   externalId: "UC_x5XG1OV2P6uZZ5FSM9Ttw",
   title: "SMB Capital",
   sourceUrl: "https://www.youtube.com/channel/UC_x5XG1OV2P6uZZ5FSM9Ttw",
@@ -53,6 +58,7 @@ const COLLECTION = {
   lastSyncedAt: "2026-01-01T00:00:00.000Z",
   itemCount: 5,
   analyzedCount: 2,
+  hasMoreHistory: false,
 };
 
 function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps {
@@ -91,6 +97,7 @@ function renderSources(props: Partial<SourcesPageProps> = {}) {
         <Route path="/projects/:projectId/sources" element={<SourcesPage {...baseProps(props)} />} />
         <Route path="/projects/:projectId/collections/:collectionId" element={<div>COLLECTION_DETAIL_MARKER</div>} />
         <Route path="/projects/:projectId/whop-courses/:courseId" element={<div>WHOP_COURSE_DETAIL_MARKER</div>} />
+        <Route path="/projects/:projectId/whop-ala-carte" element={<div>WHOP_ALA_CARTE_DETAIL_MARKER</div>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -126,8 +133,8 @@ describe("SourcesPage — multi-course Whop + collections catalog (Phase 4K)", (
     vi.stubGlobal("fetch", fetchMock);
     renderSources();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "SMB Capital" })).toBeInTheDocument());
-    expect(screen.getByText("YouTube Channel · 5 items · 2 analyzed")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · CHANNEL" })).toBeInTheDocument());
+    expect(screen.getByText("YouTube · SMB Capital · 5 items · 2 analyzed")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Open/ }));
     expect(screen.getByText("COLLECTION_DETAIL_MARKER")).toBeInTheDocument();
@@ -191,30 +198,29 @@ describe("SourcesPage — multi-course Whop + collections catalog (Phase 4K)", (
     expect(screen.getByRole("heading", { name: "Bulk Import YouTube Videos" })).toBeInTheDocument();
   });
 
-  it("renders an à-la-carte Whop lesson distinctly from Connected Courses, with an individual Analyze action", async () => {
+  it("renders a WHOP · À-LA-CARTE card (never a flat lesson row on the main Sources page) and Open navigates to its own detail page", async () => {
     const alaCarteLesson = { id: 42, title: "Lesson 7", courseId: 5, courseTitle: "Big Course", sourceUrl: "https://whop.com/x", durationSeconds: null, status: "NOT_ANALYZED", eligibleForSynthesis: false };
-    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (url: string) => {
       if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
       if (url.endsWith("/sources")) return jsonResponse(200, { projectId: 7, sources: [] }); // no connected courses
       if (url.endsWith("/collections")) return jsonResponse(200, { projectId: 7, collections: [] });
-      if (url.endsWith("/whop-lessons") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, items: [alaCarteLesson] });
-      if (url.endsWith("/api/analysis/jobs") && init?.method === "POST") {
-        expect(JSON.parse(init.body as string)).toEqual({ lessonIds: [42], force: false });
-        return jsonResponse(200, { queued: [{ lessonId: 42, jobId: "job-1" }], skipped: [] });
-      }
+      if (url.endsWith("/whop-lessons")) return jsonResponse(200, { projectId: 7, items: [alaCarteLesson] });
       return jsonResponse(404, {});
     });
     vi.stubGlobal("fetch", fetchMock);
     renderSources();
 
-    await waitFor(() => expect(screen.getByRole("heading", { name: "À-la-carte Whop" })).toBeInTheDocument());
-    expect(screen.getByText("Lesson 7")).toBeInTheDocument();
-    expect(screen.getByText("Big Course")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "WHOP · À-LA-CARTE" })).toBeInTheDocument());
+    expect(screen.getByText("Individual Whop Content · 1 item · 0 analyzed")).toBeInTheDocument();
+    // Phase 4L taxonomy correction — the main Sources page is
+    // collection/group-only: the individual lesson never renders here,
+    // only on WhopAlaCarteDetailPage (see WhopAlaCarteDetailPage.test.tsx).
+    expect(screen.queryByText("Lesson 7")).not.toBeInTheDocument();
     // Never rendered as a Connected Courses card.
     expect(screen.queryByRole("heading", { name: "Big Course", level: 2 })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("https://backend.example.com/api/analysis/jobs", expect.objectContaining({ method: "POST" })));
+    fireEvent.click(screen.getByRole("button", { name: /Open/ }));
+    expect(screen.getByText("WHOP_ALA_CARTE_DETAIL_MARKER")).toBeInTheDocument();
   });
 
   it("Bulk Import Lessons opens the WHOP_LESSON batch dialog when Whop is connected", async () => {

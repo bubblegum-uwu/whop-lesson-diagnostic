@@ -20,25 +20,14 @@ import type { DiagnosticDisplayPayload } from "../lib/diagnosticPayload";
 import type { LessonFetchOutcome } from "../lib/whopApi";
 import { useResolvedProject } from "../lib/useResolvedProject";
 import { getProjectSources, type ProjectSource, type WhopProjectSource, type YouTubeProjectSource, type DiscordProjectSource } from "../lib/sourcesApi";
-import { getProjectSourceAnalysis } from "../lib/projectSourceAnalysisApi";
-import { listSourceCollections, listAlaCarteWhopLessons, type CatalogCollectionSummary, type AlaCarteWhopLessonSummary } from "../lib/catalogApi";
-import { enqueueAnalysisJobs } from "../lib/courseApi";
-
-/** Phase 4K follow-up — à-la-carte Whop lessons use the lesson-analysis job's own status vocabulary (see WhopCourseDetailPage's identical STATUS_LABELS/PENDING_STATUSES), a different set of states than project_source-based analysis above. */
-const WHOP_LESSON_STATUS_LABELS: Record<string, string> = {
-  NOT_ANALYZED: "Not analyzed",
-  QUEUED: "Queued",
-  ANALYZING: "Analyzing",
-  RETRIEVING: "Retrieving",
-  PREPARING_VIDEO: "Preparing",
-  UPLOADING: "Uploading",
-  VALIDATING: "Validating",
-  ANALYZED: "Analyzed",
-  FAILED: "Failed",
-  AUTH_REQUIRED: "Needs Whop reconnect",
-  CANCELLED: "Cancelled",
-};
-const WHOP_LESSON_PENDING_STATUSES = new Set(["QUEUED", "ANALYZING", "RETRIEVING", "PREPARING_VIDEO", "UPLOADING", "VALIDATING"]);
+import {
+  listSourceCollections,
+  listAlaCarteWhopLessons,
+  catalogGroupTypeLabel,
+  catalogGroupOriginLine,
+  type CatalogCollectionSummary,
+  type AlaCarteWhopLessonSummary,
+} from "../lib/catalogApi";
 
 /** Phase 4I — every provider whose source is a single analyzable video. A future provider joins this union. */
 type VideoProjectSource = YouTubeProjectSource | DiscordProjectSource;
@@ -126,9 +115,6 @@ export function SourcesPage(props: SourcesPageProps) {
   const [showConnectWhopCourseDialog, setShowConnectWhopCourseDialog] = useState(false);
   const [collections, setCollections] = useState<CatalogCollectionSummary[]>([]);
   const [alaCarteWhopLessons, setAlaCarteWhopLessons] = useState<AlaCarteWhopLessonSummary[]>([]);
-  const [whopLessonBusyId, setWhopLessonBusyId] = useState<number | null>(null);
-  const [whopLessonActionError, setWhopLessonActionError] = useState<string | null>(null);
-  const [uncollectedAnalyzedCount, setUncollectedAnalyzedCount] = useState(0);
 
   async function loadSources(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setSourcesState({ phase: "loading" });
@@ -213,13 +199,6 @@ export function SourcesPage(props: SourcesPageProps) {
     sourcesState.phase === "loaded"
       ? sourcesState.sources.filter((s): s is VideoProjectSource => s.provider === "YOUTUBE" || s.provider === "DISCORD")
       : [];
-  // Phase 4L follow-up — the main Sources page is COLLECTION-ONLY: no
-  // individual source row of any kind renders here, including uncollected
-  // ones (see UncollectedSourcesDetailPage.tsx's doc comment). A video
-  // source with no real collection (added à la carte, never grouped under
-  // a channel/Discord import) surfaces through one virtual "Uncollected
-  // Sources" card in the Collections grid below, never a flat list.
-  const uncollectedVideoSources = videoSources.filter((s) => s.collectionId === null);
   // Phase 4K-C — the current YouTube externalIds this project already has,
   // for ImportDiscordChannelDialog's client-side preview estimate only
   // (the backend commit call remains the authoritative dedup source).
@@ -256,52 +235,6 @@ export function SourcesPage(props: SourcesPageProps) {
   function refreshAlaCarteWhopLessons() {
     if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) void loadAlaCarteWhopLessons(props.backendUrl, props.knoveraToken, resolvedProjectId);
   }
-
-  async function handleAnalyzeWhopLesson(lessonId: number, force = false) {
-    if (!props.backendUrl || !props.knoveraToken) return;
-    setWhopLessonBusyId(lessonId);
-    setWhopLessonActionError(null);
-    try {
-      await enqueueAnalysisJobs(props.backendUrl, props.knoveraToken, [lessonId], force);
-      refreshAlaCarteWhopLessons();
-    } catch (err) {
-      setWhopLessonActionError(err instanceof Error ? err.message : "Failed to start analysis.");
-    } finally {
-      setWhopLessonBusyId(null);
-    }
-  }
-
-  const isTradingStrategies = projectState.phase === "resolved" && projectState.project.projectType === "TRADING_STRATEGIES";
-
-  // Phase 4L — the main Sources page no longer renders any individual
-  // source row (see the virtual "Uncollected Sources" card below and its
-  // own detail page, UncollectedSourcesDetailPage.tsx, for where per-source
-  // Analyze/Retry/View now lives). This page only needs a lightweight
-  // ANALYZED COUNT for that card's summary line — a one-time per-source
-  // status read (never a live poll, since nothing here shows a per-row
-  // "Working…" indicator anymore), the same accepted pattern already used
-  // for uncollected sources in SynthesisSetDetailPage's fine-tune list.
-  const uncollectedIdsKey = uncollectedVideoSources.map((s) => s.id).join(",");
-  useEffect(() => {
-    if (!isTradingStrategies || !props.backendUrl || !props.knoveraToken || resolvedProjectId == null || uncollectedVideoSources.length === 0) {
-      setUncollectedAnalyzedCount(0);
-      return;
-    }
-    let cancelled = false;
-    const url = props.backendUrl;
-    const token = props.knoveraToken;
-    const projectId = resolvedProjectId;
-    void (async () => {
-      const results = await Promise.all(
-        uncollectedVideoSources.map((s) => getProjectSourceAnalysis(url, token, projectId, s.id).catch(() => null)),
-      );
-      if (!cancelled) setUncollectedAnalyzedCount(results.filter((r) => r?.analysis != null).length);
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [uncollectedIdsKey, isTradingStrategies, resolvedProjectId]);
 
   return (
     <div className="knovera-page">
@@ -469,76 +402,42 @@ export function SourcesPage(props: SourcesPageProps) {
         </>
       )}
 
-      {alaCarteWhopLessons.length > 0 && (
-        <>
-          <h2 className="knovera-section-title">À-la-carte Whop</h2>
-          <p className="knovera-project-card-source">
-            Individually imported lessons — never a full course. Connect the course instead to see all of its lessons.
-          </p>
-          {whopLessonActionError && (
-            <div className="kv-card knovera-empty-state" role="alert">
-              <p>{whopLessonActionError}</p>
-            </div>
-          )}
-          <ul className="knovera-youtube-source-list">
-            {alaCarteWhopLessons.map((lesson) => {
-              const isPending = WHOP_LESSON_PENDING_STATUSES.has(lesson.status);
-              const isFailed = lesson.status === "FAILED";
-              const isDone = lesson.status === "ANALYZED";
-              const badgeClass = isFailed ? "kv-badge-danger" : isDone ? "kv-badge-accent" : "kv-badge-muted";
-              const busy = whopLessonBusyId === lesson.id;
-              return (
-                <li key={lesson.id} className="kv-card knovera-youtube-source-row">
-                  <div className="knovera-youtube-source-main">
-                    <span className="knovera-youtube-source-label">{lesson.courseTitle}</span>
-                    <span className="knovera-youtube-source-title">{lesson.title}</span>
-                  </div>
-                  <div className="knovera-youtube-source-actions">
-                    <span className={`kv-badge ${badgeClass}`}>{WHOP_LESSON_STATUS_LABELS[lesson.status] ?? lesson.status}</span>
-                    {lesson.status === "NOT_ANALYZED" && (
-                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeWhopLesson(lesson.id)}>
-                        {busy ? "Starting…" : "Analyze"}
-                      </button>
-                    )}
-                    {isPending && <span className="hint">Working…</span>}
-                    {isFailed && (
-                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeWhopLesson(lesson.id)}>
-                        {busy ? "Retrying…" : "Retry"}
-                      </button>
-                    )}
-                    {isDone && (
-                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeWhopLesson(lesson.id, true)}>
-                        {busy ? "Starting…" : "Re-analyze"}
-                      </button>
-                    )}
-                    <a href={lesson.sourceUrl} target="_blank" rel="noreferrer" className="link-button">
-                      Open on Whop
-                    </a>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
-
-      {(collections.length > 0 || uncollectedVideoSources.length > 0) && (
+      {/*
+       * Phase 4L taxonomy correction — the main Sources page is
+       * COLLECTION/GROUP-ONLY: no individual source row of any kind
+       * renders here. `collections` (from listSourceCollections) already
+       * includes every PERSISTED source_collections row AND every DERIVED
+       * group with current members (see CatalogCollectionSummary's doc
+       * comment) — a YouTube video discovered by scanning a Discord
+       * channel renders as its own "YOUTUBE · CHANNEL / Discord ·
+       * #channel" card here, never lumped into a generic "Uncollected/
+       * À-la-carte" bucket keyed off collection_id IS NULL. The Whop
+       * à-la-carte card below is the one exception kept separate from
+       * `collections` — Whop lessons live in the `lessons` table, never
+       * `project_sources`, so they were never part of that catalog to
+       * begin with (see whopLessonImportsRepo.ts's doc comment).
+       */}
+      {(collections.length > 0 || alaCarteWhopLessons.length > 0) && (
         <>
           <h2 className="knovera-section-title">Collections</h2>
           <div className="knovera-project-grid">
             {collections.map((collection) => (
-              <div key={collection.id} className="kv-card knovera-project-card">
+              <div key={collection.groupKey} className="kv-card knovera-project-card">
                 <div className="knovera-project-card-top">
                   <div>
-                    <h2>{collection.title}</h2>
+                    <h2>{catalogGroupTypeLabel(collection)}</h2>
                     <p className="knovera-project-card-source">
-                      {collection.provider === "YOUTUBE" ? "YouTube Channel" : "Discord Collection"} · {collection.itemCount} item{collection.itemCount === 1 ? "" : "s"} · {collection.analyzedCount} analyzed
+                      {catalogGroupOriginLine(collection)} · {collection.itemCount} item{collection.itemCount === 1 ? "" : "s"} · {collection.analyzedCount} analyzed
                     </p>
                     {collection.status === "SYNC_FAILED" && collection.sanitizedError && <p className="knovera-field-error">{collection.sanitizedError}</p>}
                   </div>
                 </div>
                 <div className="knovera-project-card-footer">
-                  <button type="button" className="knovera-open-link" onClick={() => navigate(`/projects/${resolvedProjectId}/collections/${collection.id}`)}>
+                  <button
+                    type="button"
+                    className="knovera-open-link"
+                    onClick={() => navigate(`/projects/${resolvedProjectId}/collections/${encodeURIComponent(collection.groupKey)}`)}
+                  >
                     Open
                     <span className="knovera-cta-arrow" aria-hidden="true">
                       →
@@ -548,26 +447,19 @@ export function SourcesPage(props: SourcesPageProps) {
               </div>
             ))}
 
-            {/* Phase 4L follow-up — the main Sources page is collection-only:
-                no individual source row renders here (see
-                UncollectedSourcesDetailPage.tsx's doc comment). À-la-carte
-                sources with no real source_collections row get this ONE
-                virtual, presentation-only card instead — never a fabricated
-                persisted collection, never backfilled historical
-                membership. `collection_id` on these sources stays NULL. */}
-            {uncollectedVideoSources.length > 0 && (
+            {alaCarteWhopLessons.length > 0 && (
               <div className="kv-card knovera-project-card">
                 <div className="knovera-project-card-top">
                   <div>
-                    <h2>Uncollected Sources</h2>
+                    <h2>WHOP · À-LA-CARTE</h2>
                     <p className="knovera-project-card-source">
-                      À-la-carte · {uncollectedVideoSources.length} item{uncollectedVideoSources.length === 1 ? "" : "s"}
-                      {isTradingStrategies ? ` · ${uncollectedAnalyzedCount} analyzed` : ""}
+                      Individual Whop Content · {alaCarteWhopLessons.length} item{alaCarteWhopLessons.length === 1 ? "" : "s"} ·{" "}
+                      {alaCarteWhopLessons.filter((l) => l.status === "ANALYZED").length} analyzed
                     </p>
                   </div>
                 </div>
                 <div className="knovera-project-card-footer">
-                  <button type="button" className="knovera-open-link" onClick={() => navigate(`/projects/${resolvedProjectId}/collections/uncollected`)}>
+                  <button type="button" className="knovera-open-link" onClick={() => navigate(`/projects/${resolvedProjectId}/whop-ala-carte`)}>
                     Open
                     <span className="knovera-cta-arrow" aria-hidden="true">
                       →

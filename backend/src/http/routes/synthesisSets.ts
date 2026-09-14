@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import type { Pool } from "pg";
 import { getProjectById } from "../../db/projectsRepo.js";
 import { getProjectSourceById, listProjectSourceIdsByCollectionId } from "../../db/projectSourcesRepo.js";
-import { getSourceCollectionById } from "../../db/sourceCollectionsRepo.js";
+import { resolveOwnedCollectionGroup } from "./sourceCollections.js";
 import {
   createSynthesisSet,
   listSynthesisSetsByProjectId,
@@ -356,6 +356,12 @@ export function createBulkUpdateSynthesisSetSourcesHandler(deps: SynthesisSetsRo
  * rule (spec's core invariant) — a source imported into this collection
  * tomorrow, or analyzed tomorrow, never joins this set on its own; the user
  * must repeat this action (or use the fine-tune editor) to add it.
+ *
+ * Phase 4L taxonomy correction — `:collectionId` accepts either a
+ * persisted numeric collection id or a derived groupKey, resolved via
+ * resolveOwnedCollectionGroup (the exact same resolver the Sources page's
+ * group list and Analyze Collection use) — a Synthesis Set's group
+ * checkbox always selects exactly the sources its card shows.
  */
 export function createBulkAddCollectionToSynthesisSetHandler(deps: SynthesisSetsRouteDeps) {
   return async function bulkAddCollectionToSynthesisSetHandler(req: Request, res: Response): Promise<void> {
@@ -366,28 +372,35 @@ export function createBulkAddCollectionToSynthesisSetHandler(deps: SynthesisSets
     }
     const { set } = resolved;
 
-    const collectionId = Number(req.params.collectionId);
-    if (!Number.isInteger(collectionId)) {
-      res.status(404).json(COLLECTION_NOT_FOUND_RESPONSE);
-      return;
-    }
-    const collection = await getSourceCollectionById(deps.pool, collectionId);
-    if (!collection || collection.projectId !== set.projectId) {
+    const resolvedGroup = await resolveOwnedCollectionGroup(deps.pool, req.params.projectId, req.params.collectionId);
+    if (!resolvedGroup) {
       res.status(404).json(COLLECTION_NOT_FOUND_RESPONSE);
       return;
     }
 
-    const [allMemberIds, eligibleIds, currentSetMemberIds] = await Promise.all([
-      listProjectSourceIdsByCollectionId(deps.pool, collectionId),
-      listEligibleProjectSourceIdsInCollection(deps.pool, collectionId),
-      listProjectSourceIdsForSynthesisSet(deps.pool, set.id),
-    ]);
+    let allMemberIds: number[];
+    let eligibleIds: number[];
+    if (resolvedGroup.kind === "PERSISTED") {
+      const collectionId = resolvedGroup.collection.id;
+      [allMemberIds, eligibleIds] = await Promise.all([
+        listProjectSourceIdsByCollectionId(deps.pool, collectionId),
+        listEligibleProjectSourceIdsInCollection(deps.pool, collectionId),
+      ]);
+    } else {
+      allMemberIds = resolvedGroup.memberSourceIds;
+      eligibleIds = [];
+      for (const sourceId of allMemberIds) {
+        if (await isSourceEligibleForSynthesis(deps.pool, sourceId)) eligibleIds.push(sourceId);
+      }
+    }
+
+    const currentSetMemberIds = await listProjectSourceIdsForSynthesisSet(deps.pool, set.id);
     const currentSetMemberIdSet = new Set(currentSetMemberIds);
     const alreadySelectedCount = eligibleIds.filter((id) => currentSetMemberIdSet.has(id)).length;
     const { addedCount } = await bulkAddSourcesToSynthesisSet(deps.pool, set.id, set.projectId, eligibleIds);
 
     res.status(200).json({
-      collectionId,
+      collectionId: resolvedGroup.groupKey,
       eligibleCount: eligibleIds.length,
       alreadySelectedCount,
       addedCount,
@@ -402,6 +415,14 @@ export function createBulkAddCollectionToSynthesisSetHandler(deps: SynthesisSets
  * that are members of THIS set, from THIS set only. Never deletes the
  * collection, its sources, their analyses, or membership in any other
  * Synthesis Set.
+ *
+ * Phase 4L taxonomy correction — `:collectionId` accepts either a
+ * persisted numeric collection id or a derived groupKey (resolved via
+ * resolveOwnedCollectionGroup, same as the add handler above). For a
+ * derived group there's no `project_sources.collection_id` column to join
+ * on, so this intersects the set's CURRENT membership with the group's
+ * CURRENT membership instead — equivalent in effect, and still only ever
+ * removes sources that are actually in both.
  */
 export function createBulkRemoveCollectionFromSynthesisSetHandler(deps: SynthesisSetsRouteDeps) {
   return async function bulkRemoveCollectionFromSynthesisSetHandler(req: Request, res: Response): Promise<void> {
@@ -412,20 +433,22 @@ export function createBulkRemoveCollectionFromSynthesisSetHandler(deps: Synthesi
     }
     const { set } = resolved;
 
-    const collectionId = Number(req.params.collectionId);
-    if (!Number.isInteger(collectionId)) {
-      res.status(404).json(COLLECTION_NOT_FOUND_RESPONSE);
-      return;
-    }
-    const collection = await getSourceCollectionById(deps.pool, collectionId);
-    if (!collection || collection.projectId !== set.projectId) {
+    const resolvedGroup = await resolveOwnedCollectionGroup(deps.pool, req.params.projectId, req.params.collectionId);
+    if (!resolvedGroup) {
       res.status(404).json(COLLECTION_NOT_FOUND_RESPONSE);
       return;
     }
 
-    const memberIds = await listSynthesisSetSourceIdsForCollection(deps.pool, set.id, collectionId);
+    let memberIds: number[];
+    if (resolvedGroup.kind === "PERSISTED") {
+      memberIds = await listSynthesisSetSourceIdsForCollection(deps.pool, set.id, resolvedGroup.collection.id);
+    } else {
+      const currentSetMemberIds = await listProjectSourceIdsForSynthesisSet(deps.pool, set.id);
+      const groupMemberIdSet = new Set(resolvedGroup.memberSourceIds);
+      memberIds = currentSetMemberIds.filter((id) => groupMemberIdSet.has(id));
+    }
     const { removedCount } = await bulkRemoveSourcesFromSynthesisSet(deps.pool, set.id, memberIds);
-    res.status(200).json({ collectionId, removedCount });
+    res.status(200).json({ collectionId: resolvedGroup.groupKey, removedCount });
   };
 }
 

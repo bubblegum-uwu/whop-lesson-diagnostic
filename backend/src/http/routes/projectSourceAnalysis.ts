@@ -2,7 +2,7 @@ import type { Request, Response } from "express";
 import type { Pool } from "pg";
 import { getProjectById } from "../../db/projectsRepo.js";
 import { getProjectSourceById, listProjectSourceIdsByCollectionId, ANALYZABLE_PROJECT_SOURCE_PROVIDERS } from "../../db/projectSourcesRepo.js";
-import { getSourceCollectionById } from "../../db/sourceCollectionsRepo.js";
+import { resolveOwnedCollectionGroup } from "./sourceCollections.js";
 import {
   createJob,
   getLatestJobForProjectSource,
@@ -344,35 +344,32 @@ const COLLECTION_NOT_FOUND_RESPONSE = { error: { message: "Unknown source collec
 /**
  * POST /api/projects/:projectId/collections/:collectionId/analyze — Phase
  * 4L's "Analyze Collection" / "Analyze N Remaining". Unlike
- * analyze-batch above, the source ids are resolved SERVER-SIDE from the
- * collection's real membership (listProjectSourceIdsByCollectionId) —
- * never a caller-supplied list, and never capped at
- * MAX_BATCH_ANALYZE_SOURCES since a channel can hold hundreds of videos.
- * Reuses the exact same queueAnalysisForSources engine as every other
- * analyze route — never a second/parallel analysis pipeline, never a
- * force-reanalyze (an already-successfully-analyzed source is always
- * reported under `alreadyAnalyzed`, never silently re-queued). This is
- * ANALYSIS only: it never creates, modifies, or reads Synthesis Set
- * membership — analyzing a collection never selects it into synthesis.
+ * analyze-batch above, the source ids are resolved SERVER-SIDE — never a
+ * caller-supplied list, and never capped at MAX_BATCH_ANALYZE_SOURCES since
+ * a channel can hold hundreds of videos. Reuses the exact same
+ * queueAnalysisForSources engine as every other analyze route — never a
+ * second/parallel analysis pipeline, never a force-reanalyze (an
+ * already-successfully-analyzed source is always reported under
+ * `alreadyAnalyzed`, never silently re-queued). This is ANALYSIS only: it
+ * never creates, modifies, or reads Synthesis Set membership — analyzing a
+ * collection never selects it into synthesis.
+ *
+ * Phase 4L taxonomy correction — `:collectionId` now accepts either a
+ * persisted numeric collection id OR a derived groupKey (e.g.
+ * "derived:youtube-discord-channel:..."), resolved via
+ * resolveOwnedCollectionGroup — the EXACT same resolver/classification the
+ * Sources page's group list uses, so "Analyze Collection" on a
+ * "YOUTUBE · CHANNEL / Discord · #channel" card always analyzes exactly
+ * the sources that card shows, never a differently-computed set.
  */
 export function createAnalyzeCollectionHandler(deps: ProjectSourceAnalysisRouteDeps) {
   return async function analyzeCollectionHandler(req: Request, res: Response): Promise<void> {
-    const projectId = Number(req.params.projectId);
-    const collectionId = Number(req.params.collectionId);
-    if (!Number.isInteger(projectId) || !Number.isInteger(collectionId)) {
+    const resolved = await resolveOwnedCollectionGroup(deps.pool, req.params.projectId, req.params.collectionId);
+    if (!resolved) {
       res.status(404).json(COLLECTION_NOT_FOUND_RESPONSE);
       return;
     }
-    const project = await getProjectById(deps.pool, projectId);
-    if (!project) {
-      res.status(404).json(COLLECTION_NOT_FOUND_RESPONSE);
-      return;
-    }
-    const collection = await getSourceCollectionById(deps.pool, collectionId);
-    if (!collection || collection.projectId !== projectId) {
-      res.status(404).json(COLLECTION_NOT_FOUND_RESPONSE);
-      return;
-    }
+    const { project } = resolved;
     if (project.projectType !== "TRADING_STRATEGIES") {
       res.status(400).json({
         error: { message: "Analysis is only available for Trading Strategies projects right now.", type: "analysis_not_available_for_project_type" },
@@ -380,8 +377,8 @@ export function createAnalyzeCollectionHandler(deps: ProjectSourceAnalysisRouteD
       return;
     }
 
-    const sourceIds = await listProjectSourceIdsByCollectionId(deps.pool, collectionId);
-    const { entries, anyQueued } = await queueAnalysisForSources(deps, projectId, sourceIds, false);
+    const sourceIds = resolved.kind === "PERSISTED" ? await listProjectSourceIdsByCollectionId(deps.pool, resolved.collection.id) : resolved.memberSourceIds;
+    const { entries, anyQueued } = await queueAnalysisForSources(deps, project.id, sourceIds, false);
     if (anyQueued) await triggerWorkerBestEffort(deps, "collection analyze");
 
     const result: AnalyzeCollectionResult = { queued: 0, alreadyAnalyzed: 0, alreadyQueued: 0, processing: 0, failed: 0 };

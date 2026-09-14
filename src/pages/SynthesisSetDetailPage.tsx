@@ -4,9 +4,14 @@ import { ProjectHeader } from "./ProjectHeader";
 import { ProvenanceLine } from "../components/ProvenanceLine";
 import { useResolvedProject } from "../lib/useResolvedProject";
 import { OPERATIONAL_PROJECT_TYPES } from "../lib/projects";
-import { getProjectSources, type YouTubeProjectSource, type DiscordProjectSource, type ProjectSourceOriginSummary } from "../lib/sourcesApi";
-import { getProjectSourceAnalysis } from "../lib/projectSourceAnalysisApi";
-import { listSourceCollections, getSourceCollection, type CatalogCollectionSummary } from "../lib/catalogApi";
+import type { ProjectSourceOriginSummary } from "../lib/sourcesApi";
+import {
+  listSourceCollections,
+  getSourceCollection,
+  catalogGroupTypeLabel,
+  catalogGroupOriginLine,
+  type CatalogCollectionSummary,
+} from "../lib/catalogApi";
 import {
   getSynthesisSet,
   updateSynthesisSet,
@@ -25,7 +30,7 @@ export interface SynthesisSetDetailPageProps {
   knoveraToken: string | null;
 }
 
-/** One row in the fine-tune list — a collection member OR an uncollected source, unified into one shape for search/filter/select-visible. */
+/** One row in the fine-tune list — a member of some collection/group (Phase 4L taxonomy correction: every source belongs to exactly one group now, persisted or derived — never a separate "uncollected" bucket). */
 interface FineTuneRow {
   id: number;
   provider: "YOUTUBE" | "DISCORD";
@@ -43,9 +48,8 @@ type LoadState =
       phase: "loaded";
       set: SynthesisSetDetail;
       collections: CatalogCollectionSummary[];
-      /** Every item of every collection, keyed by collection id — the source of both the tri-state rollups and the fine-tune list's collected rows. */
-      itemsByCollection: Map<number, FineTuneRow[]>;
-      uncollected: FineTuneRow[];
+      /** Every item of every collection/group, keyed by groupKey — the source of both the tri-state rollups and the fine-tune list's rows. Phase 4L taxonomy correction — this is the SAME unified group list the Sources page renders (via listSourceCollections), never a second/divergent "collection" definition. */
+      itemsByCollection: Map<string, FineTuneRow[]>;
     }
   | { phase: "not_found" }
   | { phase: "error"; message: string };
@@ -66,59 +70,16 @@ function TriStateCheckbox({ state, disabled, onChange, ariaLabel }: { state: "no
   return <input ref={ref} type="checkbox" checked={state === "all"} disabled={disabled} onChange={onChange} aria-label={ariaLabel} />;
 }
 
-async function loadFineTuneRowsForCollection(
-  backendUrl: string,
-  knoveraToken: string,
-  projectId: number,
-  collectionId: number,
-): Promise<FineTuneRow[]> {
-  const detail = await getSourceCollection(backendUrl, knoveraToken, projectId, collectionId, { limit: 200 });
+async function loadFineTuneRowsForCollection(backendUrl: string, knoveraToken: string, projectId: number, groupKey: string): Promise<FineTuneRow[]> {
+  const detail = await getSourceCollection(backendUrl, knoveraToken, projectId, groupKey, { limit: 200 });
   return detail.items.map((item) => ({
     id: item.id,
     provider: item.provider,
     title: item.title ?? item.sourceUrl,
     eligible: item.eligibleForSynthesis,
-    collectionTitle: detail.collection.title,
+    collectionTitle: catalogGroupOriginLine(detail.collection),
     origins: item.origins,
   }));
-}
-
-/**
- * Phase 4L — for uncollected (à-la-carte) sources there is no batched
- * "collection items" endpoint to read eligibility from, so this reuses the
- * per-source analysis-status read (GET .../sources/:id/analysis) — the
- * EXACT same call, and the same per-source loop shape, SourcesPage.tsx
- * already makes for every video source today. `analysis` there is only
- * ever a completed/no_strategy row (see projectSourceAnalysesRepo's
- * findLatestByFingerprint doc comment), so its mere presence already IS
- * the eligibility signal — never a second/different rule.
- */
-async function loadFineTuneRowsForUncollected(
-  backendUrl: string,
-  knoveraToken: string,
-  projectId: number,
-  sources: (YouTubeProjectSource | DiscordProjectSource)[],
-): Promise<FineTuneRow[]> {
-  return Promise.all(
-    sources.map(async (source) => {
-      let eligible = false;
-      try {
-        const status = await getProjectSourceAnalysis(backendUrl, knoveraToken, projectId, source.id);
-        eligible = status.analysis != null;
-      } catch {
-        // Best-effort — a transient status-read failure leaves this source
-        // showing as not-yet-eligible rather than surfacing a page-level error.
-      }
-      return {
-        id: source.id,
-        provider: source.provider,
-        title: source.title ?? source.sourceUrl,
-        eligible,
-        collectionTitle: null,
-        origins: source.provider === "YOUTUBE" ? source.origins : [],
-      };
-    }),
-  );
 }
 
 /**
@@ -167,22 +128,14 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
   async function load(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setState({ phase: "loading" });
     try {
-      const [set, collections, sourcesResult] = await Promise.all([
-        getSynthesisSet(url, token, projectId, setId),
-        listSourceCollections(url, token, projectId),
-        getProjectSources(url, token, projectId),
-      ]);
-      const itemsByCollection = new Map<number, FineTuneRow[]>();
+      const [set, collections] = await Promise.all([getSynthesisSet(url, token, projectId, setId), listSourceCollections(url, token, projectId)]);
+      const itemsByCollection = new Map<string, FineTuneRow[]>();
       await Promise.all(
         collections.map(async (c) => {
-          itemsByCollection.set(c.id, await loadFineTuneRowsForCollection(url, token, projectId, c.id));
+          itemsByCollection.set(c.groupKey, await loadFineTuneRowsForCollection(url, token, projectId, c.groupKey));
         }),
       );
-      const uncollectedSources = sourcesResult.sources.filter(
-        (s): s is YouTubeProjectSource | DiscordProjectSource => (s.provider === "YOUTUBE" || s.provider === "DISCORD") && s.collectionId === null,
-      );
-      const uncollected = await loadFineTuneRowsForUncollected(url, token, projectId, uncollectedSources);
-      if (!cancelledRef.current) setState({ phase: "loaded", set, collections, itemsByCollection, uncollected });
+      if (!cancelledRef.current) setState({ phase: "loaded", set, collections, itemsByCollection });
     } catch (err) {
       if (cancelledRef.current) return;
       if (err instanceof SynthesisSetError && err.type === "synthesis_set_not_found") {
@@ -258,12 +211,12 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
   async function toggleCollection(collection: CatalogCollectionSummary, currentState: "none" | "partial" | "all") {
     if (!backendUrl || !knoveraToken || resolvedProjectId == null || state.phase !== "loaded") return;
     setMembershipError(null);
-    setBusyKey(`collection:${collection.id}`);
+    setBusyKey(`collection:${collection.groupKey}`);
     try {
       if (currentState === "all") {
-        await bulkRemoveCollectionFromSynthesisSet(backendUrl, knoveraToken, resolvedProjectId, state.set.id, collection.id);
+        await bulkRemoveCollectionFromSynthesisSet(backendUrl, knoveraToken, resolvedProjectId, state.set.id, collection.groupKey);
       } else {
-        await bulkAddCollectionToSynthesisSet(backendUrl, knoveraToken, resolvedProjectId, state.set.id, collection.id);
+        await bulkAddCollectionToSynthesisSet(backendUrl, knoveraToken, resolvedProjectId, state.set.id, collection.groupKey);
       }
       refresh();
     } catch (err) {
@@ -323,10 +276,10 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
     );
   }
 
-  const { set, collections, itemsByCollection, uncollected } = state;
+  const { set, collections, itemsByCollection } = state;
   const memberIds = new Set(set.sources.map((s) => ("id" in s ? s.id : -1)));
 
-  const allRows: FineTuneRow[] = [...collections.flatMap((c) => itemsByCollection.get(c.id) ?? []), ...uncollected];
+  const allRows: FineTuneRow[] = collections.flatMap((c) => itemsByCollection.get(c.groupKey) ?? []);
   const visibleRows = allRows.filter((row) => {
     if (providerFilter !== "all" && row.provider !== providerFilter) return false;
     const isMember = memberIds.has(row.id);
@@ -460,25 +413,26 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
       ) : (
         <ul className="knovera-youtube-source-list">
           {collections.map((collection) => {
-            const items = itemsByCollection.get(collection.id) ?? [];
+            const items = itemsByCollection.get(collection.groupKey) ?? [];
             const eligibleIds = items.filter((i) => i.eligible).map((i) => i.id);
             const selectedEligibleCount = eligibleIds.filter((id) => memberIds.has(id)).length;
             const triState: "none" | "partial" | "all" =
               eligibleIds.length === 0 || selectedEligibleCount === 0 ? "none" : selectedEligibleCount === eligibleIds.length ? "all" : "partial";
             const availableToAdd = eligibleIds.length - selectedEligibleCount;
-            const busy = busyKey === `collection:${collection.id}`;
+            const busy = busyKey === `collection:${collection.groupKey}`;
+            const originLine = catalogGroupOriginLine(collection);
             return (
-              <li key={collection.id} className="kv-card knovera-youtube-source-row">
+              <li key={collection.groupKey} className="kv-card knovera-youtube-source-row">
                 <label className="knovera-synthesis-set-source-checkbox">
                   <TriStateCheckbox
                     state={triState}
                     disabled={busy || eligibleIds.length === 0}
                     onChange={() => void toggleCollection(collection, triState)}
-                    ariaLabel={`Select all eligible sources in ${collection.title}`}
+                    ariaLabel={`Select all eligible sources in ${originLine}`}
                   />
                   <div className="knovera-youtube-source-main">
-                    <span className="knovera-youtube-source-label">{collection.provider === "YOUTUBE" ? "YouTube Channel" : "Discord Collection"}</span>
-                    <span className="knovera-youtube-source-title">{collection.title}</span>
+                    <span className="knovera-youtube-source-label">{catalogGroupTypeLabel(collection)}</span>
+                    <span className="knovera-youtube-source-title">{originLine}</span>
                   </div>
                 </label>
                 <div className="knovera-youtube-source-actions">
