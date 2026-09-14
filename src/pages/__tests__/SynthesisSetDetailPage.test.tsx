@@ -2,7 +2,8 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { SynthesisSetDetailPage } from "../SynthesisSetDetailPage";
-import type { SynthesisSetDetail, LegacySynthesisRunSummary, LegacySynthesisPlaybook } from "../../lib/synthesisSetsApi";
+import type { SynthesisSetDetail } from "../../lib/synthesisSetsApi";
+import type { SynthesisSetRunSummary, SynthesisSetRunInputRow } from "../../lib/synthesisSetRunsApi";
 import type { CatalogCollectionSummary, CatalogItemSummary, WhopCourseSummary, WhopLessonItemSummary, AlaCarteWhopLessonSummary } from "../../lib/catalogApi";
 
 afterEach(() => {
@@ -174,13 +175,19 @@ interface StubConfig {
   /** Keyed by courseId. */
   lessonsByCourse?: Record<number, WhopLessonItemSummary[]>;
   alaCarteLessons?: AlaCarteWhopLessonSummary[];
-  legacyRuns?: LegacySynthesisRunSummary[];
-  playbooksByRun?: Record<string, LegacySynthesisPlaybook>;
   onAddLesson?: (lessonId: number) => void;
   onRemoveLesson?: (lessonId: number) => void;
   onBulkLessons?: (body: unknown) => void;
   onCourseBulkAdd?: (courseId: number) => void;
   onCourseBulkRemove?: (courseId: number) => void;
+  /** Phase 4M — Run History, native + recovered legacy alike (unified, see synthesisSetRunsApi.ts). */
+  runs?: SynthesisSetRunSummary[];
+  /** Keyed by runId. */
+  runInputs?: Record<string, { kind: "NATIVE" | "LEGACY_WHOP"; inputs: SynthesisSetRunInputRow[] }>;
+  /** Keyed by runId. */
+  runOutputs?: Record<string, { kind: "NATIVE" | "LEGACY_WHOP"; result: unknown }>;
+  /** POST .../runs — return the full Response for the test to control (201 success, 409 partial-confirmation-required, 400 nothing-ready). */
+  onCreateRun?: (body: { acknowledgePartial?: boolean }) => Response;
 }
 
 function stubFetch(config: StubConfig) {
@@ -189,8 +196,9 @@ function stubFetch(config: StubConfig) {
   const whopCourses = config.whopCourses ?? [];
   const lessonsByCourse = config.lessonsByCourse ?? {};
   const alaCarteLessons = config.alaCarteLessons ?? [];
-  const legacyRuns = config.legacyRuns ?? [];
-  const playbooksByRun = config.playbooksByRun ?? {};
+  const runs = config.runs ?? [];
+  const runInputs = config.runInputs ?? {};
+  const runOutputs = config.runOutputs ?? {};
 
   let renamed = false;
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
@@ -293,15 +301,27 @@ function stubFetch(config: StubConfig) {
       config.onRemoveLesson?.(Number(removeLessonMatch[1]));
       return noContentResponse();
     }
-    if (url.endsWith("/legacy-runs") && (!init || init.method === undefined)) {
-      return jsonResponse(200, { synthesisSetId: 1, runs: legacyRuns });
+    if (url.endsWith("/synthesis-sets/1/runs") && (!init || init.method === undefined)) {
+      return jsonResponse(200, { synthesisSetId: 1, runs });
     }
-    const playbookMatch = url.match(/\/legacy-runs\/([^/]+)\/playbook$/);
-    if (playbookMatch && (!init || init.method === undefined)) {
-      const runId = playbookMatch[1];
-      const playbook = playbooksByRun[runId];
-      if (!playbook) return jsonResponse(404, { error: { message: "No playbook exists for this run.", type: "playbook_not_found" } });
-      return jsonResponse(200, playbook);
+    if (url.endsWith("/synthesis-sets/1/runs") && init?.method === "POST") {
+      const body = JSON.parse((init.body as string) ?? "{}") as { acknowledgePartial?: boolean };
+      if (config.onCreateRun) return config.onCreateRun(body);
+      return jsonResponse(400, { error: { message: "No handler configured.", type: "unhandled" } });
+    }
+    const runInputsMatch = url.match(/\/synthesis-sets\/1\/runs\/([^/]+)\/inputs$/);
+    if (runInputsMatch && (!init || init.method === undefined)) {
+      const runId = runInputsMatch[1];
+      const found = runInputs[runId];
+      if (!found) return jsonResponse(404, { error: { message: "Unknown run for this synthesis set.", type: "run_not_found" } });
+      return jsonResponse(200, { runId, ...found });
+    }
+    const runOutputMatch = url.match(/\/synthesis-sets\/1\/runs\/([^/]+)\/output$/);
+    if (runOutputMatch && (!init || init.method === undefined)) {
+      const runId = runOutputMatch[1];
+      const found = runOutputs[runId];
+      if (!found) return jsonResponse(404, { error: { message: "This run has no output yet.", type: "run_output_not_available" } });
+      return jsonResponse(200, { runId, ...found });
     }
 
     return jsonResponse(404, {});
@@ -596,26 +616,192 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L taxo
     expect(deleted).toBe(true);
   });
 
-  it("shows the Phase 4M placeholder for Run History, never a real run/execution control", async () => {
+  it("Current Selection and Run History are two visually distinct sections, each with its own heading, and an empty Run History never suggests a real execution happened", async () => {
     stubFetch({ set: makeSet() });
     renderPage();
-    await waitFor(() => expect(screen.getByRole("heading", { name: "Run History" })).toBeInTheDocument());
-    expect(screen.getByText("Coming in Phase 4M.")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Run/ })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Current Selection" })).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "Run History" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run Synthesis" })).toBeInTheDocument();
+    expect(screen.getByText("No runs yet.")).toBeInTheDocument();
   });
 
-  it("no selection action on this page ever calls an analyze or synthesis-run endpoint", async () => {
+  it("no selection/collection action on this page ever calls an analyze endpoint or the Run-creation endpoint", async () => {
+    let createRunCalled = false;
     const fetchMock = stubFetch({
       set: makeSet(),
       collections: [COLLECTION],
       itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE] },
+      onCreateRun: () => {
+        createRunCalled = true;
+        return jsonResponse(201, {});
+      },
     });
     renderPage();
     await waitFor(() => expect(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital")).toBeInTheDocument());
     fireEvent.click(screen.getByLabelText("Select all eligible sources in YouTube · SMB Capital"));
     await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(2));
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/analyze"))).toBe(false);
-    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/run"))).toBe(false);
+    expect(createRunCalled).toBe(false);
+  });
+
+  it("Run Synthesis is the one explicit action that creates a Run: clicking it POSTs to .../runs with acknowledgePartial: false, and the new Run appears in Run History", async () => {
+    let postedBody: unknown;
+    const newRun: SynthesisSetRunSummary = {
+      runId: "run-new",
+      kind: "NATIVE",
+      status: "QUEUED",
+      createdAt: "2026-09-14T00:00:00.000Z",
+      startedAt: null,
+      completedAt: null,
+      model: null,
+      promptVersion: null,
+      sourceCount: 1,
+      readyCount: 1,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: null,
+      processingDurationSeconds: null,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: false,
+    };
+    let created = false;
+    stubFetch({
+      set: makeSet({ sourceCount: 1, analyzedSourceCount: 1 }),
+      onCreateRun: (body) => {
+        postedBody = body;
+        created = true;
+        return jsonResponse(201, newRun);
+      },
+      runs: [],
+    });
+    // Re-stub so the post-creation refresh (GET .../runs) reflects the new run — simplest is a stateful override below.
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/synthesis-sets/1") && (!init || init.method === undefined)) return jsonResponse(200, makeSet({ sourceCount: 1, analyzedSourceCount: 1 }));
+      if (url.endsWith("/collections") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, collections: [] });
+      if (url.endsWith("/whop-courses") && (!init || init.method === undefined)) return jsonResponse(200, { courses: [] });
+      if (url.endsWith("/whop-lessons") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, items: [] });
+      if (url.endsWith("/synthesis-sets/1/runs") && (!init || init.method === undefined)) return jsonResponse(200, { synthesisSetId: 1, runs: created ? [newRun] : [] });
+      if (url.endsWith("/synthesis-sets/1/runs") && init?.method === "POST") {
+        postedBody = JSON.parse((init.body as string) ?? "{}");
+        created = true;
+        return jsonResponse(201, newRun);
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("No runs yet.")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Run Synthesis" }));
+    await waitFor(() => expect(postedBody).toEqual({ acknowledgePartial: false }));
+    await waitFor(() => expect(screen.queryByText("No runs yet.")).not.toBeInTheDocument());
+    expect(screen.getByText("QUEUED")).toBeInTheDocument();
+  });
+
+  it("a partial selection (some items not yet analyzed) requires explicit confirmation before Running — the first click never silently drops anything", async () => {
+    let acknowledgedOnSecondCall: boolean | undefined;
+    let callCount = 0;
+    stubFetch({
+      set: makeSet({ sourceCount: 3, analyzedSourceCount: 3 }),
+      onCreateRun: (body) => {
+        callCount++;
+        if (callCount === 1) {
+          return jsonResponse(409, {
+            error: { message: "Some selected items are not yet analyzed.", type: "partial_selection_requires_confirmation" },
+            readyCount: 2,
+            skippedNotReadyCount: 1,
+            totalSelected: 3,
+          });
+        }
+        acknowledgedOnSecondCall = body.acknowledgePartial;
+        return jsonResponse(201, {
+          runId: "run-partial",
+          kind: "NATIVE",
+          status: "QUEUED",
+          createdAt: "2026-09-14T00:00:00.000Z",
+          startedAt: null,
+          completedAt: null,
+          model: null,
+          promptVersion: null,
+          sourceCount: 3,
+          readyCount: 2,
+          skippedNotReadyCount: 1,
+          inputTokens: null,
+          outputTokens: null,
+          thinkingTokens: null,
+          estimatedCost: null,
+          processingDurationSeconds: null,
+          errorType: null,
+          sanitizedError: null,
+          hasOutput: false,
+        } satisfies SynthesisSetRunSummary);
+      },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Run Synthesis" }));
+    await waitFor(() => expect(screen.getByText(/2 of 3 selected items are ready/)).toBeInTheDocument());
+    expect(screen.queryByText("QUEUED")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Run With 2 Ready" }));
+    await waitFor(() => expect(acknowledgedOnSecondCall).toBe(true));
+  });
+
+  it("when nothing selected is ready, Run Synthesis shows the error and creates no Run", async () => {
+    stubFetch({
+      set: makeSet({ sourceCount: 1, analyzedSourceCount: 0 }),
+      onCreateRun: () => jsonResponse(400, { error: { message: "No currently-selected item has a usable analysis yet.", type: "nothing_ready" } }),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Run Synthesis" }));
+    await waitFor(() => expect(screen.getByText("No currently-selected item has a usable analysis yet.")).toBeInTheDocument());
+    expect(screen.getByText("No runs yet.")).toBeInTheDocument();
+  });
+
+  it("historical Runs stay in Run History unchanged after current selection changes — a Run is never re-derived from live membership", async () => {
+    const historicalRun: SynthesisSetRunSummary = {
+      runId: "run-old",
+      kind: "NATIVE",
+      status: "COMPLETED",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      startedAt: "2026-09-01T00:01:00.000Z",
+      completedAt: "2026-09-01T00:05:00.000Z",
+      model: "gemini-3.8-flash",
+      promptVersion: "v1",
+      sourceCount: 1,
+      readyCount: 1,
+      skippedNotReadyCount: 0,
+      inputTokens: 100,
+      outputTokens: 200,
+      thinkingTokens: null,
+      estimatedCost: 0.12,
+      processingDurationSeconds: 30,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: true,
+    };
+    let removedId: number | undefined;
+    stubFetch({
+      set: makeSet({ sourceCount: 1, sources: [{ ...COLLECTION_ITEM_ELIGIBLE, analyzed: true } as never] }),
+      collections: [COLLECTION],
+      itemsByCollection: { "10": [COLLECTION_ITEM_ELIGIBLE] },
+      runs: [historicalRun],
+      onRemoveSource: (id) => (removedId = id),
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Created Sep 1, 2026 · Completed Sep 1, 2026")).toBeInTheDocument());
+
+    // change current selection: deselect the only member source.
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    fireEvent.click(await screen.findByLabelText(/Eligible Collection Video/));
+    await waitFor(() => expect(removedId).toBe(201));
+
+    // the historical Run is completely untouched by that membership change.
+    expect(screen.getByText("Created Sep 1, 2026 · Completed Sep 1, 2026")).toBeInTheDocument();
+    expect(screen.getByText("COMPLETED")).toBeInTheDocument();
   });
 });
 
@@ -815,7 +1001,7 @@ describe("SynthesisSetDetailPage — Fine Tune with a derived Discord-channel CH
       }
       if (url.endsWith("/whop-courses") && (!init || init.method === undefined)) return jsonResponse(200, { courses: [] });
       if (url.endsWith("/whop-lessons") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, items: [] });
-      if (url.endsWith("/legacy-runs") && (!init || init.method === undefined)) return jsonResponse(200, { synthesisSetId: 1, runs: [] });
+      if (url.endsWith("/synthesis-sets/1/runs") && (!init || init.method === undefined)) return jsonResponse(200, { synthesisSetId: 1, runs: [] });
       return jsonResponse(404, {});
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -971,109 +1157,130 @@ describe("SynthesisSetDetailPage — Pre-4M Whop lesson membership + legacy hist
     expect(screen.getAllByText("The Trading Accelerator")).toHaveLength(3);
   });
 
-  it("25: legacy history shows both COMPLETED and FAILED runs, never discarding failures", async () => {
-    const runs: LegacySynthesisRunSummary[] = [
-      {
-        runId: "run-completed",
-        status: "COMPLETED",
-        createdAt: "2026-09-01T00:00:00.000Z",
-        completedAt: "2026-09-01T01:00:00.000Z",
-        model: "gemini-3.8-flash",
-        synthesisPromptVersion: "v1",
-        synthesizerVersion: "v1",
-        sourceAnalysisCount: 28,
-        errorType: null,
-        sanitizedError: null,
-        hasPlaybook: true,
-      },
-      {
+  function legacyRunSummary(overrides: Partial<SynthesisSetRunSummary> = {}): SynthesisSetRunSummary {
+    return {
+      runId: "run-completed",
+      kind: "LEGACY_WHOP",
+      status: "COMPLETED",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      startedAt: "2026-09-01T00:01:00.000Z",
+      completedAt: "2026-09-01T01:00:00.000Z",
+      model: "gemini-3.8-flash",
+      promptVersion: "v1",
+      sourceCount: 28,
+      readyCount: 28,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: 0.33,
+      processingDurationSeconds: null,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: true,
+      ...overrides,
+    };
+  }
+
+  it("25: recovered legacy Whop Runs render in the unified Run History, both COMPLETED and FAILED, never discarding failures", async () => {
+    const runs: SynthesisSetRunSummary[] = [
+      legacyRunSummary(),
+      legacyRunSummary({
         runId: "run-failed",
         status: "FAILED",
         createdAt: "2026-08-01T00:00:00.000Z",
         completedAt: "2026-08-01T00:05:00.000Z",
-        model: "gemini-3.8-flash",
-        synthesisPromptVersion: "v1",
-        synthesizerVersion: "v1",
-        sourceAnalysisCount: 28,
         errorType: "gemini_error",
         sanitizedError: "Synthesis failed.",
-        hasPlaybook: false,
-      },
+        hasOutput: false,
+        estimatedCost: null,
+      }),
     ];
-    stubFetch({ set: makeSet(), legacyRuns: runs });
+    stubFetch({ set: makeSet(), runs });
     renderPage();
-    await waitFor(() => expect(screen.getByText("Legacy Synthesis History")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
     expect(screen.getByText("COMPLETED")).toBeInTheDocument();
     expect(screen.getByText("FAILED")).toBeInTheDocument();
     expect(screen.getByText(/Synthesis failed\./)).toBeInTheDocument();
+    // Both are recovered legacy runs — labeled as such, never presented as a fresh native Run.
+    expect(screen.getAllByText("Legacy")).toHaveLength(2);
   });
 
-  it("26: the latest completed legacy run is clearly marked", async () => {
-    const runs: LegacySynthesisRunSummary[] = [
-      {
-        runId: "run-old",
-        status: "COMPLETED",
-        createdAt: "2026-01-01T00:00:00.000Z",
-        completedAt: "2026-01-01T01:00:00.000Z",
-        model: "m",
-        synthesisPromptVersion: "v1",
-        synthesizerVersion: "v1",
-        sourceAnalysisCount: 10,
-        errorType: null,
-        sanitizedError: null,
-        hasPlaybook: true,
-      },
-      {
-        runId: "run-latest",
-        status: "COMPLETED",
-        createdAt: "2026-09-01T00:00:00.000Z",
-        completedAt: "2026-09-01T01:00:00.000Z",
-        model: "m",
-        synthesisPromptVersion: "v1",
-        synthesizerVersion: "v1",
-        sourceAnalysisCount: 28,
-        errorType: null,
-        sanitizedError: null,
-        hasPlaybook: true,
-      },
+  it("26: the latest completed Run (native or legacy alike) is clearly marked", async () => {
+    const runs: SynthesisSetRunSummary[] = [
+      legacyRunSummary({ runId: "run-old", createdAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T01:00:00.000Z" }),
+      legacyRunSummary({ runId: "run-latest", createdAt: "2026-09-01T00:00:00.000Z", completedAt: "2026-09-01T01:00:00.000Z" }),
     ];
-    stubFetch({ set: makeSet(), legacyRuns: runs });
+    stubFetch({ set: makeSet(), runs });
     renderPage();
-    await waitFor(() => expect(screen.getByText("Legacy Synthesis History")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
     expect(screen.getAllByText("Latest")).toHaveLength(1);
   });
 
-  it("27: an existing playbook for a completed legacy run can be viewed without creating a new run", async () => {
-    const runs: LegacySynthesisRunSummary[] = [
-      {
-        runId: "run-completed",
-        status: "COMPLETED",
-        createdAt: "2026-09-01T00:00:00.000Z",
-        completedAt: "2026-09-01T01:00:00.000Z",
-        model: "m",
-        synthesisPromptVersion: "v1",
-        synthesizerVersion: "v1",
-        sourceAnalysisCount: 28,
-        errorType: null,
-        sanitizedError: null,
-        hasPlaybook: true,
+  it("27: an existing recovered legacy Run's output can be viewed via the same unified Run detail flow — never creates a new Run", async () => {
+    const runs: SynthesisSetRunSummary[] = [legacyRunSummary()];
+    const fetchMock = stubFetch({
+      set: makeSet(),
+      runs,
+      runOutputs: {
+        "run-completed": { kind: "LEGACY_WHOP", result: { title: "Recovered Playbook", coreFramework: { sections: [] }, playbook: { title: "Recovered Playbook" }, decisionFramework: { nodes: [] } } },
       },
-    ];
-    const playbook: LegacySynthesisPlaybook = {
-      runId: "run-completed",
-      title: "Recovered Playbook",
-      coreFramework: { sections: [] },
-      playbook: { title: "Recovered Playbook" },
-      decisionFramework: { nodes: [] },
-    };
-    const fetchMock = stubFetch({ set: makeSet(), legacyRuns: runs, playbooksByRun: { "run-completed": playbook } });
+      runInputs: { "run-completed": { kind: "LEGACY_WHOP", inputs: [] } },
+    });
     renderPage();
-    await waitFor(() => expect(screen.getByText("Legacy Synthesis History")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
 
-    fireEvent.click(screen.getByRole("button", { name: "View Playbook" }));
-    await waitFor(() => expect(screen.getByText("Recovered Playbook")).toBeInTheDocument());
-    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/legacy-runs/run-completed/playbook"))).toBe(true);
-    // Never a synthesis-execution call.
-    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/synthesize"))).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "View Details" }));
+    await waitFor(() => expect(screen.getByText(/Recovered Playbook/)).toBeInTheDocument());
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/runs/run-completed/output"))).toBe(true);
+    // Never a Run-creation (POST .../runs) call.
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).endsWith("/runs") && c[1]?.method === "POST")).toBe(false);
+  });
+
+  it("28: opening a Run's detail displays its frozen input provenance — exact source/lesson titles and analysis version ids, for both providers", async () => {
+    const nativeRun: SynthesisSetRunSummary = {
+      runId: "run-native",
+      kind: "NATIVE",
+      status: "COMPLETED",
+      createdAt: "2026-09-05T00:00:00.000Z",
+      startedAt: "2026-09-05T00:01:00.000Z",
+      completedAt: "2026-09-05T00:10:00.000Z",
+      model: "gemini-3.8-flash",
+      promptVersion: "v2",
+      sourceCount: 2,
+      readyCount: 2,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: 0.05,
+      processingDurationSeconds: 12,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: false,
+    };
+    const fetchMock = stubFetch({
+      set: makeSet(),
+      runs: [nativeRun],
+      runInputs: {
+        "run-native": {
+          kind: "NATIVE",
+          inputs: [
+            { kind: "SOURCE", id: 201, title: "Eligible Collection Video", provider: "YOUTUBE", analysisId: 9001 },
+            { kind: "WHOP_LESSON", id: 55, title: "Lesson A", provider: "WHOP", analysisId: 9002, courseId: 5, courseTitle: "The Trading Accelerator" },
+          ],
+        },
+      },
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "View Details" }));
+
+    await waitFor(() => expect(screen.getByText("Eligible Collection Video")).toBeInTheDocument());
+    expect(screen.getByText("analysis #9001")).toBeInTheDocument();
+    expect(screen.getByText("Lesson A")).toBeInTheDocument();
+    expect(screen.getByText("analysis #9002")).toBeInTheDocument();
+    expect(screen.getByText("The Trading Accelerator")).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/runs/run-native/inputs"))).toBe(true);
   });
 });

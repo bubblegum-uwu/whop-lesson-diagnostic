@@ -66,6 +66,13 @@ import {
   createGetLegacySynthesisPlaybookHandler,
 } from "./routes/synthesisSets.js";
 import {
+  createListSynthesisSetRunsHandler,
+  createGetSynthesisSetRunHandler,
+  createGetSynthesisSetRunInputsHandler,
+  createGetSynthesisSetRunOutputHandler,
+  createCreateSynthesisSetRunHandler,
+} from "./routes/synthesisSetRuns.js";
+import {
   createAnalyzeProjectSourceHandler,
   createGetProjectSourceAnalysisHandler,
   createRetryProjectSourceAnalysisHandler,
@@ -417,6 +424,15 @@ export function createApp(config: AppConfig): Express {
     knoveraAuth,
     createGetLegacySynthesisPlaybookHandler(projectsDeps),
   );
+  // Phase 4M — the generalized, canonical Run model (native + recovered
+  // legacy Whop runs unified). The /legacy-runs routes above stay mounted
+  // unchanged for backward compatibility; these /runs routes are the
+  // forward path — see http/routes/synthesisSetRuns.ts's own doc comments.
+  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs", knoveraAuth, createListSynthesisSetRunsHandler(projectsDeps));
+  app.post("/api/projects/:projectId/synthesis-sets/:setId/runs", knoveraAuth, createCreateSynthesisSetRunHandler(projectsDeps));
+  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId", knoveraAuth, createGetSynthesisSetRunHandler(projectsDeps));
+  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId/inputs", knoveraAuth, createGetSynthesisSetRunInputsHandler(projectsDeps));
+  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId/output", knoveraAuth, createGetSynthesisSetRunOutputHandler(projectsDeps));
 
   // Phase 4E — the project-aware counterpart to /api/course/synthesis*
   // above: resolves a project's synthesis source via `courses.project_id`

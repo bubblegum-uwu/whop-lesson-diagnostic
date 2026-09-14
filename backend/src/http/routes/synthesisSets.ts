@@ -63,8 +63,8 @@ async function resolveOwnedCourseForProject(pool: Pool, projectId: number, cours
   return courses.find((c) => c.id === courseId) ?? null;
 }
 
-/** Pre-4M — the one "has this lesson ever completed a successful analysis" check, reused by every lesson-membership eligibility gate below; mirrors isSourceEligibleForSynthesis above but against lesson_analyses (see whopLessonAnalysisStatusRepo.ts). */
-async function isLessonEligibleForSynthesis(pool: Pool, lessonId: number): Promise<boolean> {
+/** Pre-4M — the one "has this lesson ever completed a successful analysis" check, reused by every lesson-membership eligibility gate below; mirrors isSourceEligibleForSynthesis above but against lesson_analyses (see whopLessonAnalysisStatusRepo.ts). Exported for reuse by synthesisSetRuns.ts. */
+export async function isLessonEligibleForSynthesis(pool: Pool, lessonId: number): Promise<boolean> {
   const statusById = await getWhopLessonAnalysisStatus(pool, [lessonId]);
   return statusById.get(lessonId)?.eligibleForSynthesis ?? false;
 }
@@ -77,8 +77,8 @@ const NOT_ELIGIBLE_RESPONSE = {
   error: { message: "This source has no usable successful analysis yet — only analyzed sources can be selected into a Synthesis Set.", type: "source_not_eligible" },
 } as const;
 
-/** Phase 4L — the single "has this source ever completed a successful analysis" check, reused by every eligibility gate below; never a new boolean flag (see projectSourceAnalysesRepo.getLatestByProjectSource's doc comment). */
-async function isSourceEligibleForSynthesis(pool: Pool, projectSourceId: number): Promise<boolean> {
+/** Phase 4L — the single "has this source ever completed a successful analysis" check, reused by every eligibility gate below; never a new boolean flag (see projectSourceAnalysesRepo.getLatestByProjectSource's doc comment). Exported for reuse by http/routes/synthesisSetRuns.ts's Run-creation readiness snapshot — the exact same rule, never a second definition of "ready." */
+export async function isSourceEligibleForSynthesis(pool: Pool, projectSourceId: number): Promise<boolean> {
   const latest = await getLatestByProjectSource(pool, projectSourceId);
   return latest != null && (latest.status === "completed" || latest.status === "no_strategy");
 }
@@ -92,7 +92,7 @@ async function isSourceEligibleForSynthesis(pool: Pool, projectSourceId: number)
  * unknown, the set is unknown, or the set belongs to a DIFFERENT project —
  * never leaking which case it was.
  */
-async function resolveOwnedSynthesisSet(pool: Pool, projectIdParam: string | string[], setIdParam: string | string[]) {
+export async function resolveOwnedSynthesisSet(pool: Pool, projectIdParam: string | string[], setIdParam: string | string[]) {
   const projectId = Number(projectIdParam);
   const setId = Number(setIdParam);
   if (!Number.isInteger(projectId) || !Number.isInteger(setId)) return null;

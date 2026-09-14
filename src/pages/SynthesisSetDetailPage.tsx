@@ -30,13 +30,18 @@ import {
   bulkUpdateSynthesisSetLessons,
   bulkAddCourseToSynthesisSet,
   bulkRemoveCourseFromSynthesisSet,
-  listLegacySynthesisRuns,
-  getLegacySynthesisPlaybook,
   SynthesisSetError,
   type SynthesisSetDetail,
-  type LegacySynthesisRunSummary,
-  type LegacySynthesisPlaybook,
 } from "../lib/synthesisSetsApi";
+import {
+  listSynthesisSetRuns,
+  createSynthesisSetRun,
+  getSynthesisSetRunInputs,
+  getSynthesisSetRunOutput,
+  PartialSelectionError,
+  type SynthesisSetRunSummary,
+  type SynthesisSetRunInputRow,
+} from "../lib/synthesisSetRunsApi";
 
 export interface SynthesisSetDetailPageProps {
   backendUrl: string | null;
@@ -90,8 +95,15 @@ type LoadState =
       lessonsByCourse: Map<number, LessonFineTuneRow[]>;
       /** Pre-4M — this project's à-la-carte Whop lessons (no fully-connected course) — individually fine-tunable, never a bulk "Collections" row (there's no "whole à-la-carte" snapshot concept, mirroring WhopAlaCarteDetailPage). */
       alaCarteLessonRows: LessonFineTuneRow[];
-      /** Pre-4M — attached legacy (historical, pre-4M-bridge-recovered) synthesis_runs for this set, newest first. Empty for a set with no recovered history — never fabricated. */
-      legacyRuns: LegacySynthesisRunSummary[];
+      /**
+       * Phase 4M — every immutable Run for this set (native Runs created via
+       * "Run Synthesis" here, AND recovered legacy Whop runs), unified and
+       * newest first. This is RUN HISTORY — completely distinct from the
+       * CURRENT SELECTION rendered by the Collections/Fine-Tune sections
+       * above; changing selection never rewrites anything in this list, and
+       * nothing in this list ever reflects back onto current membership.
+       */
+      runs: SynthesisSetRunSummary[];
     }
   | { phase: "not_found" }
   | { phase: "error"; message: string };
@@ -184,10 +196,15 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
   const [selectionFilter, setSelectionFilter] = useState<SelectionFilter>("all");
   const [providerFilter, setProviderFilter] = useState<ProviderFilter>("all");
 
-  const [expandedPlaybookRunId, setExpandedPlaybookRunId] = useState<string | null>(null);
-  const [playbookByRun, setPlaybookByRun] = useState<Map<string, LegacySynthesisPlaybook>>(new Map());
-  const [playbookLoading, setPlaybookLoading] = useState(false);
-  const [playbookError, setPlaybookError] = useState<string | null>(null);
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [runInputsByRun, setRunInputsByRun] = useState<Map<string, SynthesisSetRunInputRow[]>>(new Map());
+  const [runOutputByRun, setRunOutputByRun] = useState<Map<string, unknown>>(new Map());
+  const [runDetailLoading, setRunDetailLoading] = useState(false);
+  const [runDetailError, setRunDetailError] = useState<string | null>(null);
+
+  const [runSynthesisBusy, setRunSynthesisBusy] = useState(false);
+  const [runSynthesisError, setRunSynthesisError] = useState<string | null>(null);
+  const [partialConfirm, setPartialConfirm] = useState<{ readyCount: number; skippedNotReadyCount: number; totalSelected: number } | null>(null);
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
   const setId = setIdParam ? Number(setIdParam) : NaN;
@@ -201,12 +218,12 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
   async function load(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setState({ phase: "loading" });
     try {
-      const [set, collections, whopCourses, alaCarteLessons, legacyRuns] = await Promise.all([
+      const [set, collections, whopCourses, alaCarteLessons, runs] = await Promise.all([
         getSynthesisSet(url, token, projectId, setId),
         listSourceCollections(url, token, projectId),
         listWhopCourses(url, token, projectId),
         listAlaCarteWhopLessons(url, token, projectId),
-        listLegacySynthesisRuns(url, token, projectId, setId),
+        listSynthesisSetRuns(url, token, projectId, setId),
       ]);
 
       const itemsByCollection = new Map<string, SourceFineTuneRow[]>();
@@ -233,7 +250,7 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
         collectionTitle: `Whop · ${lesson.courseTitle} (à la carte)`,
       }));
 
-      if (!cancelledRef.current) setState({ phase: "loaded", set, collections, itemsByCollection, whopCourses, lessonsByCourse, alaCarteLessonRows, legacyRuns });
+      if (!cancelledRef.current) setState({ phase: "loaded", set, collections, itemsByCollection, whopCourses, lessonsByCourse, alaCarteLessonRows, runs });
     } catch (err) {
       if (cancelledRef.current) return;
       if (err instanceof SynthesisSetError && err.type === "synthesis_set_not_found") {
@@ -362,22 +379,79 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
     }
   }
 
-  async function toggleViewPlaybook(runId: string) {
-    if (expandedPlaybookRunId === runId) {
-      setExpandedPlaybookRunId(null);
+  /**
+   * Opens/closes a Run's detail panel — its frozen input provenance
+   * (always fetched) plus its output, if it has one. This is a pure,
+   * read-only inspection of an already-immutable Run: it never re-derives
+   * inputs from current membership (see synthesisSetRunsApi.ts's doc
+   * comment) and never mutates anything.
+   */
+  async function toggleViewRunDetail(run: SynthesisSetRunSummary) {
+    if (expandedRunId === run.runId) {
+      setExpandedRunId(null);
       return;
     }
-    setExpandedPlaybookRunId(runId);
-    setPlaybookError(null);
-    if (playbookByRun.has(runId) || !backendUrl || !knoveraToken || resolvedProjectId == null || state.phase !== "loaded") return;
-    setPlaybookLoading(true);
+    setExpandedRunId(run.runId);
+    setRunDetailError(null);
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || state.phase !== "loaded") return;
+    const needsInputs = !runInputsByRun.has(run.runId);
+    const needsOutput = run.hasOutput && !runOutputByRun.has(run.runId);
+    if (!needsInputs && !needsOutput) return;
+    setRunDetailLoading(true);
     try {
-      const playbook = await getLegacySynthesisPlaybook(backendUrl, knoveraToken, resolvedProjectId, state.set.id, runId);
-      setPlaybookByRun((prev) => new Map(prev).set(runId, playbook));
+      const tasks: Promise<void>[] = [];
+      if (needsInputs) {
+        tasks.push(
+          getSynthesisSetRunInputs(backendUrl, knoveraToken, resolvedProjectId, state.set.id, run.runId).then((res) => {
+            setRunInputsByRun((prev) => new Map(prev).set(run.runId, res.inputs));
+          }),
+        );
+      }
+      if (needsOutput) {
+        tasks.push(
+          getSynthesisSetRunOutput(backendUrl, knoveraToken, resolvedProjectId, state.set.id, run.runId).then((res) => {
+            setRunOutputByRun((prev) => new Map(prev).set(run.runId, res.result));
+          }),
+        );
+      }
+      await Promise.all(tasks);
     } catch (err) {
-      setPlaybookError(err instanceof Error ? err.message : "Failed to load playbook.");
+      setRunDetailError(err instanceof Error ? err.message : "Failed to load run details.");
     } finally {
-      setPlaybookLoading(false);
+      setRunDetailLoading(false);
+    }
+  }
+
+  async function refreshRuns() {
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || state.phase !== "loaded") return;
+    const runs = await listSynthesisSetRuns(backendUrl, knoveraToken, resolvedProjectId, state.set.id);
+    setState((prev) => (prev.phase === "loaded" ? { ...prev, runs } : prev));
+  }
+
+  /**
+   * "Run Synthesis" — the ONE explicit action on this page that creates an
+   * immutable Run. Never invoked implicitly by any membership/selection
+   * change above. The first call never sets `acknowledgePartial`; if the
+   * backend responds that some currently-selected items aren't analyzed
+   * yet, this surfaces the exact ready/skipped breakdown and waits for an
+   * explicit second, confirmed call rather than silently omitting anything.
+   */
+  async function handleRunSynthesis(acknowledgePartial: boolean) {
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || state.phase !== "loaded") return;
+    setRunSynthesisBusy(true);
+    setRunSynthesisError(null);
+    try {
+      await createSynthesisSetRun(backendUrl, knoveraToken, resolvedProjectId, state.set.id, { acknowledgePartial });
+      setPartialConfirm(null);
+      await refreshRuns();
+    } catch (err) {
+      if (err instanceof PartialSelectionError) {
+        setPartialConfirm({ readyCount: err.readyCount, skippedNotReadyCount: err.skippedNotReadyCount, totalSelected: err.totalSelected });
+      } else {
+        setRunSynthesisError(err instanceof Error ? err.message : "Failed to start synthesis.");
+      }
+    } finally {
+      setRunSynthesisBusy(false);
     }
   }
 
@@ -413,7 +487,7 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
     );
   }
 
-  const { set, collections, itemsByCollection, whopCourses, lessonsByCourse, alaCarteLessonRows, legacyRuns } = state;
+  const { set, collections, itemsByCollection, whopCourses, lessonsByCourse, alaCarteLessonRows, runs } = state;
   const memberIds = new Set(set.sources.map((s) => ("id" in s ? s.id : -1)));
   const lessonMemberIds = new Set(set.lessons.map((l) => l.id));
 
@@ -471,9 +545,7 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
     }
   }
 
-  const latestCompletedLegacyRunId = legacyRuns
-    .filter((r) => r.status === "COMPLETED")
-    .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))[0]?.runId;
+  const latestCompletedRunId = runs.filter((r) => r.status === "COMPLETED").sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))[0]?.runId;
 
   return (
     <div className="knovera-page">
@@ -547,6 +619,7 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
         </div>
       )}
 
+      <h2 className="knovera-section-title">Current Selection</h2>
       <p className="hint" aria-label="Readiness summary">
         {readinessSummary(set)}
       </p>
@@ -554,6 +627,38 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
       {membershipError && (
         <div className="kv-card knovera-empty-state" role="alert">
           <p>{membershipError}</p>
+        </div>
+      )}
+
+      <div className="knovera-synthesis-set-detail-actions">
+        <button type="button" className="link-button" onClick={() => setFineTuneOpen((v) => !v)}>
+          {fineTuneOpen ? "Hide Fine Tune Sources" : "Fine Tune Sources"}
+        </button>
+        <button type="button" onClick={() => void handleRunSynthesis(false)} disabled={runSynthesisBusy || set.sourceCount === 0}>
+          {runSynthesisBusy ? "Starting…" : "Run Synthesis"}
+        </button>
+      </div>
+
+      {runSynthesisError && (
+        <div className="kv-card knovera-empty-state" role="alert">
+          <p>{runSynthesisError}</p>
+        </div>
+      )}
+
+      {partialConfirm && (
+        <div className="kv-card knovera-empty-state" role="alert">
+          <p>
+            {partialConfirm.readyCount} of {partialConfirm.totalSelected} selected items are ready ({partialConfirm.skippedNotReadyCount} still need analysis).
+          </p>
+          <p className="hint">Running now will create a Run using only the {partialConfirm.readyCount} ready item(s); the rest will be recorded as skipped, not silently included later.</p>
+          <div className="knovera-dialog-actions">
+            <button type="button" className="link-button" onClick={() => setPartialConfirm(null)} disabled={runSynthesisBusy}>
+              Cancel
+            </button>
+            <button type="button" onClick={() => void handleRunSynthesis(true)} disabled={runSynthesisBusy}>
+              {runSynthesisBusy ? "Starting…" : `Run With ${partialConfirm.readyCount} Ready`}
+            </button>
+          </div>
         </div>
       )}
 
@@ -631,12 +736,6 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
         </ul>
       )}
 
-      <div className="knovera-synthesis-set-detail-actions">
-        <button type="button" className="link-button" onClick={() => setFineTuneOpen((v) => !v)}>
-          {fineTuneOpen ? "Hide Fine Tune Sources" : "Fine Tune Sources"}
-        </button>
-      </div>
-
       {fineTuneOpen && (
         <div className="kv-card knovera-synthesis-set-fine-tune">
           <div className="knovera-synthesis-set-fine-tune-filters">
@@ -704,78 +803,93 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
         </div>
       )}
 
-      {legacyRuns.length > 0 && (
-        <>
-          <h2 className="knovera-section-title">Legacy Synthesis History</h2>
-          <p className="hint">
-            Recovered from this course&rsquo;s pre-Synthesis-Set course synthesis engine — historical, view-only results. Nothing here can be re-run from this page.
-          </p>
-          <ul className="knovera-youtube-source-list">
-            {legacyRuns.map((run) => {
-              const isLatestCompleted = run.runId === latestCompletedLegacyRunId;
-              const expanded = expandedPlaybookRunId === run.runId;
-              const playbook = playbookByRun.get(run.runId);
-              return (
-                <li key={run.runId} className="kv-card knovera-youtube-source-row" style={{ flexDirection: "column", alignItems: "stretch" }}>
-                  <div className="knovera-youtube-source-main">
-                    <span className={`kv-badge ${run.status === "COMPLETED" ? "kv-badge-accent" : run.status === "FAILED" ? "kv-badge-danger" : "kv-badge-muted"}`}>
-                      {run.status}
-                    </span>
-                    {isLatestCompleted && <span className="kv-badge kv-badge-accent">Latest</span>}
-                    <span className="knovera-youtube-source-title">
-                      Created {formatDate(run.createdAt)} · Completed {formatDate(run.completedAt)}
-                    </span>
-                  </div>
-                  <p className="hint">
-                    Model: {run.model} · Prompt {run.synthesisPromptVersion} · Synthesizer {run.synthesizerVersion} · {run.sourceAnalysisCount} source analys
-                    {run.sourceAnalysisCount === 1 ? "is" : "es"}
-                  </p>
-                  {run.status === "FAILED" && (
-                    <p className="hint" role="alert">
-                      {run.errorType ? `${run.errorType}: ` : ""}
-                      {run.sanitizedError ?? "This run failed."}
-                    </p>
-                  )}
-                  {run.hasPlaybook && (
-                    <div className="knovera-synthesis-set-detail-actions">
-                      <button type="button" className="link-button" onClick={() => void toggleViewPlaybook(run.runId)}>
-                        {expanded ? "Hide Playbook" : "View Playbook"}
-                      </button>
-                    </div>
-                  )}
-                  {expanded && (
-                    <div className="kv-card knovera-empty-state">
-                      {playbookLoading && !playbook && <p className="hint">Loading playbook…</p>}
-                      {playbookError && (
-                        <p role="alert" className="hint">
-                          {playbookError}
-                        </p>
-                      )}
-                      {playbook && (
-                        <>
-                          <h3 className="knovera-section-title">{playbook.title}</h3>
-                          <p className="hint">Core Framework</p>
-                          <pre>{JSON.stringify(playbook.coreFramework, null, 2)}</pre>
-                          <p className="hint">Playbook</p>
-                          <pre>{JSON.stringify(playbook.playbook, null, 2)}</pre>
-                          <p className="hint">Decision Framework</p>
-                          <pre>{JSON.stringify(playbook.decisionFramework, null, 2)}</pre>
-                        </>
-                      )}
-                    </div>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
-
       <h2 className="knovera-section-title">Run History</h2>
-      <div className="kv-card knovera-empty-state">
-        <p>Coming in Phase 4M.</p>
-        <p>Executing this set into an immutable, versioned synthesis run isn't available yet — this page only manages which sources are selected.</p>
-      </div>
+      <p className="hint">
+        Every Run below is an immutable snapshot, frozen the moment it was created. Changing Current Selection above never rewrites a past Run, and no Run
+        here was ever created automatically.
+      </p>
+      {runs.length === 0 ? (
+        <div className="kv-card knovera-empty-state">
+          <p>No runs yet.</p>
+          <p>Use &ldquo;Run Synthesis&rdquo; above to create the first immutable Run from the current selection.</p>
+        </div>
+      ) : (
+        <ul className="knovera-youtube-source-list">
+          {runs.map((run) => {
+            const isLatestCompleted = run.runId === latestCompletedRunId;
+            const expanded = expandedRunId === run.runId;
+            const inputs = runInputsByRun.get(run.runId);
+            const output = runOutputByRun.get(run.runId);
+            return (
+              <li key={run.runId} className="kv-card knovera-youtube-source-row" style={{ flexDirection: "column", alignItems: "stretch" }}>
+                <div className="knovera-youtube-source-main">
+                  <span className={`kv-badge ${run.status === "COMPLETED" ? "kv-badge-accent" : run.status === "FAILED" ? "kv-badge-danger" : "kv-badge-muted"}`}>
+                    {run.status}
+                  </span>
+                  {isLatestCompleted && <span className="kv-badge kv-badge-accent">Latest</span>}
+                  {run.kind === "LEGACY_WHOP" && <span className="kv-badge kv-badge-muted">Legacy</span>}
+                  <span className="knovera-youtube-source-title">
+                    Created {formatDate(run.createdAt)} · Completed {formatDate(run.completedAt)}
+                  </span>
+                </div>
+                <p className="hint">
+                  {run.readyCount} input{run.readyCount === 1 ? "" : "s"}
+                  {run.skippedNotReadyCount > 0 ? ` · ${run.skippedNotReadyCount} skipped (not ready)` : ""}
+                  {run.estimatedCost != null ? ` · $${run.estimatedCost.toFixed(2)}` : ""}
+                  {run.model ? ` · Model: ${run.model}` : ""}
+                </p>
+                {run.kind === "LEGACY_WHOP" && (
+                  <p className="hint">Recovered from this project&rsquo;s pre-Synthesis-Set course synthesis engine — historical, view-only.</p>
+                )}
+                {run.status === "FAILED" && (
+                  <p className="hint" role="alert">
+                    {run.errorType ? `${run.errorType}: ` : ""}
+                    {run.sanitizedError ?? "This run failed."}
+                  </p>
+                )}
+                <div className="knovera-synthesis-set-detail-actions">
+                  <button type="button" className="link-button" onClick={() => void toggleViewRunDetail(run)}>
+                    {expanded ? "Hide Details" : "View Details"}
+                  </button>
+                </div>
+                {expanded && (
+                  <div className="kv-card knovera-empty-state">
+                    {runDetailLoading && !inputs && <p className="hint">Loading run details…</p>}
+                    {runDetailError && (
+                      <p role="alert" className="hint">
+                        {runDetailError}
+                      </p>
+                    )}
+                    {inputs && (
+                      <>
+                        <h3 className="knovera-section-title">Inputs (frozen at Run creation)</h3>
+                        <ul className="knovera-youtube-source-list">
+                          {inputs.map((input) => (
+                            <li key={`${input.kind}-${input.id}`} className="kv-card knovera-youtube-source-row">
+                              <div className="knovera-youtube-source-main">
+                                <span className="knovera-youtube-source-label">{input.kind === "WHOP_LESSON" ? (input.courseTitle ?? "Whop") : input.provider}</span>
+                                <span className="knovera-youtube-source-title">{input.title ?? "Untitled"}</span>
+                              </div>
+                              <span className="hint">analysis #{input.analysisId}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                    {!run.hasOutput && <p className="hint">No output yet.</p>}
+                    {run.hasOutput && output != null && (
+                      <>
+                        <h3 className="knovera-section-title">Output</h3>
+                        <pre>{JSON.stringify(output, null, 2)}</pre>
+                      </>
+                    )}
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }
