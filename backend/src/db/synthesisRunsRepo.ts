@@ -159,6 +159,19 @@ export async function getLatestRun(db: Queryable, courseId: number): Promise<Syn
   return result.rows[0] ? mapRow(result.rows[0] as SynthesisRunRow) : null;
 }
 
+/** Pre-4M — every run this course has ever had, newest first, regardless of status. Used by the legacy Whop synthesis recovery bridge (http/routes/synthesisSets.ts's legacy-run attachment endpoints and scripts/recoverLegacyWhopSynthesis.ts) to surface full COMPLETED/FAILED history, never just the latest. Pure read. */
+export async function listRunsByCourseId(db: Queryable, courseId: number): Promise<SynthesisRun[]> {
+  const result = await db.query(`SELECT ${COLUMNS} FROM synthesis_runs WHERE course_id = $1 ORDER BY created_at DESC`, [courseId]);
+  return result.rows.map((row) => mapRow(row as SynthesisRunRow));
+}
+
+/** Batched by-id fetch for an explicit list of run ids — used to hydrate a Synthesis Set's attached legacy runs without one query per run. */
+export async function getSynthesisRunsByIds(db: Queryable, runIds: string[]): Promise<SynthesisRun[]> {
+  if (runIds.length === 0) return [];
+  const result = await db.query(`SELECT ${COLUMNS} FROM synthesis_runs WHERE run_id = ANY($1::uuid[]) ORDER BY created_at DESC`, [runIds]);
+  return result.rows.map((row) => mapRow(row as SynthesisRunRow));
+}
+
 const LEASE_DURATION = "5 minutes";
 
 /**

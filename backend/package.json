@@ -16,7 +16,8 @@
     "migrate": "node-pg-migrate up",
     "migrate:down": "node-pg-migrate down",
     "migrate:create": "node-pg-migrate create",
-    "discord:register-command": "tsx scripts/registerDiscordCommand.ts"
+    "discord:register-command": "tsx scripts/registerDiscordCommand.ts",
+    "recover:legacy-whop-synthesis": "tsx scripts/recoverLegacyWhopSynthesis.ts"
   },
   "dependencies": {
     "@google-cloud/run": "^4.0.0",
