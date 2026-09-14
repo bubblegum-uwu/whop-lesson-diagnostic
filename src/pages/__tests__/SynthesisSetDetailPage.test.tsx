@@ -646,3 +646,187 @@ describe("SynthesisSetDetailPage — GENERAL_KNOWLEDGE gating (Phase 4L follow-u
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/synthesis-sets/1"))).toBe(false);
   });
 });
+
+/**
+ * Phase 4L live-bug regression — "Fine Tune Sources is empty" was reported
+ * for a derived YOUTUBE · CHANNEL group discovered via a Discord channel
+ * scan (`derived:youtube-discord-channel:<container>`), a group shape none
+ * of the tests above ever exercised (they only ever used
+ * `derived:youtube-ala-carte` / `derived:unclassified`). Unlike stubFetch
+ * above, this mock is STATEFUL — it tracks real Synthesis Set membership
+ * across requests — so it can drive the full bulk-select → fine-tune →
+ * deselect → reselect journey end to end, the same journey the live report
+ * walked through, rather than asserting on isolated static snapshots.
+ */
+describe("SynthesisSetDetailPage — Fine Tune with a derived Discord-channel CHANNEL group (Phase 4L live-bug regression)", () => {
+  const DISCORD_CHANNEL_GROUP: CatalogCollectionSummary = {
+    groupKey: "derived:youtube-discord-channel:g1:c1",
+    kind: "DERIVED",
+    id: null,
+    provider: "YOUTUBE",
+    sourceType: "CHANNEL",
+    originProvider: "DISCORD",
+    originContainerId: "c1",
+    externalId: null,
+    title: "Discord · #scarface-alerts",
+    sourceUrl: null,
+    status: null,
+    sanitizedError: null,
+    lastSyncedAt: null,
+    itemCount: 3,
+    analyzedCount: 3,
+    hasMoreHistory: false,
+  };
+
+  const PERSISTED_YOUTUBE_CHANNEL: CatalogCollectionSummary = { ...COLLECTION, groupKey: "10", itemCount: 3, analyzedCount: 3 };
+
+  function makeItems(ids: number[]): CatalogItemSummary[] {
+    return ids.map((id) => ({
+      id,
+      provider: "YOUTUBE",
+      externalId: `vid${id}`,
+      title: `YouTube URL ${id}`,
+      sourceUrl: `https://www.youtube.com/watch?v=vid${id}`,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      status: "ANALYZED",
+      eligibleForSynthesis: true,
+      origins: [
+        {
+          originType: "DISCORD_CHANNEL",
+          discordGuildId: "g1",
+          discordChannelId: "c1",
+          discordChannelName: "scarface-alerts",
+          discordMessageId: `m${id}`,
+          discordMessageUrl: null,
+          discordPostedAt: "2026-09-12T00:00:00.000Z",
+        },
+      ],
+    }));
+  }
+
+  /** A real backend, unlike stubFetch above, actually reflects membership changes on the next read — this mock does too, so the tri-state journey (deselect → partial → reselect → full) can be exercised exactly as a user would experience it. */
+  function stubStatefulFetch(collection: CatalogCollectionSummary, items: CatalogItemSummary[]) {
+    let memberIds: number[] = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/synthesis-sets/1") && (!init || init.method === undefined)) {
+        const analyzedCount = memberIds.length;
+        return jsonResponse(200, {
+          ...makeSet(),
+          sourceCount: memberIds.length,
+          analyzedSourceCount: analyzedCount,
+          needsAnalysisCount: 0,
+          sources: memberIds.map((id) => ({ id, analyzed: true })),
+        });
+      }
+      if (url.endsWith("/collections") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, collections: [collection] });
+      if (url.includes(`/collections/${encodeURIComponent(collection.groupKey)}`) && (!init || init.method === undefined)) {
+        return jsonResponse(200, { collection, items, pagination: { limit: 200, offset: 0, totalCount: items.length } });
+      }
+      const collectionBulkMatch = url.match(/\/synthesis-sets\/1\/collections\/([^/?]+)$/);
+      if (collectionBulkMatch && init?.method === "POST") {
+        memberIds = items.filter((i) => i.eligibleForSynthesis).map((i) => i.id);
+        return jsonResponse(200, { collectionId: collection.groupKey, eligibleCount: memberIds.length, alreadySelectedCount: 0, addedCount: memberIds.length, ineligibleCount: 0 });
+      }
+      if (collectionBulkMatch && init?.method === "DELETE") {
+        memberIds = [];
+        return jsonResponse(200, { collectionId: collection.groupKey, removedCount: 0 });
+      }
+      if (url.endsWith("/synthesis-sets/1/sources") && init?.method === "POST") {
+        const sourceId = JSON.parse(init.body as string).sourceId as number;
+        if (!memberIds.includes(sourceId)) memberIds = [...memberIds, sourceId];
+        return jsonResponse(201, { synthesisSetId: 1, sourceId, added: true });
+      }
+      const removeMatch = url.match(/\/synthesis-sets\/1\/sources\/(\d+)$/);
+      if (removeMatch && init?.method === "DELETE") {
+        memberIds = memberIds.filter((id) => id !== Number(removeMatch[1]));
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  async function runFullTriStateJourney(collection: CatalogCollectionSummary, originLine: string) {
+    const items = makeItems([401, 402, 403]);
+    stubStatefulFetch(collection, items);
+    renderPage();
+
+    // 1/2/3: renders the group with 3 eligible sources, all initially unselected.
+    await waitFor(() => expect(screen.getByText("0/3 eligible selected · 3 available to add")).toBeInTheDocument());
+
+    // bulk-select the whole group (this is the exact click the live report performed).
+    fireEvent.click(screen.getByLabelText(`Select all eligible sources in ${originLine}`));
+    await waitFor(() => expect(screen.getByText("3/3 eligible selected")).toBeInTheDocument());
+    expect(screen.getByText("3 selected · 3 analyzed · 0 needs analysis")).toBeInTheDocument();
+
+    // 3/4/5: Fine Tune shows all 3 rows, all checked, with provenance — never empty.
+    fireEvent.click(screen.getByRole("button", { name: "Fine Tune Sources" }));
+    await waitFor(() => expect(screen.getByText("YouTube URL 401")).toBeInTheDocument());
+    expect(screen.getByText("YouTube URL 402")).toBeInTheDocument();
+    expect(screen.getByText("YouTube URL 403")).toBeInTheDocument();
+    expect(screen.getByLabelText("Include YouTube URL 401 in Scalping Playbook")).toBeChecked();
+    expect(screen.getByLabelText("Include YouTube URL 402 in Scalping Playbook")).toBeChecked();
+    expect(screen.getByLabelText("Include YouTube URL 403 in Scalping Playbook")).toBeChecked();
+    expect(screen.getAllByText("Source: Discord · #scarface-alerts")).toHaveLength(3);
+
+    // 13: an ineligible row (added below by the caller) must never be checkable — verified per-collection-kind by the caller when present.
+
+    // 6/8/9: deselecting one Fine-Tune row drops the top summary and the collection count, keeps the others selected.
+    fireEvent.click(screen.getByLabelText("Include YouTube URL 401 in Scalping Playbook"));
+    await waitFor(() => expect(screen.getByText("2 selected · 2 analyzed · 0 needs analysis")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("2/3 eligible selected · 1 available to add")).toBeInTheDocument());
+    expect(screen.getByLabelText("Include YouTube URL 401 in Scalping Playbook")).not.toBeChecked();
+    expect(screen.getByLabelText("Include YouTube URL 402 in Scalping Playbook")).toBeChecked();
+    expect(screen.getByLabelText("Include YouTube URL 403 in Scalping Playbook")).toBeChecked();
+
+    // 7: the collection row itself goes indeterminate (partial), not fully checked.
+    const collectionCheckbox = screen.getByLabelText(`Select all eligible sources in ${originLine}`) as HTMLInputElement;
+    await waitFor(() => expect(collectionCheckbox.indeterminate).toBe(true));
+
+    // 10: reselecting the same row returns everything to fully selected.
+    fireEvent.click(screen.getByLabelText("Include YouTube URL 401 in Scalping Playbook"));
+    await waitFor(() => expect(screen.getByText("3/3 eligible selected")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("3 selected · 3 analyzed · 0 needs analysis")).toBeInTheDocument());
+    expect(screen.getByLabelText("Include YouTube URL 401 in Scalping Playbook")).toBeChecked();
+  }
+
+  it("1-10: the full bulk-select → Fine-Tune → deselect → reselect journey works for a derived Discord-channel CHANNEL group (never an empty list)", async () => {
+    await runFullTriStateJourney(DISCORD_CHANNEL_GROUP, "Discord · #scarface-alerts");
+  });
+
+  it("11: the same full journey works identically for a real PERSISTED YouTube-channel collection", async () => {
+    await runFullTriStateJourney(PERSISTED_YOUTUBE_CHANNEL, "YouTube · SMB Capital");
+  });
+
+  it("12: a source is never duplicated in Fine Tune across two different groups in the same project", async () => {
+    const otherGroup: CatalogCollectionSummary = { ...DERIVED_ALA_CARTE, groupKey: "derived:youtube-ala-carte" };
+    const channelItems = makeItems([501, 502]);
+    const alaCarteItems = [ALA_CARTE_ITEM_ELIGIBLE];
+    stubFetch({
+      set: makeSet(),
+      collections: [DISCORD_CHANNEL_GROUP, otherGroup],
+      itemsByCollection: { "derived:youtube-discord-channel:g1:c1": channelItems, "derived:youtube-ala-carte": alaCarteItems },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    await screen.findByText("YouTube URL 501");
+    expect(screen.getAllByText("YouTube URL 501")).toHaveLength(1);
+    expect(screen.getAllByText("YouTube URL 502")).toHaveLength(1);
+    expect(screen.getAllByText("Uncollected Eligible Video")).toHaveLength(1);
+  });
+
+  it("13: a not-yet-analyzed (ineligible) source inside a derived CHANNEL group is rendered but never selectable", async () => {
+    const ineligible = { ...makeItems([601])[0], status: "NOT_ANALYZED" as const, eligibleForSynthesis: false };
+    stubFetch({
+      set: makeSet(),
+      collections: [DISCORD_CHANNEL_GROUP],
+      itemsByCollection: { "derived:youtube-discord-channel:g1:c1": [ineligible] },
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Fine Tune Sources" }));
+    expect(await screen.findByLabelText("Include YouTube URL 601 in Scalping Playbook")).toBeDisabled();
+    expect(screen.getByLabelText("Select all eligible sources in Discord · #scarface-alerts")).toBeDisabled();
+  });
+});
