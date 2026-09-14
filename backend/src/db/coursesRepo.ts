@@ -80,3 +80,15 @@ export async function getCoursesByProjectId(pool: Pool, projectId: number): Prom
   );
   return result.rows.map(mapRow);
 }
+
+/** Batched course COUNT per project, for the Projects list's collectionCount — one round trip for any number of projects rather than looping getCoursesByProjectId. A project with zero courses simply has no entry in the returned map. */
+export async function getCourseCountsByProjectIds(pool: Pool, projectIds: number[]): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  if (projectIds.length === 0) return map;
+  const result = await pool.query<{ project_id: string; count: string }>(
+    `SELECT project_id, COUNT(*) AS count FROM courses WHERE project_id = ANY($1::bigint[]) GROUP BY project_id`,
+    [projectIds],
+  );
+  for (const row of result.rows) map.set(Number(row.project_id), Number(row.count));
+  return map;
+}

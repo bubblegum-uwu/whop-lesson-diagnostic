@@ -110,26 +110,20 @@ export function ProjectsPage({ backendUrl, knoveraToken }: ProjectsPageProps) {
                   <div className="knovera-project-card-top">
                     <div className="knovera-project-card-heading">
                       <h2>{project.name}</h2>
-                      {/* Phase 4C correction, updated by the live-validation
-                          cleanup below: derived from this project's real stats
-                          (from GET /api/projects) — never a hardcoded label,
-                          and never a second per-card fetch. courseCount > 0
-                          still means "Whop" specifically (Whop is the only
-                          provider that produces a `courses` row). Once that
-                          stopped being a safe "any source exists" inference —
-                          YouTube/Discord project_sources are real, first-class
-                          sources with no course row at all — projectSourceCount
-                          (a generic, provider-independent project_sources count;
-                          see projectsRepo.ts's getProjectStats) is what keeps
-                          this line from claiming "No sources yet" on a project
-                          that actually has sources, without guessing which
-                          provider they came from. */}
+                      {/* Phase 4L follow-up — every project type shows the SAME
+                          canonical "N collections" count (never a raw source-row
+                          count, never the literal string "Whop"): every card
+                          that would render on this project's Sources page —
+                          persisted collections, derived groups, Whop courses,
+                          Whop à-la-carte if non-empty — from GET /api/projects'
+                          collectionCount (see projectsRepo.ts's
+                          getCollectionCountForProject/getCollectionCountsForProjects,
+                          the SAME unified group resolver the Sources page uses).
+                          Never a second per-card fetch. */}
                       <p className="knovera-project-card-source">
-                        {project.courseCount > 0
-                          ? "Whop"
-                          : project.projectSourceCount > 0
-                            ? `${project.projectSourceCount} source${project.projectSourceCount === 1 ? "" : "s"}`
-                            : "No sources yet"}
+                        {project.collectionCount > 0
+                          ? `${project.collectionCount} collection${project.collectionCount === 1 ? "" : "s"}`
+                          : "No sources yet"}
                       </p>
                     </div>
                     <div className="knovera-project-card-badges">

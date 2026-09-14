@@ -109,6 +109,23 @@ export async function listSourceCollectionsByProjectId(pool: Pool, projectId: nu
   return result.rows.map(mapRow);
 }
 
+/** Batched sibling of listSourceCollectionsByProjectId — every collection for ANY of the given projects, in ONE round trip, grouped by project id. For callers (e.g. the Projects list's collectionCount) that would otherwise call the single-project version once per project. */
+export async function listSourceCollectionsByProjectIds(pool: Pool, projectIds: number[]): Promise<Map<number, SourceCollectionRow[]>> {
+  const map = new Map<number, SourceCollectionRow[]>();
+  if (projectIds.length === 0) return map;
+  const result = await pool.query<CollectionDbRow>(
+    `SELECT ${COLUMNS} FROM source_collections WHERE project_id = ANY($1::bigint[]) ORDER BY created_at ASC`,
+    [projectIds],
+  );
+  for (const row of result.rows) {
+    const mapped = mapRow(row);
+    const list = map.get(mapped.projectId);
+    if (list) list.push(mapped);
+    else map.set(mapped.projectId, [mapped]);
+  }
+  return map;
+}
+
 /**
  * Refresh bookkeeping: updates title (a channel may have been renamed),
  * the discovery pagination cursor (see the migration's doc comment — null
@@ -127,30 +144,4 @@ export async function markCollectionSynced(pool: Pool, id: number, title: string
 
 export async function markCollectionSyncFailed(pool: Pool, id: number, sanitizedError: string): Promise<void> {
   await pool.query(`UPDATE source_collections SET status = 'SYNC_FAILED', sanitized_error = $2, updated_at = now() WHERE id = $1`, [id, sanitizedError]);
-}
-
-/**
- * Removes the collection ROW only. The composite project-isolation FK
- * (see the migration) is NOT "ON DELETE SET NULL" — a composite FK's SET
- * NULL would null every column in its list, including project_id, which
- * must stay NOT NULL — so this function explicitly clears
- * `collection_id` on every member in the SAME transaction, immediately
- * before deleting the collection row. Items and their analyses are never
- * deleted (Phase 4K spec section 40's recommended, and here the only
- * implemented, behavior: "Remove Collection → remove collection
- * association → preserve underlying imported items").
- */
-export async function deleteSourceCollection(pool: Pool, id: number): Promise<void> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query(`UPDATE project_sources SET collection_id = NULL, updated_at = now() WHERE collection_id = $1`, [id]);
-    await client.query(`DELETE FROM source_collections WHERE id = $1`, [id]);
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
 }

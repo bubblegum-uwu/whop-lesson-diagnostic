@@ -23,6 +23,7 @@ const CREATED_PROJECT: ProjectSummary = {
   latestSynthesisStatus: null,
   latestSynthesisCompletedAt: null,
   projectSourceCount: 0,
+  collectionCount: 0,
 };
 
 function renderDialog(overrides: { onClose?: () => void; onCreated?: (p: ProjectSummary) => void } = {}) {

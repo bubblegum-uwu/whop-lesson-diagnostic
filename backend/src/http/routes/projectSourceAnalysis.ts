@@ -1,7 +1,8 @@
 import type { Request, Response } from "express";
 import type { Pool } from "pg";
 import { getProjectById } from "../../db/projectsRepo.js";
-import { getProjectSourceById, ANALYZABLE_PROJECT_SOURCE_PROVIDERS } from "../../db/projectSourcesRepo.js";
+import { getProjectSourceById, listProjectSourceIdsByCollectionId, ANALYZABLE_PROJECT_SOURCE_PROVIDERS } from "../../db/projectSourcesRepo.js";
+import { resolveOwnedCollectionGroup } from "./sourceCollections.js";
 import {
   createJob,
   getLatestJobForProjectSource,
@@ -194,9 +195,75 @@ export type BatchAnalyzeResultKind = "queued" | "already_queued" | "skipped" | "
 export interface BatchAnalyzeResultEntry {
   sourceId: number;
   kind: BatchAnalyzeResultKind;
+  /** Phase 4L — the in-flight job's own status when kind is "already_queued" (e.g. distinguishing QUEUED from ANALYZING/VALIDATING) — additive, existing consumers of this shape never read it. */
+  jobStatus?: string;
 }
 
 const MAX_BATCH_ANALYZE_SOURCES = 50;
+
+/**
+ * Phase 4L — the ONE per-source queue-or-skip decision engine, shared by
+ * the caller-supplied-list batch handler below AND the collection-scoped
+ * handler further down: same idempotent no-op if already queued, same
+ * skip-if-already-successfully-analyzed unless `force`, same
+ * fingerprint/job-creation calls. A collection can hold far more than
+ * MAX_BATCH_ANALYZE_SOURCES items — this function itself enforces no such
+ * cap, because it is only ever called with a server-RESOLVED id list
+ * (either the caller's own already-length-checked array, or a collection's
+ * real membership), never an unbounded caller-controlled string.
+ */
+async function queueAnalysisForSources(
+  deps: ProjectSourceAnalysisRouteDeps,
+  projectId: number,
+  sourceIds: number[],
+  force: boolean,
+): Promise<{ entries: BatchAnalyzeResultEntry[]; anyQueued: boolean }> {
+  const entries: BatchAnalyzeResultEntry[] = [];
+  let anyQueued = false;
+
+  for (const sourceId of sourceIds) {
+    const source = await getProjectSourceById(deps.pool, sourceId);
+    if (!source || source.projectId !== projectId) {
+      entries.push({ sourceId, kind: "not_found" });
+      continue;
+    }
+    if (!ANALYZABLE_PROJECT_SOURCE_PROVIDERS.has(source.provider)) {
+      entries.push({ sourceId, kind: "not_analyzable" });
+      continue;
+    }
+
+    const fingerprint = computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: deps.geminiModel });
+    if (!force) {
+      const existingAnalysis = await findLatestByFingerprint(deps.pool, fingerprint);
+      if (existingAnalysis && (existingAnalysis.status === "completed" || existingAnalysis.status === "no_strategy")) {
+        entries.push({ sourceId, kind: "skipped" });
+        continue;
+      }
+    }
+
+    const latestJob = await getLatestJobForProjectSource(deps.pool, source.id);
+    if (latestJob && !PROJECT_SOURCE_ANALYSIS_TERMINAL_STATUSES.includes(latestJob.status)) {
+      entries.push({ sourceId, kind: "already_queued", jobStatus: latestJob.status });
+      continue;
+    }
+
+    await createJob(deps.pool, source.id, fingerprint, force);
+    anyQueued = true;
+    entries.push({ sourceId, kind: "queued" });
+  }
+
+  return { entries, anyQueued };
+}
+
+async function triggerWorkerBestEffort(deps: ProjectSourceAnalysisRouteDeps, context: string): Promise<void> {
+  try {
+    await deps.jobTrigger.triggerRun();
+  } catch (err) {
+    logger.error(`Failed to trigger worker Job execution after ${context}`, {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
 
 /**
  * POST /api/projects/:projectId/sources/analyze-batch — Phase 4K. An
@@ -253,50 +320,86 @@ export function createBatchAnalyzeProjectSourcesHandler(deps: ProjectSourceAnaly
     }
 
     const force = (req.body as { force?: unknown })?.force === true;
-    const results: BatchAnalyzeResultEntry[] = [];
-    let anyQueued = false;
+    const { entries, anyQueued } = await queueAnalysisForSources(deps, projectId, body.sourceIds, force);
+    if (anyQueued) await triggerWorkerBestEffort(deps, "batch project-source analyze");
 
-    for (const sourceId of body.sourceIds) {
-      const source = await getProjectSourceById(deps.pool, sourceId);
-      if (!source || source.projectId !== projectId) {
-        results.push({ sourceId, kind: "not_found" });
-        continue;
-      }
-      if (!ANALYZABLE_PROJECT_SOURCE_PROVIDERS.has(source.provider)) {
-        results.push({ sourceId, kind: "not_analyzable" });
-        continue;
-      }
-
-      const fingerprint = computeProjectSourceAnalysisFingerprint({ projectSourceId: source.id, geminiModel: deps.geminiModel });
-      if (!force) {
-        const existingAnalysis = await findLatestByFingerprint(deps.pool, fingerprint);
-        if (existingAnalysis && (existingAnalysis.status === "completed" || existingAnalysis.status === "no_strategy")) {
-          results.push({ sourceId, kind: "skipped" });
-          continue;
-        }
-      }
-
-      const latestJob = await getLatestJobForProjectSource(deps.pool, source.id);
-      if (latestJob && !PROJECT_SOURCE_ANALYSIS_TERMINAL_STATUSES.includes(latestJob.status)) {
-        results.push({ sourceId, kind: "already_queued" });
-        continue;
-      }
-
-      await createJob(deps.pool, source.id, fingerprint, force);
-      anyQueued = true;
-      results.push({ sourceId, kind: "queued" });
-    }
-
-    if (anyQueued) {
-      try {
-        await deps.jobTrigger.triggerRun();
-      } catch (err) {
-        logger.error("Failed to trigger worker Job execution after batch project-source analyze", {
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
+    // Strip the internal jobStatus field — this endpoint's wire shape is
+    // unchanged from before Phase 4L (existing frontend/tests depend on it).
+    const results: BatchAnalyzeResultEntry[] = entries.map(({ sourceId, kind }) => ({ sourceId, kind }));
     res.status(202).json({ results });
+  };
+}
+
+export interface AnalyzeCollectionResult {
+  queued: number;
+  alreadyAnalyzed: number;
+  alreadyQueued: number;
+  processing: number;
+  failed: number;
+}
+
+const PROCESSING_JOB_STATUSES = new Set(["ANALYZING", "VALIDATING"]);
+const COLLECTION_NOT_FOUND_RESPONSE = { error: { message: "Unknown source collection.", type: "collection_not_found" } } as const;
+
+/**
+ * POST /api/projects/:projectId/collections/:collectionId/analyze — Phase
+ * 4L's "Analyze Collection" / "Analyze N Remaining". Unlike
+ * analyze-batch above, the source ids are resolved SERVER-SIDE — never a
+ * caller-supplied list, and never capped at MAX_BATCH_ANALYZE_SOURCES since
+ * a channel can hold hundreds of videos. Reuses the exact same
+ * queueAnalysisForSources engine as every other analyze route — never a
+ * second/parallel analysis pipeline, never a force-reanalyze (an
+ * already-successfully-analyzed source is always reported under
+ * `alreadyAnalyzed`, never silently re-queued). This is ANALYSIS only: it
+ * never creates, modifies, or reads Synthesis Set membership — analyzing a
+ * collection never selects it into synthesis.
+ *
+ * Phase 4L taxonomy correction — `:collectionId` now accepts either a
+ * persisted numeric collection id OR a derived groupKey (e.g.
+ * "derived:youtube-discord-channel:..."), resolved via
+ * resolveOwnedCollectionGroup — the EXACT same resolver/classification the
+ * Sources page's group list uses, so "Analyze Collection" on a
+ * "YOUTUBE · CHANNEL / Discord · #channel" card always analyzes exactly
+ * the sources that card shows, never a differently-computed set.
+ */
+export function createAnalyzeCollectionHandler(deps: ProjectSourceAnalysisRouteDeps) {
+  return async function analyzeCollectionHandler(req: Request, res: Response): Promise<void> {
+    const resolved = await resolveOwnedCollectionGroup(deps.pool, req.params.projectId, req.params.collectionId);
+    if (!resolved) {
+      res.status(404).json(COLLECTION_NOT_FOUND_RESPONSE);
+      return;
+    }
+    const { project } = resolved;
+    if (project.projectType !== "TRADING_STRATEGIES") {
+      res.status(400).json({
+        error: { message: "Analysis is only available for Trading Strategies projects right now.", type: "analysis_not_available_for_project_type" },
+      });
+      return;
+    }
+
+    const sourceIds = resolved.kind === "PERSISTED" ? await listProjectSourceIdsByCollectionId(deps.pool, resolved.collection.id) : resolved.memberSourceIds;
+    const { entries, anyQueued } = await queueAnalysisForSources(deps, project.id, sourceIds, false);
+    if (anyQueued) await triggerWorkerBestEffort(deps, "collection analyze");
+
+    const result: AnalyzeCollectionResult = { queued: 0, alreadyAnalyzed: 0, alreadyQueued: 0, processing: 0, failed: 0 };
+    for (const entry of entries) {
+      switch (entry.kind) {
+        case "queued":
+          result.queued++;
+          break;
+        case "skipped":
+          result.alreadyAnalyzed++;
+          break;
+        case "already_queued":
+          if (entry.jobStatus && PROCESSING_JOB_STATUSES.has(entry.jobStatus)) result.processing++;
+          else result.alreadyQueued++;
+          break;
+        case "not_found":
+        case "not_analyzable":
+          result.failed++;
+          break;
+      }
+    }
+    res.status(200).json(result);
   };
 }

@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { NewSynthesisSetDialog } from "./NewSynthesisSetDialog";
 import { useResolvedProject } from "../lib/useResolvedProject";
+import { OPERATIONAL_PROJECT_TYPES } from "../lib/projects";
 import { listSynthesisSets, deleteSynthesisSet, type SynthesisSetSummary } from "../lib/synthesisSetsApi";
 
 export interface SynthesisSetsPageProps {
@@ -40,6 +41,11 @@ export function SynthesisSetsPage({ backendUrl, knoveraToken }: SynthesisSetsPag
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
+  // Phase 4L follow-up — never even attempts to reach the Synthesis Sets
+  // API for a project type with no working synthesis engine (see
+  // ProjectHeader.tsx's identical nav-tab gate); this covers direct URL
+  // navigation, not just the hidden nav tab.
+  const isOperational = projectState.phase === "resolved" && OPERATIONAL_PROJECT_TYPES.has(projectState.project.projectType);
 
   async function load(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setState({ phase: "loading" });
@@ -54,7 +60,7 @@ export function SynthesisSetsPage({ backendUrl, knoveraToken }: SynthesisSetsPag
   }
 
   useEffect(() => {
-    if (!backendUrl || !knoveraToken || resolvedProjectId == null) {
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || !isOperational) {
       setState({ phase: "idle" });
       return;
     }
@@ -64,7 +70,7 @@ export function SynthesisSetsPage({ backendUrl, knoveraToken }: SynthesisSetsPag
       cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, knoveraToken, resolvedProjectId]);
+  }, [backendUrl, knoveraToken, resolvedProjectId, isOperational]);
 
   function refresh() {
     if (backendUrl && knoveraToken && resolvedProjectId != null) {
@@ -98,15 +104,24 @@ export function SynthesisSetsPage({ backendUrl, knoveraToken }: SynthesisSetsPag
         page.
       </p>
 
-      {state.phase === "loading" && <p className="knovera-sources-loading">Loading synthesis sets…</p>}
-
-      {state.phase === "error" && (
-        <div className="kv-card knovera-empty-state" role="alert">
-          <p>{state.message}</p>
+      {projectState.phase === "resolved" && !isOperational ? (
+        <div className="kv-card knovera-empty-state">
+          <p>
+            <span className="kv-badge kv-badge-muted">Coming Soon</span>
+          </p>
+          <p>Synthesis Sets aren&rsquo;t available for General Knowledge projects yet.</p>
         </div>
-      )}
+      ) : (
+        <>
+          {state.phase === "loading" && <p className="knovera-sources-loading">Loading synthesis sets…</p>}
 
-      {(state.phase === "loaded" || state.phase === "idle" || state.phase === "loading") && (
+          {state.phase === "error" && (
+            <div className="kv-card knovera-empty-state" role="alert">
+              <p>{state.message}</p>
+            </div>
+          )}
+
+          {(state.phase === "loaded" || state.phase === "idle" || state.phase === "loading") && (
         <div className="knovera-project-grid">
           {state.phase === "loaded" && state.sets.length === 0 && (
             <div className="kv-card knovera-empty-state">
@@ -178,6 +193,8 @@ export function SynthesisSetsPage({ backendUrl, knoveraToken }: SynthesisSetsPag
             </button>
           </div>
         </div>
+          )}
+        </>
       )}
 
       {showNewSet && backendUrl && knoveraToken && resolvedProjectId != null && (

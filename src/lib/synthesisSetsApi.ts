@@ -159,3 +159,86 @@ export async function removeSourceFromSynthesisSet(
   });
   await throwOnError(res, `Failed to remove source from synthesis set (${res.status}).`);
 }
+
+export interface BulkUpdateSynthesisSetSourcesResult {
+  synthesisSetId: number;
+  addedCount: number;
+  ineligibleSkippedCount: number;
+  removedCount: number;
+}
+
+/**
+ * POST .../synthesis-sets/:setId/sources/bulk — the fine-tune editor's
+ * "select all visible eligible" / "deselect all visible" actions. `add`
+ * ids that aren't eligible (or don't belong to this project) are silently
+ * skipped server-side (reported in ineligibleSkippedCount) — the frontend
+ * never lets an ineligible row be checked in the first place, this is
+ * defense-in-depth, never a partial-request error.
+ */
+export async function bulkUpdateSynthesisSetSources(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  setId: number,
+  update: { add?: number[]; remove?: number[] },
+): Promise<BulkUpdateSynthesisSetSourcesResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/sources/bulk`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify(update),
+  });
+  await throwOnError(res, `Failed to update selection (${res.status}).`);
+  return (await res.json()) as BulkUpdateSynthesisSetSourcesResult;
+}
+
+export interface BulkCollectionSelectionResult {
+  collectionId: string;
+  eligibleCount: number;
+  alreadySelectedCount: number;
+  addedCount: number;
+  ineligibleCount: number;
+}
+
+/**
+ * POST .../synthesis-sets/:setId/collections/:groupKey — "select this
+ * whole collection/group": a ONE-TIME snapshot bulk-add of every CURRENTLY
+ * eligible member. Never a live rule — a source imported or analyzed into
+ * this group afterward never joins this set on its own; call this again
+ * (or fine-tune individually) to add it.
+ *
+ * Phase 4L taxonomy correction — `groupKey` is the SAME opaque identity
+ * listSourceCollections returns (a real collection's numeric id as a
+ * string, or a "derived:..." key) — never re-derive or parse it, and
+ * always pass it through encodeURIComponent since a derived key contains
+ * colons.
+ */
+export async function bulkAddCollectionToSynthesisSet(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  setId: number,
+  groupKey: string,
+): Promise<BulkCollectionSelectionResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/collections/${encodeURIComponent(groupKey)}`, {
+    method: "POST",
+    headers: authHeaders(knoveraToken),
+  });
+  await throwOnError(res, `Failed to select this collection (${res.status}).`);
+  return (await res.json()) as BulkCollectionSelectionResult;
+}
+
+/** DELETE .../synthesis-sets/:setId/collections/:groupKey — removes ONLY this group's currently-selected sources from THIS set; never deletes the collection, its sources, their analyses, or membership in any other set. */
+export async function bulkRemoveCollectionFromSynthesisSet(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  setId: number,
+  groupKey: string,
+): Promise<{ collectionId: string; removedCount: number }> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/synthesis-sets/${setId}/collections/${encodeURIComponent(groupKey)}`, {
+    method: "DELETE",
+    headers: authHeaders(knoveraToken),
+  });
+  await throwOnError(res, `Failed to remove this collection's sources (${res.status}).`);
+  return (await res.json()) as { collectionId: string; removedCount: number };
+}

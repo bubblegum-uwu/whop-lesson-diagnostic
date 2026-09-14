@@ -141,6 +141,19 @@ describe("Synthesis Sets CRUD routes (Phase 4J)", () => {
     expect(statusCode).toBe(404);
   });
 
+  it("Phase 4L follow-up: rejects creating a set for a GENERAL_KNOWLEDGE project (fails safely — never a permanently-unusable empty set)", async () => {
+    const result = await pool.query<{ id: string }>(`INSERT INTO projects (name, project_type) VALUES ($1, 'GENERAL_KNOWLEDGE') RETURNING id`, [randomId("proj")]);
+    const projectId = Number(result.rows[0].id);
+
+    const { statusCode, body } = await callCreate(String(projectId), { name: "x" });
+    expect(statusCode).toBe(400);
+    expect((body.error as { type: string }).type).toBe("synthesis_sets_not_available_for_project_type");
+
+    const { statusCode: listStatus, body: listBody } = await callList(String(projectId));
+    expect(listStatus).toBe(200);
+    expect(listBody.synthesisSets).toEqual([]);
+  });
+
   it("lists sets for a project with readiness rollups, never leaking another project's sets", async () => {
     const projectA = await makeProject();
     const projectB = await makeProject();
@@ -156,20 +169,21 @@ describe("Synthesis Sets CRUD routes (Phase 4J)", () => {
     const project = await makeProject();
     const source = await makeYouTubeSource(project.id);
     await markAnalyzed(source.id);
-    const unanalyzed = await makeDiscordSource(project.id);
+    const secondAnalyzed = await makeDiscordSource(project.id);
+    await markAnalyzed(secondAnalyzed.id);
     const { body: created } = await callCreate(String(project.id), { name: "s" });
     const setId = String(created.id);
     await callAddSource(String(project.id), setId, { sourceId: source.id });
-    await callAddSource(String(project.id), setId, { sourceId: unanalyzed.id });
+    await callAddSource(String(project.id), setId, { sourceId: secondAnalyzed.id });
 
     const { statusCode, body } = await callGet(String(project.id), setId);
     expect(statusCode).toBe(200);
     expect(body.sourceCount).toBe(2);
-    expect(body.analyzedSourceCount).toBe(1);
-    expect(body.needsAnalysisCount).toBe(1);
+    expect(body.analyzedSourceCount).toBe(2);
+    expect(body.needsAnalysisCount).toBe(0);
     const sources = body.sources as Array<{ id: number; analyzed: boolean }>;
     expect(sources.find((s) => s.id === source.id)?.analyzed).toBe(true);
-    expect(sources.find((s) => s.id === unanalyzed.id)?.analyzed).toBe(false);
+    expect(sources.find((s) => s.id === secondAnalyzed.id)?.analyzed).toBe(true);
   });
 
   it("get/update/delete against a mismatched project returns the same deterministic 404 as an unknown set", async () => {
@@ -222,6 +236,7 @@ describe("Synthesis Set membership routes (Phase 4J)", () => {
   it("adds a source with 201 on first add, 200 (added: false) on a repeated add — idempotent, never a duplicate row", async () => {
     const project = await makeProject();
     const source = await makeYouTubeSource(project.id);
+    await markAnalyzed(source.id);
     const { body: created } = await callCreate(String(project.id), { name: "s" });
     const setId = String(created.id);
 
@@ -281,6 +296,7 @@ describe("Synthesis Set membership routes (Phase 4J)", () => {
   it("CRITICAL: a source in two sets — removing from one leaves it in the other; deleting one set leaves the source and the other set untouched", async () => {
     const project = await makeProject();
     const source = await makeYouTubeSource(project.id);
+    await markAnalyzed(source.id);
     const { body: setA } = await callCreate(String(project.id), { name: "Set A" });
     const { body: setB } = await callCreate(String(project.id), { name: "Set B" });
 
@@ -320,16 +336,31 @@ describe("Analysis independence (Phase 4J, section 32) — YouTube and Discord",
       expect(counts).toEqual({ jobs: 0, analyses: 0 });
     });
 
-    it(`${label}: adding a source to a set never creates a job or an analysis`, async () => {
+    it(`${label}: adding a source to a set never creates a NEW job or analysis (beyond the one that made it eligible)`, async () => {
       const project = await makeProject();
       const source = await makeSource(project.id);
+      await markAnalyzed(source.id);
+      const before = await jobAndAnalysisCounts(source.id);
       const { body: created } = await callCreate(String(project.id), { name: "s" });
       await callAddSource(String(project.id), String(created.id), { sourceId: source.id });
 
-      const counts = await jobAndAnalysisCounts(source.id);
-      expect(counts).toEqual({ jobs: 0, analyses: 0 });
+      const after = await jobAndAnalysisCounts(source.id);
+      expect(after).toEqual(before);
       const sourceRow = await pool.query<{ status: string }>(`SELECT status FROM project_sources WHERE id = $1`, [source.id]);
       expect(sourceRow.rows[0].status).toBe("READY");
+    });
+
+    it(`${label}: a not-yet-analyzed source cannot be added to a set — rejected 400, no membership row created`, async () => {
+      const project = await makeProject();
+      const source = await makeSource(project.id);
+      const { body: created } = await callCreate(String(project.id), { name: "s" });
+
+      const { statusCode, body } = await callAddSource(String(project.id), String(created.id), { sourceId: source.id });
+      expect(statusCode).toBe(400);
+      expect((body.error as { type: string }).type).toBe("source_not_eligible");
+
+      const membership = await pool.query(`SELECT 1 FROM synthesis_set_sources WHERE synthesis_set_id = $1 AND project_source_id = $2`, [created.id, source.id]);
+      expect(membership.rows).toEqual([]);
     });
 
     it(`${label}: removing a source from a set never deletes its analysis`, async () => {
@@ -355,13 +386,13 @@ describe("Analysis independence (Phase 4J, section 32) — YouTube and Discord",
       expect(memberships.rows).toEqual([]);
     });
 
-    it(`${label}: re-analyzing a member source does not change its set memberships`, async () => {
+    it(`${label}: re-analyzing an existing member source does not change its set memberships`, async () => {
       const project = await makeProject();
       const source = await makeSource(project.id);
+      await markAnalyzed(source.id);
       const { body: created } = await callCreate(String(project.id), { name: "s" });
       await callAddSource(String(project.id), String(created.id), { sourceId: source.id });
-      await markAnalyzed(source.id);
-      await markAnalyzed(source.id);
+      await markAnalyzed(source.id); // simulate a subsequent re-analysis of an already-selected source
 
       const { body: detail } = await callGet(String(project.id), String(created.id));
       expect(detail.sourceCount).toBe(1);
@@ -372,9 +403,10 @@ describe("Analysis independence (Phase 4J, section 32) — YouTube and Discord",
       expect(Number(membershipCount.rows[0].count)).toBe(1);
     });
 
-    it(`${label}: a FAILED analysis job does not remove existing set memberships`, async () => {
+    it(`${label}: a FAILED re-analysis attempt on an existing member neither removes its membership nor its eligibility (an older success still counts)`, async () => {
       const project = await makeProject();
       const source = await makeSource(project.id);
+      await markAnalyzed(source.id);
       const { body: created } = await callCreate(String(project.id), { name: "s" });
       await callAddSource(String(project.id), String(created.id), { sourceId: source.id });
 
@@ -385,12 +417,12 @@ describe("Analysis independence (Phase 4J, section 32) — YouTube and Discord",
 
       const { body: detail } = await callGet(String(project.id), String(created.id));
       expect(detail.sourceCount).toBe(1);
-      expect(detail.analyzedSourceCount).toBe(0);
-      expect(detail.needsAnalysisCount).toBe(1);
+      expect(detail.analyzedSourceCount).toBe(1);
+      expect(detail.needsAnalysisCount).toBe(0);
     });
   }
 
-  it("all four source states are visible without being silently dropped: member+analyzed, member+not-analyzed, non-member+analyzed, non-member+not-analyzed", async () => {
+  it("three reachable states are visible without being silently dropped (member+analyzed, non-member+analyzed, non-member+not-analyzed); a not-analyzed source is rejected rather than silently becoming a fourth", async () => {
     const project = await makeProject();
     const { body: created } = await callCreate(String(project.id), { name: "s" });
     const setId = String(created.id);
@@ -399,8 +431,9 @@ describe("Analysis independence (Phase 4J, section 32) — YouTube and Discord",
     await markAnalyzed(memberAnalyzed.id);
     await callAddSource(String(project.id), setId, { sourceId: memberAnalyzed.id });
 
-    const memberUnanalyzed = await makeDiscordSource(project.id);
-    await callAddSource(String(project.id), setId, { sourceId: memberUnanalyzed.id });
+    const rejectedUnanalyzed = await makeDiscordSource(project.id);
+    const rejected = await callAddSource(String(project.id), setId, { sourceId: rejectedUnanalyzed.id });
+    expect(rejected.statusCode).toBe(400);
 
     const nonMemberAnalyzed = await makeYouTubeSource(project.id);
     await markAnalyzed(nonMemberAnalyzed.id);
@@ -409,11 +442,11 @@ describe("Analysis independence (Phase 4J, section 32) — YouTube and Discord",
     void nonMemberUnanalyzed;
 
     const { body: detail } = await callGet(String(project.id), setId);
-    expect(detail.sourceCount).toBe(2);
+    expect(detail.sourceCount).toBe(1);
     expect(detail.analyzedSourceCount).toBe(1);
-    expect(detail.needsAnalysisCount).toBe(1);
-    const memberIds = (detail.sources as Array<{ id: number }>).map((s) => s.id).sort((a, b) => a - b);
-    expect(memberIds.sort((a, b) => a - b)).toEqual([memberAnalyzed.id, memberUnanalyzed.id].sort((a, b) => a - b));
+    const memberIds = (detail.sources as Array<{ id: number }>).map((s) => s.id);
+    expect(memberIds).toEqual([memberAnalyzed.id]);
+    expect(memberIds).not.toContain(rejectedUnanalyzed.id);
     expect(memberIds).not.toContain(nonMemberAnalyzed.id);
   });
 });

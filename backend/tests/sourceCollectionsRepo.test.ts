@@ -5,7 +5,6 @@ import {
   listSourceCollectionsByProjectId,
   markCollectionSynced,
   markCollectionSyncFailed,
-  deleteSourceCollection,
 } from "../src/db/sourceCollectionsRepo.js";
 import { createYouTubeSource, getProjectSourceById } from "../src/db/projectSourcesRepo.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
@@ -102,19 +101,6 @@ describe("sourceCollectionsRepo", () => {
     expect(refreshed?.sanitizedError).toBe("Feed unreachable.");
     const sourceStillLinked = await getProjectSourceById(pool, source.id);
     expect(sourceStillLinked?.collectionId).toBe(collection.id);
-  });
-
-  it("deleting a collection removes the collection but preserves its member sources — collection_id set to null (project_sources_collection_project_fkey ON DELETE SET NULL)", async () => {
-    const project = await makeProject();
-    const { collection } = await createSourceCollection(pool, { projectId: project.id, provider: "YOUTUBE", externalId: "UCdeleteme000000000000deletm", title: "X", sourceUrl: "https://x" });
-    const { source } = await createYouTubeSource(pool, { projectId: project.id, externalId: randomId("vid").slice(0, 11).padEnd(11, "0"), sourceUrl: "https://www.youtube.com/watch?v=y", collectionId: collection.id });
-
-    await deleteSourceCollection(pool, collection.id);
-
-    expect(await getSourceCollectionById(pool, collection.id)).toBeNull();
-    const sourceAfter = await getProjectSourceById(pool, source.id);
-    expect(sourceAfter).not.toBeNull();
-    expect(sourceAfter?.collectionId).toBeNull();
   });
 
   it("cross-project item association is rejected by the database itself: a direct SQL insert linking a source to another project's collection fails", async () => {

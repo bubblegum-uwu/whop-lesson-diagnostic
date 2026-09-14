@@ -9,6 +9,7 @@ import { SynthesisPage } from "./pages/SynthesisPage";
 import { SynthesisSetsPage } from "./pages/SynthesisSetsPage";
 import { SynthesisSetDetailPage } from "./pages/SynthesisSetDetailPage";
 import { CollectionDetailPage } from "./pages/CollectionDetailPage";
+import { WhopAlaCarteDetailPage } from "./pages/WhopAlaCarteDetailPage";
 import { WhopCourseDetailPage } from "./pages/WhopCourseDetailPage";
 import { UsagePage } from "./pages/UsagePage";
 import { LinkDiscordPage } from "./pages/LinkDiscordPage";
@@ -578,6 +579,10 @@ export default function App() {
         <Route
           path="/projects/:projectId/synthesis-sets/:setId"
           element={<SynthesisSetDetailPage backendUrl={backendUrl} knoveraToken={knoveraToken} />}
+        />
+        <Route
+          path="/projects/:projectId/whop-ala-carte"
+          element={<WhopAlaCarteDetailPage backendUrl={backendUrl} knoveraToken={knoveraToken} />}
         />
         <Route
           path="/projects/:projectId/collections/:collectionId"

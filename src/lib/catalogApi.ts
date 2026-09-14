@@ -5,7 +5,7 @@
  * a Whop token for these, except implicitly server-side for the Whop
  * course-connect/refresh calls (this client never sees or handles that).
  */
-import type { YouTubeProjectSource } from "./sourcesApi";
+import type { YouTubeProjectSource, ProjectSourceOriginSummary } from "./sourcesApi";
 function authHeaders(knoveraToken: string): HeadersInit {
   return { Authorization: `Bearer ${knoveraToken}` };
 }
@@ -32,18 +32,40 @@ async function throwOnError(res: Response, fallback: string): Promise<void> {
 
 export type CollectionStatus = "READY" | "SYNCING" | "SYNC_FAILED";
 
+/** The SOURCE TYPE dimension (Phase 4L taxonomy correction) — see backend derivedSourceGroupsRepo.ts's doc comment for the full provider/type/origin model. Every PERSISTED collection is CHANNEL; A_LA_CARTE and UNCLASSIFIED only ever occur on a DERIVED group. */
+export type CatalogGroupSourceType = "CHANNEL" | "A_LA_CARTE" | "UNCLASSIFIED";
+export type CatalogGroupOriginProvider = "DISCORD" | "MANUAL" | null;
+
+/**
+ * A row in the Sources page's collection grid — either a real, persisted
+ * YouTube/Discord `source_collections` row (`kind: "PERSISTED"`) or a
+ * DERIVED group computed from provenance data with no collection row of
+ * its own (`kind: "DERIVED"`) — e.g. YouTube videos discovered by scanning
+ * a Discord channel, which must group by that Discord channel rather than
+ * fall into a generic "à-la-carte" bucket. Both kinds render through this
+ * one shape and are both addressed via `groupKey` everywhere else (GET
+ * collection detail, Analyze Collection, Synthesis Set group-selection) —
+ * never assume `groupKey` is numeric, and never parse it; pass it through
+ * verbatim (URL-encoded, since a derived key contains colons).
+ */
 export interface CatalogCollectionSummary {
-  id: number;
-  provider: "YOUTUBE" | "DISCORD";
-  externalId: string;
+  groupKey: string;
+  kind: "PERSISTED" | "DERIVED";
+  /** The real source_collections.id — non-null only for a PERSISTED group. */
+  id: number | null;
+  provider: "YOUTUBE" | "DISCORD" | null;
+  sourceType: CatalogGroupSourceType;
+  originProvider: CatalogGroupOriginProvider;
+  originContainerId: string | null;
+  externalId: string | null;
   title: string;
-  sourceUrl: string;
-  status: CollectionStatus;
+  sourceUrl: string | null;
+  status: CollectionStatus | null;
   sanitizedError: string | null;
   lastSyncedAt: string | null;
   itemCount: number;
   analyzedCount: number;
-  /** Phase 4K follow-up — true when this channel's upload history is bigger than one discovery pass can cover; Refresh continues deeper into it rather than restarting at the newest video. */
+  /** Phase 4K follow-up — true when this channel's upload history is bigger than one discovery pass can cover; Refresh continues deeper into it rather than restarting at the newest video. Always false for a DERIVED group. */
   hasMoreHistory: boolean;
 }
 
@@ -58,12 +80,30 @@ export interface CatalogItemSummary {
   createdAt: string;
   status: CatalogItemStatus;
   eligibleForSynthesis: boolean;
+  /** Phase 4L — Phase 4K-C provenance, batch-loaded server-side; always empty for DISCORD items or a source that predates Phase 4K-C. */
+  origins: ProjectSourceOriginSummary[];
 }
 
 export interface CatalogPagination {
   limit: number;
   offset: number;
   totalCount: number;
+}
+
+/** "YOUTUBE · CHANNEL" / "DISCORD · CHANNEL" / "YOUTUBE · À-LA-CARTE" / "OTHER · UNCLASSIFIED" — the PROVIDER + SOURCE TYPE line every collection/group card and detail page header shows (Phase 4L taxonomy correction's two-dimension model; see CatalogCollectionSummary's doc comment). */
+export function catalogGroupTypeLabel(c: Pick<CatalogCollectionSummary, "provider" | "sourceType">): string {
+  const providerLabel = c.provider ?? "OTHER";
+  const typeLabel = c.sourceType === "A_LA_CARTE" ? "À-LA-CARTE" : c.sourceType;
+  return `${providerLabel} · ${typeLabel}`;
+}
+
+/** The ORIGIN/CONTAINER subtitle line — e.g. "Discord · #scarface-alerts", "YouTube · TraderTV", "Manual YouTube", "Unclassified Sources". A DERIVED group's `title` already comes fully composed from the backend; a PERSISTED collection's `title` is just its raw channel/collection name, so this prefixes it with its own provider label for the same "<origin> · <container>" shape every card uses. */
+export function catalogGroupOriginLine(c: Pick<CatalogCollectionSummary, "kind" | "provider" | "title">): string {
+  if (c.kind === "PERSISTED") {
+    const providerLabel = c.provider === "YOUTUBE" ? "YouTube" : "Discord";
+    return `${providerLabel} · ${c.title}`;
+  }
+  return c.title;
 }
 
 /** GET /api/projects/:projectId/collections */
@@ -74,19 +114,19 @@ export async function listSourceCollections(backendUrl: string, knoveraToken: st
   return body.collections;
 }
 
-/** GET /api/projects/:projectId/collections/:collectionId */
+/** GET /api/projects/:projectId/collections/:groupKey — `groupKey` is the opaque identity from CatalogCollectionSummary.groupKey (a persisted collection's numeric id as a string, or a "derived:..." key); always URL-encoded here since a derived key contains colons. */
 export async function getSourceCollection(
   backendUrl: string,
   knoveraToken: string,
   projectId: number,
-  collectionId: number,
+  groupKey: string,
   page: { limit?: number; offset?: number } = {},
 ): Promise<{ collection: CatalogCollectionSummary; items: CatalogItemSummary[]; pagination: CatalogPagination }> {
   const params = new URLSearchParams();
   if (page.limit != null) params.set("limit", String(page.limit));
   if (page.offset != null) params.set("offset", String(page.offset));
   const qs = params.toString();
-  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${collectionId}${qs ? `?${qs}` : ""}`, { headers: authHeaders(knoveraToken) });
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${encodeURIComponent(groupKey)}${qs ? `?${qs}` : ""}`, { headers: authHeaders(knoveraToken) });
   await throwOnError(res, `Failed to load collection (${res.status}).`);
   return (await res.json()) as { collection: CatalogCollectionSummary; items: CatalogItemSummary[]; pagination: CatalogPagination };
 }
@@ -120,12 +160,6 @@ export async function refreshSourceCollection(
   });
   await throwOnError(res, `Failed to refresh collection (${res.status}).`);
   return await res.json();
-}
-
-/** DELETE /api/projects/:projectId/collections/:collectionId — removes the collection association only; items are preserved. */
-export async function deleteSourceCollection(backendUrl: string, knoveraToken: string, projectId: number, collectionId: number): Promise<void> {
-  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${collectionId}`, { method: "DELETE", headers: authHeaders(knoveraToken) });
-  await throwOnError(res, `Failed to remove collection (${res.status}).`);
 }
 
 export interface BatchImportResultEntry {
@@ -176,6 +210,73 @@ export async function batchAnalyzeProjectSources(backendUrl: string, knoveraToke
     body: JSON.stringify({ sourceIds }),
   });
   await throwOnError(res, `Failed to start batch analysis (${res.status}).`);
+  return await res.json();
+}
+
+export interface AnalyzeCollectionResult {
+  queued: number;
+  alreadyAnalyzed: number;
+  alreadyQueued: number;
+  processing: number;
+  failed: number;
+}
+
+/**
+ * POST /api/projects/:projectId/collections/:groupKey/analyze — Phase
+ * 4L's "Analyze Collection"/"Analyze N Remaining." The backend resolves
+ * the group's members itself (never a client-enumerated id list), so this
+ * works regardless of how many items the group holds and works identically
+ * for a PERSISTED collection or a DERIVED group — see
+ * CatalogCollectionSummary's doc comment. Never touches Synthesis Set
+ * membership.
+ */
+export async function analyzeCollection(backendUrl: string, knoveraToken: string, projectId: number, groupKey: string): Promise<AnalyzeCollectionResult> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${encodeURIComponent(groupKey)}/analyze`, {
+    method: "POST",
+    headers: authHeaders(knoveraToken),
+  });
+  await throwOnError(res, `Failed to analyze this collection (${res.status}).`);
+  return await res.json();
+}
+
+export type AddCollectionToProjectTargetKind = "invalid" | "ok";
+export interface AddCollectionToProjectTargetResult {
+  targetProjectId: number;
+  kind: AddCollectionToProjectTargetKind;
+  addedCount: number;
+  alreadyPresentCount: number;
+  failedCount: number;
+}
+export interface AddCollectionToProjectResponse {
+  groupKey: string;
+  memberCount: number;
+  results: AddCollectionToProjectTargetResult[];
+}
+
+/**
+ * POST /api/projects/:projectId/collections/:groupKey/add-to-project —
+ * "Add Collection to Project": a ONE-TIME SNAPSHOT copy of this
+ * collection/group's CURRENT members into one or more other projects.
+ * Works identically for a PERSISTED collection and a DERIVED group (see
+ * CatalogCollectionSummary's doc comment) — the backend resolves members
+ * server-side via the same unified resolver every other collection route
+ * uses. Never analyzes anything, never copies analysis results, never
+ * touches Synthesis Set membership. Re-running this later adds only
+ * whatever is newly missing in the destination — it is never a live sync.
+ */
+export async function addCollectionToProject(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  groupKey: string,
+  targetProjectIds: number[],
+): Promise<AddCollectionToProjectResponse> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${encodeURIComponent(groupKey)}/add-to-project`, {
+    method: "POST",
+    headers: { ...authHeaders(knoveraToken), "Content-Type": "application/json" },
+    body: JSON.stringify({ targetProjectIds }),
+  });
+  await throwOnError(res, `Failed to add this collection to another project (${res.status}).`);
   return await res.json();
 }
 

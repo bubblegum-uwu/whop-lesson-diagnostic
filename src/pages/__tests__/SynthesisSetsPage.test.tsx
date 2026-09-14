@@ -179,3 +179,19 @@ describe("SynthesisSetsPage (Phase 4J)", () => {
     expect(screen.getByText("SET_DETAIL_MARKER")).toBeInTheDocument();
   });
 });
+
+describe("SynthesisSetsPage — GENERAL_KNOWLEDGE gating (Phase 4L follow-up)", () => {
+  it("shows a 'Coming Soon' message instead of the set list/create UI, and never calls the synthesis-sets API at all", async () => {
+    const gkProject = { ...PROJECT, projectType: "GENERAL_KNOWLEDGE" };
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [gkProject] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText(/Synthesis Sets aren.t available for General Knowledge projects yet\./)).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "New Synthesis Set" })).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/synthesis-sets"))).toBe(false);
+  });
+});

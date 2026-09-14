@@ -108,6 +108,52 @@ export async function listSynthesisSetIdsForSource(pool: Pool, projectSourceId: 
   return result.rows.map((r) => Number(r.synthesis_set_id));
 }
 
+/**
+ * Phase 4L — bulk membership insert for an explicit, already-validated list
+ * of project_source ids (the caller — http/routes/synthesisSets.ts — is
+ * responsible for having already confirmed every id belongs to `projectId`
+ * and, where required, is eligible). Same idempotent ON CONFLICT DO NOTHING
+ * as addSourceToSynthesisSet, just batched into one round trip instead of
+ * one INSERT per id — this is what makes "select whole collection" and
+ * "select all visible" cheap regardless of how many sources that is.
+ */
+export async function bulkAddSourcesToSynthesisSet(
+  pool: Pool,
+  synthesisSetId: number,
+  projectId: number,
+  projectSourceIds: number[],
+): Promise<{ addedCount: number }> {
+  if (projectSourceIds.length === 0) return { addedCount: 0 };
+  const result = await pool.query(
+    `INSERT INTO synthesis_set_sources (synthesis_set_id, project_source_id, project_id)
+     SELECT $1, unnest($2::bigint[]), $3
+     ON CONFLICT (synthesis_set_id, project_source_id) DO NOTHING`,
+    [synthesisSetId, projectSourceIds, projectId],
+  );
+  return { addedCount: result.rowCount ?? 0 };
+}
+
+/** Bulk membership removal for an explicit list of project_source ids — never the source itself, never its analysis, never any other set. */
+export async function bulkRemoveSourcesFromSynthesisSet(pool: Pool, synthesisSetId: number, projectSourceIds: number[]): Promise<{ removedCount: number }> {
+  if (projectSourceIds.length === 0) return { removedCount: 0 };
+  const result = await pool.query(
+    `DELETE FROM synthesis_set_sources WHERE synthesis_set_id = $1 AND project_source_id = ANY($2::bigint[])`,
+    [synthesisSetId, projectSourceIds],
+  );
+  return { removedCount: result.rowCount ?? 0 };
+}
+
+/** Of this set's CURRENT members, how many belong to `collectionId` — used to bulk-remove "this collection's selected sources" without touching sources this set selected individually from elsewhere. */
+export async function listSynthesisSetSourceIdsForCollection(pool: Pool, synthesisSetId: number, collectionId: number): Promise<number[]> {
+  const result = await pool.query<{ project_source_id: string }>(
+    `SELECT sss.project_source_id FROM synthesis_set_sources sss
+     JOIN project_sources ps ON ps.id = sss.project_source_id
+     WHERE sss.synthesis_set_id = $1 AND ps.collection_id = $2`,
+    [synthesisSetId, collectionId],
+  );
+  return result.rows.map((r) => Number(r.project_source_id));
+}
+
 export interface SynthesisSetReadiness {
   sourceCount: number;
   analyzedSourceCount: number;
