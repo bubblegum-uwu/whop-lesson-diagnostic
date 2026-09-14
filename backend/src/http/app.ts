@@ -44,7 +44,6 @@ import {
   createGetSourceCollectionHandler,
   createAddYouTubeCollectionHandler,
   createRefreshSourceCollectionHandler,
-  createDeleteSourceCollectionHandler,
   createAddCollectionToProjectHandler,
 } from "./routes/sourceCollections.js";
 import {
@@ -294,7 +293,6 @@ export function createApp(config: AppConfig): Express {
   app.post("/api/projects/:projectId/collections/youtube", knoveraAuth, createAddYouTubeCollectionHandler(sourceCollectionsDeps));
   app.get("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createGetSourceCollectionHandler(sourceCollectionsDeps));
   app.post("/api/projects/:projectId/collections/:collectionId/refresh", knoveraAuth, createRefreshSourceCollectionHandler(sourceCollectionsDeps));
-  app.delete("/api/projects/:projectId/collections/:collectionId", knoveraAuth, createDeleteSourceCollectionHandler(sourceCollectionsDeps));
   app.post("/api/projects/:projectId/collections/:collectionId/add-to-project", knoveraAuth, createAddCollectionToProjectHandler(sourceCollectionsDeps));
 
   // Phase 4H-B — project-source analysis (YouTube; Discord as of Phase 4I).

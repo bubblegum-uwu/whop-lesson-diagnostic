@@ -133,4 +133,25 @@ describe("WhopAlaCarteDetailPage — WHOP · À-LA-CARTE group detail (Phase 4L 
     fireEvent.click(screen.getByRole("button", { name: /Sources/ }));
     expect(screen.getByText("SOURCES_MARKER")).toBeInTheDocument();
   });
+
+  // Phase 4L — "Remove Collection" was removed everywhere, and Whop
+  // à-la-carte never had one to begin with. Also confirms this page never
+  // exposes a misleading "Add Collection to Project" — Whop cross-project
+  // collection assignment isn't safely supported yet (courses.project_id /
+  // project_whop_lesson_imports.lesson_id are both exclusive, single-project
+  // identities in the current schema).
+  it("never shows a Remove Collection or Add Collection to Project action", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+        if (url.endsWith("/whop-lessons")) return jsonResponse(200, { projectId: 7, items: [LESSON] });
+        return jsonResponse(404, {});
+      }),
+    );
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Lesson 7")).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Remove Collection" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add Collection to Project" })).not.toBeInTheDocument();
+  });
 });

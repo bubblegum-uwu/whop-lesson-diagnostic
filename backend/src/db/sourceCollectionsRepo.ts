@@ -145,29 +145,3 @@ export async function markCollectionSynced(pool: Pool, id: number, title: string
 export async function markCollectionSyncFailed(pool: Pool, id: number, sanitizedError: string): Promise<void> {
   await pool.query(`UPDATE source_collections SET status = 'SYNC_FAILED', sanitized_error = $2, updated_at = now() WHERE id = $1`, [id, sanitizedError]);
 }
-
-/**
- * Removes the collection ROW only. The composite project-isolation FK
- * (see the migration) is NOT "ON DELETE SET NULL" — a composite FK's SET
- * NULL would null every column in its list, including project_id, which
- * must stay NOT NULL — so this function explicitly clears
- * `collection_id` on every member in the SAME transaction, immediately
- * before deleting the collection row. Items and their analyses are never
- * deleted (Phase 4K spec section 40's recommended, and here the only
- * implemented, behavior: "Remove Collection → remove collection
- * association → preserve underlying imported items").
- */
-export async function deleteSourceCollection(pool: Pool, id: number): Promise<void> {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    await client.query(`UPDATE project_sources SET collection_id = NULL, updated_at = now() WHERE collection_id = $1`, [id]);
-    await client.query(`DELETE FROM source_collections WHERE id = $1`, [id]);
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-}

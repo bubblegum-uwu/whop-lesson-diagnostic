@@ -10,7 +10,6 @@ import { useResolvedProject } from "../lib/useResolvedProject";
 import {
   getSourceCollection,
   refreshSourceCollection,
-  deleteSourceCollection,
   CatalogApiError,
   batchAnalyzeProjectSources,
   analyzeCollection,
@@ -63,10 +62,18 @@ const PENDING_STATUSES = new Set<CatalogItemSummary["status"]>(["QUEUED", "ANALY
  * explicit "Analyze Selected" (never automatic — see the Phase 4K spec's
  * core invariants), individual Analyze/View/Retry per item reusing the
  * exact same project-source-analysis endpoints and
- * ProjectSourceAnalysisDrawer SourcesPage already uses. Refresh/Remove
- * only ever apply to a PERSISTED collection — a derived group has no row
- * to refresh or delete; it simply reflects whatever the sources' real
- * provenance currently is.
+ * ProjectSourceAnalysisDrawer SourcesPage already uses. Refresh only ever
+ * applies to a PERSISTED collection — a derived group has no row to
+ * refresh; it simply reflects whatever the sources' real provenance
+ * currently is.
+ *
+ * Phase 4L follow-up — there is deliberately NO "Remove Collection"
+ * action anywhere on this page (for any collection kind). Consistent
+ * non-destructive removal turned out to need different lifecycle handling
+ * per collection kind (persisted vs. derived vs. Whop) and was deferred to
+ * a later phase (Archive/Restore Collection) rather than introducing a
+ * soft-delete schema change here — see the PR discussion for the removal
+ * investigation this decision is based on.
  */
 export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDetailPageProps) {
   const navigate = useNavigate();
@@ -78,7 +85,6 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
   const [actionError, setActionError] = useState<string | null>(null);
   const [viewingSourceId, setViewingSourceId] = useState<number | null>(null);
   const [viewingStatus, setViewingStatus] = useState<ProjectSourceAnalysisStatus | null>(null);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [addToProjectItem, setAddToProjectItem] = useState<CatalogItemSummary | null>(null);
   const [showAddCollectionToProject, setShowAddCollectionToProject] = useState(false);
   const [analyzeCollectionResult, setAnalyzeCollectionResult] = useState<AnalyzeCollectionResult | null>(null);
@@ -233,19 +239,6 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
     }
   }
 
-  /** Only ever called when state.collection.kind === "PERSISTED" — see the Remove Collection button's own guard below. A derived group has no row to delete. */
-  async function handleDeleteCollection() {
-    if (!backendUrl || !knoveraToken || resolvedProjectId == null || state.phase !== "loaded" || state.collection.id == null) return;
-    setBusy(true);
-    try {
-      await deleteSourceCollection(backendUrl, knoveraToken, resolvedProjectId, state.collection.id);
-      navigate(`/projects/${resolvedProjectId}/sources`);
-    } catch (err) {
-      setActionError(err instanceof CatalogApiError ? err.message : "Failed to remove collection.");
-      setBusy(false);
-    }
-  }
-
   const remainingCount = state.phase === "loaded" ? state.items.filter((i) => i.status !== "ANALYZED").length : 0;
 
   const viewingItem = state.phase === "loaded" ? state.items.find((i) => i.id === viewingSourceId) : undefined;
@@ -311,33 +304,14 @@ export function CollectionDetailPage({ backendUrl, knoveraToken }: CollectionDet
               {/* Phase 4L follow-up — "Add Collection to Project" is offered
                   identically for every collection kind (persisted or
                   derived); the frontend never exposes that internal
-                  distinction as a UI difference here. */}
+                  distinction as a UI difference here. There is
+                  deliberately no "Remove Collection" action — see this
+                  component's doc comment. */}
               <button type="button" className="link-button" onClick={() => setShowAddCollectionToProject(true)}>
                 Add Collection to Project
               </button>
-              {state.collection.kind === "PERSISTED" &&
-                (confirmingDelete ? (
-                  <>
-                    <span className="hint">Remove this collection?</span>
-                    <button type="button" className="link-button" onClick={() => setConfirmingDelete(false)} disabled={busy}>
-                      Cancel
-                    </button>
-                    <button type="button" className="link-button danger" onClick={() => void handleDeleteCollection()} disabled={busy}>
-                      {busy ? "Removing…" : "Confirm Remove"}
-                    </button>
-                  </>
-                ) : (
-                  <button type="button" className="link-button danger" onClick={() => setConfirmingDelete(true)}>
-                    Remove Collection
-                  </button>
-                ))}
             </div>
           </div>
-          {state.collection.kind === "PERSISTED" ? (
-            <p className="hint">Removing a collection only removes the grouping — its items and their analyses are kept.</p>
-          ) : (
-            <p className="hint">This group is computed from each source's own provenance — there's no separate grouping to remove.</p>
-          )}
 
           {actionError && (
             <div className="kv-card knovera-empty-state" role="alert">

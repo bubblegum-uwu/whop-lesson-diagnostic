@@ -77,6 +77,19 @@ describe("WhopCourseDetailPage (Phase 4K)", () => {
     expect(screen.getByText("Not analyzed")).toBeInTheDocument();
   });
 
+  // Phase 4L — "Remove Collection" was removed everywhere, and Whop
+  // Course never had one to begin with. Also confirms this page never
+  // exposes a misleading "Add Collection to Project" — Whop cross-project
+  // collection assignment isn't safely supported yet (courses.project_id
+  // is a single, exclusive FK in the current schema).
+  it("never shows a Remove Collection or Add Collection to Project action", async () => {
+    stubFetch();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Trading Accelerator" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Remove Collection" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add Collection to Project" })).not.toBeInTheDocument();
+  });
+
   it("checking a lesson's checkbox never triggers analysis", async () => {
     const fetchMock = stubFetch();
     renderPage();

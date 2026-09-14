@@ -120,6 +120,19 @@ describe("CollectionDetailPage (Phase 4K)", () => {
     expect(screen.getByText("Not analyzed")).toBeInTheDocument();
   });
 
+  // Phase 4L — "Remove Collection" was removed everywhere (deferred to a
+  // later Archive/Restore Collection phase, never soft-deleted here — see
+  // this page's own doc comment). A PERSISTED collection must never show
+  // it either, even though it's the one kind that technically had a
+  // backend DELETE route before this change.
+  it("never shows a Remove Collection action for a PERSISTED collection", async () => {
+    stubFetch();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · CHANNEL" })).toBeInTheDocument());
+    expect(screen.queryByRole("button", { name: "Remove Collection" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm Remove" })).not.toBeInTheDocument();
+  });
+
   it("an unanalyzed item shows an Analyze action and a checkbox; checking it does NOT analyze it", async () => {
     const fetchMock = stubFetch();
     renderPage();
@@ -299,12 +312,13 @@ describe("CollectionDetailPage — DERIVED groups (Phase 4L taxonomy correction)
     expect(screen.getByText("Alert Recap")).toBeInTheDocument();
   });
 
-  it("never shows Refresh or Remove Collection for a derived group — there is no row to refresh or delete", async () => {
+  it("never shows Refresh (no row to refresh) or Remove Collection (removed everywhere — see Phase 4L deferral) for a derived group", async () => {
     stubDerivedFetch();
     renderDerivedPage();
     await waitFor(() => expect(screen.getByText("Alert Recap")).toBeInTheDocument());
     expect(screen.queryByRole("button", { name: "Refresh" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove Collection" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm Remove" })).not.toBeInTheDocument();
   });
 
   it("shows each item's provenance (Discord channel + posted date), same rules as a persisted collection", async () => {

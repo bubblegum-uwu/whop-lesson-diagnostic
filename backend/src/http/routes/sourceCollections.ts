@@ -8,7 +8,6 @@ import {
   listSourceCollectionsByProjectId,
   markCollectionSynced,
   markCollectionSyncFailed,
-  deleteSourceCollection,
   type SourceCollectionRow,
 } from "../../db/sourceCollectionsRepo.js";
 import { createYouTubeSource, createDiscordSource, getProjectSourceById, listProjectSourceIdsByCollectionId, type ProjectSourceRow } from "../../db/projectSourcesRepo.js";
@@ -664,19 +663,6 @@ export function createRefreshSourceCollectionHandler(deps: SourceCollectionsRout
       adoptedCount: result.adoptedCount,
       hasMoreHistory: result.nextPageToken !== null,
     });
-  };
-}
-
-/** DELETE /api/projects/:projectId/collections/:collectionId — removes the collection association only; every member item and its analysis history is preserved (spec section 40). PERSISTED-only — a derived group has no row to delete; its members simply stay classified the same way until their real provenance changes. */
-export function createDeleteSourceCollectionHandler(deps: SourceCollectionsRouteDeps) {
-  return async function deleteSourceCollectionHandler(req: Request, res: Response): Promise<void> {
-    const resolved = await resolveOwnedCollection(deps.pool, req.params.projectId, req.params.collectionId);
-    if (!resolved) {
-      res.status(404).json(NOT_FOUND_COLLECTION);
-      return;
-    }
-    await deleteSourceCollection(deps.pool, resolved.collection.id);
-    res.status(204).end();
   };
 }
 

@@ -162,12 +162,6 @@ export async function refreshSourceCollection(
   return await res.json();
 }
 
-/** DELETE /api/projects/:projectId/collections/:collectionId — removes the collection association only; items are preserved. */
-export async function deleteSourceCollection(backendUrl: string, knoveraToken: string, projectId: number, collectionId: number): Promise<void> {
-  const res = await fetch(`${backendUrl}/api/projects/${projectId}/collections/${collectionId}`, { method: "DELETE", headers: authHeaders(knoveraToken) });
-  await throwOnError(res, `Failed to remove collection (${res.status}).`);
-}
-
 export interface BatchImportResultEntry {
   url: string;
   kind: "added" | "duplicate" | "invalid";

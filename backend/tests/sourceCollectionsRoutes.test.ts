@@ -5,7 +5,6 @@ import {
   createGetSourceCollectionHandler,
   createAddYouTubeCollectionHandler,
   createRefreshSourceCollectionHandler,
-  createDeleteSourceCollectionHandler,
   type SourceCollectionsRouteDeps,
 } from "../src/http/routes/sourceCollections.js";
 import { createYouTubeSource, getProjectSourceById } from "../src/db/projectSourcesRepo.js";
@@ -84,12 +83,6 @@ function callRefresh(projectId: string, collectionId: string, d: SourceCollectio
   const handler = createRefreshSourceCollectionHandler(d);
   const { res, statusCode, body } = makeResponse();
   return handler({ params: { projectId, collectionId } } as unknown as Request, res).then(() => ({ statusCode: statusCode(), body: body() as Record<string, unknown> }));
-}
-
-function callDelete(projectId: string, collectionId: string, d: SourceCollectionsRouteDeps = deps()) {
-  const handler = createDeleteSourceCollectionHandler(d);
-  const { res, statusCode, body } = makeResponse();
-  return handler({ params: { projectId, collectionId } } as unknown as Request, res).then(() => ({ statusCode: statusCode(), body: body() as Record<string, unknown> | undefined }));
 }
 
 function jsonResponse(status: number, body: unknown): Response {
@@ -259,25 +252,6 @@ describe("Source Collections routes — YouTube (Phase 4K)", () => {
     expect((listBody.collections as Array<Record<string, unknown>>)[0].itemCount).toBe(1);
     const collectionCount = await pool.query(`SELECT COUNT(*) AS count FROM source_collections WHERE project_id = $1`, [project.id]);
     expect(Number((collectionCount.rows[0] as { count: string }).count)).toBe(1);
-  });
-
-  it("deleting a collection removes it but preserves member sources and their analyses", async () => {
-    const project = await makeProject();
-    stubYouTubeDataApi({ channelId: "UC_x5XG1OV2P6uZZ5FSM9Ttw", channelTitle: "SMB Capital", videoIds: ["kkkkkkkkkkk"] });
-    const { body: added } = await callAddYouTubeChannel(String(project.id), "UC_x5XG1OV2P6uZZ5FSM9Ttw");
-    const collectionId = (added.collection as Record<string, unknown>).id as number;
-    const sourceResult = await pool.query<{ id: string }>(`SELECT id FROM project_sources WHERE collection_id = $1`, [collectionId]);
-    const sourceId = Number(sourceResult.rows[0].id);
-    await markAnalyzed(sourceId);
-
-    const { statusCode } = await callDelete(String(project.id), String(collectionId));
-    expect(statusCode).toBe(204);
-
-    const stillThere = await getProjectSourceById(pool, sourceId);
-    expect(stillThere).not.toBeNull();
-    expect(stillThere?.collectionId).toBeNull();
-    const analysisStillThere = await pool.query(`SELECT 1 FROM project_source_analyses WHERE project_source_id = $1`, [sourceId]);
-    expect(analysisStillThere.rows).toHaveLength(1);
   });
 
   it("cross-project isolation: a collection from another project returns 404", async () => {
