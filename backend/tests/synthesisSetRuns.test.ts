@@ -310,7 +310,7 @@ describe("Phase 4M — immutable Synthesis Set Runs", () => {
     await callAddSource(project.id, set.id as number, source.id);
     const created = await callCreateRun(project.id, set.id as number);
 
-    await markSynthesisSetRunFailed(pool, created.body.runId as string, "gemini_error", "Something failed.");
+    await markSynthesisSetRunFailed(pool, created.body.runId as string, null, "gemini_error", "Something failed.");
 
     const { statusCode, body } = await callGetRun(project.id, set.id as number, created.body.runId as string);
     expect(statusCode).toBe(200);

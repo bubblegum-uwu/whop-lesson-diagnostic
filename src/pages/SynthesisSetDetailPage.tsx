@@ -803,10 +803,15 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
         </div>
       )}
 
-      <h2 className="knovera-section-title">Run History</h2>
+      <div className="knovera-page-header">
+        <h2 className="knovera-section-title">Run History</h2>
+        <button type="button" className="link-button" onClick={() => void refreshRuns()}>
+          Refresh
+        </button>
+      </div>
       <p className="hint">
         Every Run below is an immutable snapshot, frozen the moment it was created. Changing Current Selection above never rewrites a past Run, and no Run
-        here was ever created automatically.
+        here was ever created automatically. A Run queued just now may still show Queued or Running here until you refresh.
       </p>
       {runs.length === 0 ? (
         <div className="kv-card knovera-empty-state">
@@ -823,7 +828,11 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
             return (
               <li key={run.runId} className="kv-card knovera-youtube-source-row" style={{ flexDirection: "column", alignItems: "stretch" }}>
                 <div className="knovera-youtube-source-main">
-                  <span className={`kv-badge ${run.status === "COMPLETED" ? "kv-badge-accent" : run.status === "FAILED" ? "kv-badge-danger" : "kv-badge-muted"}`}>
+                  <span
+                    className={`kv-badge ${
+                      run.status === "COMPLETED" ? "kv-badge-success" : run.status === "FAILED" ? "kv-badge-danger" : run.status === "RUNNING" ? "kv-badge-accent" : "kv-badge-muted"
+                    }`}
+                  >
                     {run.status}
                   </span>
                   {isLatestCompleted && <span className="kv-badge kv-badge-accent">Latest</span>}

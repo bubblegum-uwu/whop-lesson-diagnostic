@@ -428,11 +428,16 @@ export function createApp(config: AppConfig): Express {
   // legacy Whop runs unified). The /legacy-runs routes above stay mounted
   // unchanged for backward compatibility; these /runs routes are the
   // forward path — see http/routes/synthesisSetRuns.ts's own doc comments.
-  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs", knoveraAuth, createListSynthesisSetRunsHandler(projectsDeps));
-  app.post("/api/projects/:projectId/synthesis-sets/:setId/runs", knoveraAuth, createCreateSynthesisSetRunHandler(projectsDeps));
-  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId", knoveraAuth, createGetSynthesisSetRunHandler(projectsDeps));
-  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId/inputs", knoveraAuth, createGetSynthesisSetRunInputsHandler(projectsDeps));
-  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId/output", knoveraAuth, createGetSynthesisSetRunOutputHandler(projectsDeps));
+  // Its own deps object (not projectsDeps) since, as of the Phase 4M
+  // follow-up, POST .../runs needs jobTrigger/geminiModel to actually queue
+  // and trigger execution — the SAME jobTrigger instance as every other
+  // Cloud Run Job phase, never a second one (see server.ts's fifth phase).
+  const synthesisSetRunsDeps = { pool, jobTrigger, geminiModel: config.geminiModel };
+  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs", knoveraAuth, createListSynthesisSetRunsHandler(synthesisSetRunsDeps));
+  app.post("/api/projects/:projectId/synthesis-sets/:setId/runs", knoveraAuth, createCreateSynthesisSetRunHandler(synthesisSetRunsDeps));
+  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId", knoveraAuth, createGetSynthesisSetRunHandler(synthesisSetRunsDeps));
+  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId/inputs", knoveraAuth, createGetSynthesisSetRunInputsHandler(synthesisSetRunsDeps));
+  app.get("/api/projects/:projectId/synthesis-sets/:setId/runs/:runId/output", knoveraAuth, createGetSynthesisSetRunOutputHandler(synthesisSetRunsDeps));
 
   // Phase 4E — the project-aware counterpart to /api/course/synthesis*
   // above: resolves a project's synthesis source via `courses.project_id`

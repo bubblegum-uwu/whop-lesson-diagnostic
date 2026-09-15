@@ -803,6 +803,52 @@ describe("SynthesisSetDetailPage — collection-centric selection (Phase 4L taxo
     expect(screen.getByText("Created Sep 1, 2026 · Completed Sep 1, 2026")).toBeInTheDocument();
     expect(screen.getByText("COMPLETED")).toBeInTheDocument();
   });
+
+  it("Phase 4M follow-up — a RUNNING native Run renders its own distinct status, and Refresh re-fetches Run History on demand", async () => {
+    const runningRun: SynthesisSetRunSummary = {
+      runId: "run-running",
+      kind: "NATIVE",
+      status: "RUNNING",
+      createdAt: "2026-09-14T00:00:00.000Z",
+      startedAt: "2026-09-14T00:01:00.000Z",
+      completedAt: null,
+      model: "gemini-3.8-flash",
+      promptVersion: "v3",
+      sourceCount: 1,
+      readyCount: 1,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: null,
+      processingDurationSeconds: null,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: false,
+    };
+    // Stateful fetch: the first GET .../runs returns the Run as RUNNING, the second (after clicking Refresh) returns it as COMPLETED — simulating the worker finishing between the two reads.
+    let fetchCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/synthesis-sets/1") && (!init || init.method === undefined)) return jsonResponse(200, makeSet());
+      if (url.endsWith("/collections") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, collections: [] });
+      if (url.endsWith("/whop-courses") && (!init || init.method === undefined)) return jsonResponse(200, { courses: [] });
+      if (url.endsWith("/whop-lessons") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, items: [] });
+      if (url.endsWith("/synthesis-sets/1/runs") && (!init || init.method === undefined)) {
+        fetchCount++;
+        return jsonResponse(200, { synthesisSetId: 1, runs: fetchCount === 1 ? [runningRun] : [{ ...runningRun, status: "COMPLETED", completedAt: "2026-09-14T00:05:00.000Z", hasOutput: true }] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderPage();
+    await waitFor(() => expect(screen.getByText("RUNNING")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(screen.getByText("COMPLETED")).toBeInTheDocument());
+    expect(screen.queryByText("RUNNING")).not.toBeInTheDocument();
+  });
 });
 
 describe("SynthesisSetDetailPage — Fine-Tune provenance display (Phase 4L follow-up)", () => {

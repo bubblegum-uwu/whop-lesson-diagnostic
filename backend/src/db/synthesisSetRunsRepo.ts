@@ -35,6 +35,8 @@ export interface SynthesisSetRunRow {
   createdAt: Date;
   startedAt: Date | null;
   completedAt: Date | null;
+  leaseOwner: string | null;
+  leaseExpiresAt: Date | null;
 }
 
 interface RunDbRow {
@@ -58,6 +60,8 @@ interface RunDbRow {
   created_at: Date;
   started_at: Date | null;
   completed_at: Date | null;
+  lease_owner: string | null;
+  lease_expires_at: Date | null;
 }
 
 function mapRow(row: RunDbRow): SynthesisSetRunRow {
@@ -82,13 +86,16 @@ function mapRow(row: RunDbRow): SynthesisSetRunRow {
     createdAt: row.created_at,
     startedAt: row.started_at,
     completedAt: row.completed_at,
+    leaseOwner: row.lease_owner,
+    leaseExpiresAt: row.lease_expires_at,
   };
 }
 
 const COLUMNS = `run_id, synthesis_set_id, project_id, status, model, prompt_version,
   source_count, ready_count, skipped_not_ready_count,
   input_tokens, output_tokens, thinking_tokens, estimated_cost, processing_duration_seconds,
-  error_type, sanitized_error, result_json, created_at, started_at, completed_at`;
+  error_type, sanitized_error, result_json, created_at, started_at, completed_at,
+  lease_owner, lease_expires_at`;
 
 export interface CreateSynthesisSetRunInput {
   synthesisSetId: number;
@@ -191,12 +198,14 @@ export interface SynthesisSetRunLessonInput {
   courseId: number;
   courseTitle: string;
   analysisId: number;
+  /** Added for the Phase 4M follow-up execution engine (see synthesis/gatherSynthesisSetRunInput.ts) — the frozen lesson's own source_url, needed to populate RunSynthesisInput.lessons[].sourceUrl the same way sourceData.ts does for the legacy engine. */
+  sourceUrl: string;
 }
 
 /** The frozen Whop-lesson snapshot for one Run, joined with lesson+course metadata. */
 export async function listRunLessonInputs(db: Queryable, runId: string): Promise<SynthesisSetRunLessonInput[]> {
-  const result = await db.query<{ lesson_id: string; title: string; course_id: string; course_title: string; analysis_id: string }>(
-    `SELECT l.id AS lesson_id, l.title, c.id AS course_id, c.title AS course_title, rl.lesson_analysis_id AS analysis_id
+  const result = await db.query<{ lesson_id: string; title: string; course_id: string; course_title: string; analysis_id: string; source_url: string }>(
+    `SELECT l.id AS lesson_id, l.title, c.id AS course_id, c.title AS course_title, rl.lesson_analysis_id AS analysis_id, l.source_url AS source_url
      FROM synthesis_set_run_lessons rl
      JOIN lessons l ON l.id = rl.lesson_id
      JOIN courses c ON c.id = l.course_id
@@ -210,18 +219,45 @@ export async function listRunLessonInputs(db: Queryable, runId: string): Promise
     courseId: Number(r.course_id),
     courseTitle: r.course_title,
     analysisId: Number(r.analysis_id),
+    sourceUrl: r.source_url,
   }));
 }
 
-/** Fenced only by run_id (no lease/claim mechanics — see the migration's doc comment on why Phase 4M ships the Run model without also shipping an execution worker). Never called automatically today; ready for a future execution stage. */
-export async function markSynthesisSetRunStarted(db: Queryable, runId: string): Promise<boolean> {
-  const result = await db.query(`UPDATE synthesis_set_runs SET status = 'RUNNING', started_at = now() WHERE run_id = $1 AND status = 'QUEUED' RETURNING run_id`, [runId]);
-  return (result.rowCount ?? 0) > 0;
+/** How long a claimed lease is held for, with NO renewal mid-run — see this repo's migration doc comment (1790500000000) for why this is a deliberately simpler mechanism than synthesis_runs' heartbeat-renewed lease: nothing in this phase's executor renews it, so it must generously outlast one execution's real wall-clock time. */
+const LEASE_DURATION = "15 minutes";
+
+/**
+ * Claims exactly one eligible (QUEUED, or RUNNING with an expired lease)
+ * native Run for execution — the exact same `FOR UPDATE SKIP LOCKED`
+ * pattern as synthesisRunsRepo.claimNextEligibleSynthesisRun, scoped to
+ * synthesis_set_runs. Two concurrent callers can never claim the same row:
+ * the row-level lock inside the subquery serializes them, and the second
+ * caller's subquery simply skips the now-locked row and finds nothing (or
+ * the next eligible one) — this is what makes duplicate worker pickup safe
+ * without any extra application-level guard.
+ */
+export async function claimNextEligibleSynthesisSetRun(db: Queryable, leaseOwner: string): Promise<SynthesisSetRunRow | null> {
+  const result = await db.query<RunDbRow>(
+    `UPDATE synthesis_set_runs
+     SET status = 'RUNNING',
+         lease_owner = $1,
+         lease_expires_at = now() + interval '${LEASE_DURATION}',
+         started_at = COALESCE(started_at, now())
+     WHERE run_id = (
+       SELECT run_id FROM synthesis_set_runs
+       WHERE status = 'QUEUED'
+          OR (status = 'RUNNING' AND lease_expires_at IS NOT NULL AND lease_expires_at < now())
+       ORDER BY created_at
+       FOR UPDATE SKIP LOCKED
+       LIMIT 1
+     )
+     RETURNING ${COLUMNS}`,
+    [leaseOwner],
+  );
+  return result.rows[0] ? mapRow(result.rows[0]) : null;
 }
 
 export interface CompleteSynthesisSetRunInput {
-  model: string;
-  promptVersion: string;
   resultJson: unknown;
   inputTokens: number | null;
   outputTokens: number | null;
@@ -230,22 +266,47 @@ export interface CompleteSynthesisSetRunInput {
   processingDurationSeconds: number | null;
 }
 
-export async function markSynthesisSetRunCompleted(db: Queryable, runId: string, input: CompleteSynthesisSetRunInput): Promise<boolean> {
+/**
+ * Fenced by run_id AND lease_owner — exactly like markSynthesisCompleted.
+ * Returns false if this execution's lease was reclaimed (e.g. it ran past
+ * its 15-minute lease and another worker already claimed and possibly
+ * completed/failed it); the caller must discard its result rather than
+ * overwrite whatever is now there. Deliberately never writes model/
+ * prompt_version here — unlike the legacy engine's markSynthesisCompleted,
+ * those are frozen once at Run CREATION time (createSynthesisSetRun), the
+ * same moment every other input is frozen, never decided later by
+ * whichever worker happens to execute the Run.
+ */
+export async function markSynthesisSetRunCompleted(db: Queryable, runId: string, leaseOwner: string, input: CompleteSynthesisSetRunInput): Promise<boolean> {
   const result = await db.query(
     `UPDATE synthesis_set_runs
-     SET status = 'COMPLETED', completed_at = now(), model = $2, prompt_version = $3, result_json = $4,
-         input_tokens = $5, output_tokens = $6, thinking_tokens = $7, estimated_cost = $8, processing_duration_seconds = $9
-     WHERE run_id = $1
+     SET status = 'COMPLETED', completed_at = now(), result_json = $3,
+         input_tokens = $4, output_tokens = $5, thinking_tokens = $6, estimated_cost = $7, processing_duration_seconds = $8,
+         lease_owner = NULL, lease_expires_at = NULL
+     WHERE run_id = $1 AND lease_owner = $2
      RETURNING run_id`,
-    [runId, input.model, input.promptVersion, JSON.stringify(input.resultJson), input.inputTokens, input.outputTokens, input.thinkingTokens, input.estimatedCost, input.processingDurationSeconds],
+    [runId, leaseOwner, JSON.stringify(input.resultJson), input.inputTokens, input.outputTokens, input.thinkingTokens, input.estimatedCost, input.processingDurationSeconds],
   );
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function markSynthesisSetRunFailed(db: Queryable, runId: string, errorType: string, sanitizedError: string): Promise<boolean> {
+/** Fenced by run_id AND lease_owner — exactly like markSynthesisFailed. `leaseOwner` may be null for a Run that failed before ever being claimed (e.g. a test simulating a pre-execution failure) — in that case the fence is `lease_owner IS NULL`, matching a genuinely-never-claimed row exactly, never a wildcard. */
+export async function markSynthesisSetRunFailed(
+  db: Queryable,
+  runId: string,
+  leaseOwner: string | null,
+  errorType: string,
+  sanitizedError: string,
+  processingDurationSeconds: number | null = null,
+): Promise<boolean> {
   const result = await db.query(
-    `UPDATE synthesis_set_runs SET status = 'FAILED', completed_at = now(), error_type = $2, sanitized_error = $3 WHERE run_id = $1 RETURNING run_id`,
-    [runId, errorType, sanitizedError],
+    `UPDATE synthesis_set_runs
+     SET status = 'FAILED', completed_at = now(), error_type = $3, sanitized_error = $4,
+         processing_duration_seconds = COALESCE($5, processing_duration_seconds),
+         lease_owner = NULL, lease_expires_at = NULL
+     WHERE run_id = $1 AND lease_owner IS NOT DISTINCT FROM $2
+     RETURNING run_id`,
+    [runId, leaseOwner, errorType, sanitizedError, processingDurationSeconds],
   );
   return (result.rowCount ?? 0) > 0;
 }

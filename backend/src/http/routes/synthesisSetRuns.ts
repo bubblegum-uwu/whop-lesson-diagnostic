@@ -17,9 +17,15 @@ import {
 import { listLegacyRunIdsForSynthesisSet } from "../../db/synthesisSetLegacyRunsRepo.js";
 import { getSynthesisRunsByIds, getSynthesisRun, type SynthesisRun } from "../../db/synthesisRunsRepo.js";
 import { getCoursePlaybookByRun } from "../../db/coursePlaybooksRepo.js";
+import { SYNTHESIS_PROMPT_VERSION } from "../../synthesis/version.js";
+import type { JobTrigger } from "../../jobs/runJobTrigger.js";
+import { logger } from "../../lib/logger.js";
 
 export interface SynthesisSetRunsRouteDeps {
   pool: Pool;
+  /** Phase 4M follow-up — the SAME jobTrigger as every other Cloud Run Job phase (see http/app.ts) — triggering it after Run creation wakes the same container/execution that also runs worker/synthesisSetRunLoop.ts, never a second Cloud Run Job. */
+  jobTrigger: JobTrigger;
+  geminiModel: string;
 }
 
 const NOT_FOUND_SET_RESPONSE = { error: { message: "Unknown synthesis set.", type: "synthesis_set_not_found" } } as const;
@@ -339,12 +345,23 @@ export function createCreateSynthesisSetRunHandler(deps: SynthesisSetRunsRouteDe
     const run = await createSynthesisSetRun(deps.pool, {
       synthesisSetId: set.id,
       projectId: set.projectId,
-      model: null,
-      promptVersion: null,
+      model: deps.geminiModel,
+      promptVersion: SYNTHESIS_PROMPT_VERSION,
       sources: readySources,
       lessons: readyLessons,
       skippedNotReadyCount,
     });
+
+    // Fire-and-forget, exactly like handleSynthesizeForCourse — the Run is
+    // already durably QUEUED in Postgres; a failed trigger call is
+    // recovered the next time ANY job trigger fires (see
+    // worker/synthesisSetRunLoop.ts, the fifth phase of the same Cloud Run
+    // Job every other trigger call already wakes), never fatal here.
+    try {
+      await deps.jobTrigger.triggerRun();
+    } catch (err) {
+      logger.error("Failed to trigger synthesis-set-run worker execution", { runId: run.runId, message: err instanceof Error ? err.message : String(err) });
+    }
 
     res.status(201).json(nativeRunToSummary(run));
   };
