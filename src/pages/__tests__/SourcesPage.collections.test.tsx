@@ -97,21 +97,10 @@ const ALA_CARTE_WHOP_LESSON = {
 
 function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps {
   return {
-    courseTitle: null,
-    lessons: [],
     connected: true,
-    syncing: false,
-    authRequired: false,
-    lastSyncedAt: null,
-    summary: null,
-    courseErrorMessage: null,
+    providerErrorMessage: null,
     onSignIn: () => {},
-    onSync: () => {},
     onDisconnect: () => {},
-    onEnqueue: () => {},
-    onRetry: () => {},
-    onCancel: () => {},
-    onLoadAnalysis: async () => null,
     identifyState: { phase: "idle" },
     onFindUserId: () => {},
     backendUrl: "https://backend.example.com",

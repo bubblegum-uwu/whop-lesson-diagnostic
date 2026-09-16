@@ -14,8 +14,8 @@ export interface CourseTableProps {
   lastSyncedAt: string | null;
   summary: AnalysisSummary | null;
   onSignIn: () => void;
+  /** Refreshes THIS course's lesson catalog from Whop — course-scoped, never a provider-wide action. Disconnecting Whop is a separate, provider-level control this table never renders (see the Whop provider card on Sources). */
   onSync: () => void;
-  onDisconnect: () => void;
   onEnqueue: (lessonIds: number[], force?: boolean) => void;
   onRetry: (jobId: string) => void;
   onCancel: (jobId: string) => void;
@@ -255,7 +255,6 @@ export function CourseTable({
   summary,
   onSignIn,
   onSync,
-  onDisconnect,
   onEnqueue,
   onRetry,
   onCancel,
@@ -435,14 +434,9 @@ export function CourseTable({
         <h2>{courseTitle ?? "Scarface Trades Mastermind"}</h2>
         <div className="course-actions">
           {connected ? (
-            <>
-              <button onClick={onSync} disabled={syncing}>
-                {syncing ? "Syncing…" : "Sync Course"}
-              </button>
-              <button onClick={onDisconnect} className="link-button">
-                Disconnect Whop
-              </button>
-            </>
+            <button onClick={onSync} disabled={syncing}>
+              {syncing ? "Refreshing…" : "Refresh Course"}
+            </button>
           ) : (
             <button onClick={onSignIn}>Connect Whop to sync</button>
           )}
@@ -464,7 +458,7 @@ export function CourseTable({
       <div className="course-layout">
         <div className="course-main">
       {lessons.length === 0 ? (
-        <p className="hint">No lessons synced yet — click "Sync Course" to discover them.</p>
+        <p className="hint">No lessons synced yet — click "Refresh Course" to discover them.</p>
       ) : (
         <>
           <div className="course-toolbar">

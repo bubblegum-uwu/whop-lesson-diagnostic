@@ -6,6 +6,7 @@ import { getCoursesByProjectId, type CourseRow } from "../../db/coursesRepo.js";
 import { listLessons } from "../../db/lessonsRepo.js";
 import { getSummaryCounts } from "../../db/analysisJobsRepo.js";
 import { getCourseSpendSummary } from "../../db/lessonAnalysesRepo.js";
+import { buildWhopCourseSummaryFields } from "../../pipeline/courseDashboard.js";
 import {
   createYouTubeSource,
   createDiscordSource,
@@ -195,24 +196,7 @@ export async function buildWhopProjectSource(pool: Pool, course: CourseRow): Pro
   const lessons = await listLessons(pool, course.id);
   const lessonIds = lessons.map((l) => l.id);
   const [counts, spend] = await Promise.all([getSummaryCounts(pool, lessonIds), getCourseSpendSummary(pool, lessonIds)]);
-  const analyzedLessonCount = counts.completed + counts.noStrategy;
-  const accountedFor = analyzedLessonCount + counts.processing + counts.queued + counts.failed + counts.authRequired + counts.cancelled;
-
-  return {
-    provider: "WHOP",
-    sourceType: "COURSE",
-    courseId: course.id,
-    externalId: course.whopCourseId,
-    name: course.title,
-    lessonCount: lessons.length,
-    analyzedLessonCount,
-    queuedCount: counts.queued,
-    processingCount: counts.processing,
-    failedCount: counts.failed,
-    remainingCount: Math.max(0, lessons.length - accountedFor),
-    lastSyncedAt: course.lastSyncedAt,
-    totalCost: spend.totalCost,
-  };
+  return buildWhopCourseSummaryFields(course, lessons.length, counts, spend);
 }
 
 /**

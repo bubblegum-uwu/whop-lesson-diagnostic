@@ -20,6 +20,7 @@ import {
   createListWhopCoursesHandler,
   createRefreshWhopCourseHandler,
   createListWhopCourseLessonsHandler,
+  createGetWhopCourseDashboardHandler,
 } from "./routes/whopCourses.js";
 import { createBatchAddWhopLessonsHandler, createListAlaCarteWhopLessonsHandler } from "./routes/whopLessons.js";
 import { createCourseLessonsHandler } from "./routes/courseLessons.js";
@@ -200,6 +201,7 @@ export function createApp(config: AppConfig): Express {
   app.get("/api/projects/:projectId/whop-courses", knoveraAuth, createListWhopCoursesHandler(whopCoursesDeps));
   app.post("/api/projects/:projectId/whop-courses/:courseId/refresh", knoveraAuth, whopConnected, createRefreshWhopCourseHandler(whopCoursesDeps));
   app.get("/api/projects/:projectId/whop-courses/:courseId/lessons", knoveraAuth, createListWhopCourseLessonsHandler(whopCoursesDeps));
+  app.get("/api/projects/:projectId/whop-courses/:courseId/dashboard", knoveraAuth, createGetWhopCourseDashboardHandler(whopCoursesDeps));
   // Phase 4K follow-up — TRUE à-la-carte Whop lesson import, a distinct
   // concept from whop-courses above (see whopLessons.ts's doc comment):
   // importing one lesson URL never connects its course or exposes the

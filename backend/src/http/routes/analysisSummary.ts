@@ -4,6 +4,7 @@ import { getCourseByWhopId } from "../../db/coursesRepo.js";
 import { listLessons } from "../../db/lessonsRepo.js";
 import { getSummaryCounts } from "../../db/analysisJobsRepo.js";
 import { getCourseSpendSummary } from "../../db/lessonAnalysesRepo.js";
+import { buildCourseAnalysisSummary } from "../../pipeline/courseDashboard.js";
 
 export interface AnalysisSummaryRouteDeps {
   pool: Pool;
@@ -23,24 +24,6 @@ export function createAnalysisSummaryHandler(deps: AnalysisSummaryRouteDeps) {
     const counts = await getSummaryCounts(deps.pool, lessonIds);
     const spend = await getCourseSpendSummary(deps.pool, lessonIds);
 
-    const analyzed = counts.completed + counts.noStrategy;
-    const accountedFor = analyzed + counts.processing + counts.queued + counts.failed + counts.authRequired + counts.cancelled;
-
-    res.status(200).json({
-      summary: {
-        totalLessons: lessons.length,
-        analyzed,
-        strategyLessons: counts.completed,
-        noStrategy: counts.noStrategy,
-        processing: counts.processing,
-        queued: counts.queued,
-        failed: counts.failed,
-        authRequired: counts.authRequired,
-        remaining: Math.max(0, lessons.length - accountedFor),
-        totalCost: spend.totalCost,
-        averageCostPerLesson: spend.averageCostPerLesson,
-        averageProcessingSeconds: spend.averageProcessingSeconds,
-      },
-    });
+    res.status(200).json({ summary: buildCourseAnalysisSummary(lessons.length, counts, spend) });
   };
 }

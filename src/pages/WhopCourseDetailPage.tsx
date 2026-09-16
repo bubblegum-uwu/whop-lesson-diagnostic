@@ -2,8 +2,18 @@ import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { useResolvedProject } from "../lib/useResolvedProject";
-import { listWhopCourseLessons, refreshWhopCourse, CatalogApiError, type WhopCourseSummary, type WhopLessonItemSummary } from "../lib/catalogApi";
-import { enqueueAnalysisJobs } from "../lib/courseApi";
+import { getWhopCourseDashboard, refreshWhopCourse, CatalogApiError, type WhopCourseSummary } from "../lib/catalogApi";
+import {
+  getAuthStatus,
+  enqueueAnalysisJobs,
+  retryAnalysisJob,
+  cancelAnalysisJob,
+  getLessonAnalysisJson,
+  subscribeAnalysisEvents,
+  type AnalysisSummary,
+  type CourseLessonSummary,
+} from "../lib/courseApi";
+import { CourseTable } from "../components/CourseTable";
 
 export interface WhopCourseDetailPageProps {
   backendUrl: string | null;
@@ -13,43 +23,40 @@ export interface WhopCourseDetailPageProps {
 type LoadState =
   | { phase: "idle" }
   | { phase: "loading" }
-  | { phase: "loaded"; course: WhopCourseSummary; items: WhopLessonItemSummary[] }
+  | { phase: "loaded"; course: WhopCourseSummary; summary: AnalysisSummary | null; lessons: CourseLessonSummary[] }
   | { phase: "not_found" }
   | { phase: "error"; message: string };
 
-const STATUS_LABELS: Record<string, string> = {
-  NOT_ANALYZED: "Not analyzed",
-  QUEUED: "Queued",
-  ANALYZING: "Analyzing",
-  RETRIEVING: "Retrieving",
-  PREPARING_VIDEO: "Preparing",
-  UPLOADING: "Uploading",
-  VALIDATING: "Validating",
-  ANALYZED: "Analyzed",
-  FAILED: "Failed",
-  AUTH_REQUIRED: "Needs Whop reconnect",
-  CANCELLED: "Cancelled",
-};
-const PENDING_STATUSES = new Set(["QUEUED", "ANALYZING", "RETRIEVING", "PREPARING_VIDEO", "UPLOADING", "VALIDATING"]);
-
 /**
- * "/projects/:projectId/whop-courses/:courseId" — Phase 4K. A Whop
- * course's lessons: checkbox selection + explicit batch enqueue (reusing
- * enqueueAnalysisJobs — the SAME lesson-analysis job machinery the
- * original single-course CourseTable already uses, unchanged), individual
- * Analyze/Retry per lesson. Deliberately does not reuse LessonDetailDrawer
- * here (that component expects the fuller CourseLessonSummary shape this
- * lightweight catalog list intentionally doesn't fetch — see
- * whopCourses.ts's doc comment on why this list stays summary-only);
- * "View" opens the lesson directly on Whop instead.
+ * "/projects/:projectId/whop-courses/:courseId" — Phase 4K follow-up. The
+ * SINGLE home for a Whop course's rich management UI: the same
+ * CourseTable/DashboardSummary/LessonDetailDrawer experience the original
+ * single-course app had, now scoped to whichever course was actually
+ * opened, never a globally "the" course (see catalogApi.ts's
+ * getWhopCourseDashboard doc comment — Phase 4K's multi-course model means
+ * a project can own any number of Whop courses, and opening Course B must
+ * never show Course A's data).
+ *
+ * State resets synchronously on every courseId change (not just inside the
+ * async load) so navigating from one course straight to another never
+ * renders the previous course's lessons while the new course's fetch is
+ * still in flight — the same pattern CourseIntelligence/SynthesisSetDetailPage
+ * already use for their own per-entity state.
+ *
+ * Provider-level Whop actions (Connect/Disconnect) live on the Sources
+ * page's Whop provider card, not here — CourseTable itself no longer
+ * exposes a Disconnect action (see CourseTableProps' doc comment). This
+ * page's own "Connect Whop" entry points send the operator to Sources
+ * rather than duplicating the OAuth-kickoff mechanics App.tsx already owns.
  */
 export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDetailPageProps) {
   const navigate = useNavigate();
   const { courseId: courseIdParam } = useParams<{ courseId: string }>();
   const { state: projectState } = useResolvedProject(backendUrl, knoveraToken);
   const [state, setState] = useState<LoadState>({ phase: "idle" });
-  const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [busy, setBusy] = useState(false);
+  const [connected, setConnected] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
@@ -58,8 +65,11 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
   async function load(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
     setState({ phase: "loading" });
     try {
-      const result = await listWhopCourseLessons(url, token, projectId, courseId, { limit: 200 });
-      if (!cancelledRef.current) setState({ phase: "loaded", course: result.course, items: result.items });
+      const [dashboard, authStatus] = await Promise.all([getWhopCourseDashboard(url, token, projectId, courseId), getAuthStatus(url, token)]);
+      if (cancelledRef.current) return;
+      setState({ phase: "loaded", course: dashboard.course, summary: dashboard.summary, lessons: dashboard.lessons });
+      setConnected(authStatus.connected);
+      setAuthRequired(authStatus.status === "auth_required");
     } catch (err) {
       if (cancelledRef.current) return;
       if (err instanceof CatalogApiError && err.type === "course_not_found") {
@@ -75,6 +85,10 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
       setState({ phase: "idle" });
       return;
     }
+    // Reset synchronously — a courseId change (Course A -> Course B) must
+    // never keep showing Course A's lessons while Course B's fetch is in
+    // flight.
+    setState({ phase: "loading" });
     const cancelledRef = { current: false };
     void load(backendUrl, knoveraToken, resolvedProjectId, cancelledRef);
     return () => {
@@ -83,56 +97,34 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl, knoveraToken, resolvedProjectId, courseId]);
 
+  // Live-notification layer, scoped to this page's own courseId: on any
+  // analysis event, reload THIS course's dashboard — mirrors the app's
+  // former global refresh, but never leaks into a course the operator
+  // isn't currently viewing (a stale event simply causes an extra,
+  // harmless refetch of this course's own already-scoped endpoint).
+  useEffect(() => {
+    if (!backendUrl || !knoveraToken || resolvedProjectId == null || !Number.isInteger(courseId)) return undefined;
+    const url = backendUrl;
+    const token = knoveraToken;
+    const projectId = resolvedProjectId;
+    const unsubscribe = subscribeAnalysisEvents(url, token, () => {
+      void load(url, token, projectId, { current: false });
+    });
+    return unsubscribe;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendUrl, knoveraToken, resolvedProjectId, courseId]);
+
   function refresh() {
     if (backendUrl && knoveraToken && resolvedProjectId != null) void load(backendUrl, knoveraToken, resolvedProjectId, { current: false });
   }
 
-  function toggleSelected(id: number) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  function selectAllUnanalyzed() {
-    if (state.phase !== "loaded") return;
-    setSelected(new Set(state.items.filter((i) => i.status === "NOT_ANALYZED" || i.status === "FAILED").map((i) => i.id)));
-  }
-
-  async function handleAnalyzeSelected() {
-    if (!backendUrl || !knoveraToken || selected.size === 0) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      await enqueueAnalysisJobs(backendUrl, knoveraToken, [...selected]);
-      setSelected(new Set());
-      refresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to start analysis.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleAnalyzeOne(lessonId: number, force = false) {
-    if (!backendUrl || !knoveraToken) return;
-    setBusy(true);
-    setActionError(null);
-    try {
-      await enqueueAnalysisJobs(backendUrl, knoveraToken, [lessonId], force);
-      refresh();
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to start analysis.");
-    } finally {
-      setBusy(false);
-    }
+  function goToSources() {
+    navigate(`/projects/${resolvedProjectId}/sources`);
   }
 
   async function handleRefreshCourse() {
     if (!backendUrl || !knoveraToken || resolvedProjectId == null) return;
-    setBusy(true);
+    setSyncing(true);
     setActionError(null);
     try {
       await refreshWhopCourse(backendUrl, knoveraToken, resolvedProjectId, courseId);
@@ -140,24 +132,54 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
     } catch (err) {
       setActionError(err instanceof CatalogApiError ? err.message : "Failed to refresh course.");
     } finally {
-      setBusy(false);
+      setSyncing(false);
     }
+  }
+
+  async function handleEnqueue(lessonIds: number[], force = false) {
+    if (!backendUrl || !knoveraToken) return;
+    try {
+      await enqueueAnalysisJobs(backendUrl, knoveraToken, lessonIds, force);
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to queue analysis.");
+    }
+  }
+
+  async function handleRetry(jobId: string) {
+    if (!backendUrl || !knoveraToken) return;
+    try {
+      await retryAnalysisJob(backendUrl, knoveraToken, jobId);
+      refresh();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to retry job.");
+    }
+  }
+
+  async function handleCancel(jobId: string) {
+    if (!backendUrl || !knoveraToken) return;
+    await cancelAnalysisJob(backendUrl, knoveraToken, jobId);
+    refresh();
+  }
+
+  async function handleLoadAnalysis(lessonId: number): Promise<unknown | null> {
+    if (!backendUrl || !knoveraToken) return null;
+    return getLessonAnalysisJson(backendUrl, knoveraToken, lessonId);
   }
 
   return (
     <div className="knovera-page">
       <ProjectHeader backendUrl={backendUrl} knoveraToken={knoveraToken} />
 
+      <button type="button" className="link-button" onClick={goToSources}>
+        ← Sources
+      </button>
+
       {state.phase === "loading" && <p className="knovera-sources-loading">Loading course…</p>}
 
       {state.phase === "not_found" && (
         <div className="kv-card knovera-empty-state" role="alert">
           <p>This Whop course doesn't exist.</p>
-          {resolvedProjectId != null && (
-            <button type="button" className="link-button" onClick={() => navigate(`/projects/${resolvedProjectId}/sources`)}>
-              ← Back to Sources
-            </button>
-          )}
         </div>
       )}
 
@@ -168,81 +190,23 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
       )}
 
       {state.phase === "loaded" && (
-        <>
-          <button type="button" className="link-button" onClick={() => navigate(`/projects/${resolvedProjectId}/sources`)}>
-            ← Sources
-          </button>
-
-          <div className="knovera-page-header">
-            <div>
-              <h2 className="knovera-section-title">{state.course.name}</h2>
-              <p className="knovera-project-card-source">
-                Whop Course · {state.items.length} lesson{state.items.length === 1 ? "" : "s"} · {state.course.analyzedLessonCount} analyzed
-              </p>
-            </div>
-            <button type="button" className="link-button" disabled={busy} onClick={() => void handleRefreshCourse()}>
-              {busy ? "Refreshing…" : "Refresh"}
-            </button>
-          </div>
-
-          {actionError && (
-            <div className="kv-card knovera-empty-state" role="alert">
-              <p>{actionError}</p>
-            </div>
-          )}
-
-          <div className="knovera-synthesis-set-detail-actions">
-            <button type="button" className="link-button" onClick={selectAllUnanalyzed}>
-              Select All Unanalyzed
-            </button>
-            <button type="button" disabled={busy || selected.size === 0} onClick={() => void handleAnalyzeSelected()}>
-              {busy ? "Starting…" : `Analyze Selected (${selected.size})`}
-            </button>
-          </div>
-
-          <ul className="knovera-youtube-source-list">
-            {state.items.map((item) => {
-              const isPending = PENDING_STATUSES.has(item.status);
-              const isFailed = item.status === "FAILED";
-              const isDone = item.status === "ANALYZED";
-              const badgeClass = isFailed ? "kv-badge-danger" : isDone ? "kv-badge-accent" : "kv-badge-muted";
-              return (
-                <li key={item.id} className="kv-card knovera-youtube-source-row">
-                  <label className="knovera-synthesis-set-source-checkbox">
-                    <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggleSelected(item.id)} aria-label={`Select ${item.title}`} />
-                    <div className="knovera-youtube-source-main">
-                      {item.chapterTitle && <span className="knovera-youtube-source-label">{item.chapterTitle}</span>}
-                      <span className="knovera-youtube-source-title">{item.title}</span>
-                    </div>
-                  </label>
-                  <div className="knovera-youtube-source-actions">
-                    <span className={`kv-badge ${badgeClass}`}>{STATUS_LABELS[item.status] ?? item.status}</span>
-                    {item.status === "NOT_ANALYZED" && (
-                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeOne(item.id)}>
-                        Analyze
-                      </button>
-                    )}
-                    {isPending && <span className="hint">Working…</span>}
-                    {isFailed && (
-                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeOne(item.id)}>
-                        Retry
-                      </button>
-                    )}
-                    {isDone && (
-                      <button type="button" className="link-button" disabled={busy} onClick={() => void handleAnalyzeOne(item.id, true)}>
-                        Re-analyze
-                      </button>
-                    )}
-                    <a href={item.sourceUrl} target="_blank" rel="noreferrer" className="link-button">
-                      Open on Whop
-                    </a>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        </>
+        <CourseTable
+          courseTitle={state.course.name}
+          lessons={state.lessons}
+          connected={connected}
+          syncing={syncing}
+          authRequired={authRequired}
+          lastSyncedAt={state.course.lastSyncedAt}
+          summary={state.summary}
+          onSignIn={goToSources}
+          onSync={() => void handleRefreshCourse()}
+          onEnqueue={(lessonIds, force) => void handleEnqueue(lessonIds, force)}
+          onRetry={(jobId) => void handleRetry(jobId)}
+          onCancel={(jobId) => void handleCancel(jobId)}
+          onLoadAnalysis={handleLoadAnalysis}
+        />
       )}
+      {actionError && <div className="error-box">{actionError}</div>}
     </div>
   );
 }

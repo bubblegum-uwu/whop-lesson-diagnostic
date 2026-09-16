@@ -15,21 +15,10 @@ function jsonResponse(status: number, body: unknown): Response {
 
 function baseSourcesProps(): SourcesPageProps {
   return {
-    courseTitle: null,
-    lessons: [],
     connected: false,
-    syncing: false,
-    authRequired: false,
-    lastSyncedAt: null,
-    summary: null,
-    courseErrorMessage: null,
+    providerErrorMessage: null,
     onSignIn: () => {},
-    onSync: () => {},
     onDisconnect: () => {},
-    onEnqueue: () => {},
-    onRetry: () => {},
-    onCancel: () => {},
-    onLoadAnalysis: async () => null,
     identifyState: { phase: "idle" },
     onFindUserId: () => {},
     backendUrl: null,

@@ -4,7 +4,7 @@ import { getCourseByWhopId } from "../../db/coursesRepo.js";
 import { listLessons } from "../../db/lessonsRepo.js";
 import { getLatestJobsByLesson } from "../../db/analysisJobsRepo.js";
 import { getLatestByLessons } from "../../db/lessonAnalysesRepo.js";
-import { ruleCounts, aggregateConfidence, extractedStrategiesLabel, knowledgeItemCounts, hasSupportingKnowledge } from "../../pipeline/analysisSummary.js";
+import { buildCourseLessonSummaries } from "../../pipeline/courseDashboard.js";
 
 export interface CourseLessonsRouteDeps {
   pool: Pool;
@@ -41,57 +41,7 @@ export function createCourseLessonsHandler(deps: CourseLessonsRouteDeps) {
         slug: course.slug,
         lastSyncedAt: course.lastSyncedAt,
       },
-      lessons: lessons.map((l) => {
-        const job = jobsByLesson.get(l.id) ?? null;
-        const analysis = analysesByLesson.get(l.id) ?? null;
-
-        return {
-          id: l.id,
-          title: l.title,
-          chapterTitle: l.chapterTitle,
-          chapterOrder: l.chapterOrder,
-          courseOrder: l.courseOrder,
-          durationSeconds: l.durationSeconds,
-          videoAvailable: l.videoAvailable,
-          sourceUrl: l.sourceUrl,
-          lastSyncedAt: l.lastSyncedAt,
-          job: job
-            ? {
-                jobId: job.jobId,
-                status: job.status,
-                currentStage: job.currentStage,
-                stageProgress: job.stageProgress,
-                overallProgress: job.overallProgress,
-                lastHeartbeatAt: job.lastHeartbeatAt,
-                leaseExpiresAt: job.leaseExpiresAt,
-                attemptCount: job.attemptCount,
-                sanitizedError: job.sanitizedError,
-                errorType: job.errorType,
-              }
-            : { jobId: null, status: "NOT_ANALYZED" as const },
-          analysis: analysis
-            ? {
-                analysisId: analysis.analysisId,
-                strategyFound: analysis.strategyFound,
-                extractedStrategiesLabel: extractedStrategiesLabel(analysis.validatedJson),
-                ruleCounts: ruleCounts(analysis.validatedJson),
-                confidence: aggregateConfidence(analysis.validatedJson),
-                summary: analysis.analysisSummary,
-                // Phase 3.5: a lesson can have strategyFound=false while still
-                // carrying real supporting knowledge (risk management, sizing,
-                // psychology, ...) — this lets the Course table show that
-                // distinctly from a lesson with genuinely nothing extracted,
-                // without the frontend having to re-derive it from raw counts.
-                hasSupportingKnowledge: hasSupportingKnowledge(analysis.validatedJson),
-                knowledgeItemCounts: knowledgeItemCounts(analysis.validatedJson),
-                schemaVersion: analysis.schemaVersion,
-                estimatedCost: analysis.estimatedCost,
-                processingDurationSeconds: analysis.processingDurationSeconds,
-                completedAt: analysis.completedAt,
-              }
-            : null,
-        };
-      }),
+      lessons: buildCourseLessonSummaries(lessons, jobsByLesson, analysesByLesson),
     });
   };
 }
