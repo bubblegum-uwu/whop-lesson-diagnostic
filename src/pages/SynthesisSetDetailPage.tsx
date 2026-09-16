@@ -168,7 +168,7 @@ function formatDateTime(iso: string | null): string {
  * expanded. Never renders a raw object: every field here is one already-
  * named value on SynthesisSetRunSummary, formatted plainly.
  */
-function RunSummaryPanel({ run, isLatestCompleted }: { run: SynthesisSetRunSummary; isLatestCompleted: boolean }) {
+function RunSummaryPanel({ run }: { run: SynthesisSetRunSummary }) {
   return (
     <div className="dashboard-tiles">
       <div className="dashboard-tile">
@@ -176,10 +176,7 @@ function RunSummaryPanel({ run, isLatestCompleted }: { run: SynthesisSetRunSumma
         <div className="dashboard-tile-label">Status</div>
       </div>
       <div className="dashboard-tile">
-        <div className="dashboard-tile-value">
-          {run.kind === "LEGACY_WHOP" ? "Legacy" : "Native"}
-          {isLatestCompleted && " · Latest"}
-        </div>
+        <div className="dashboard-tile-value">{run.kind === "LEGACY_WHOP" ? "Legacy" : "Native"}</div>
         <div className="dashboard-tile-label">Kind</div>
       </div>
       <div className="dashboard-tile">
@@ -943,7 +940,11 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
                     {run.status}
                   </span>
                   {isLatestCompleted && <span className="kv-badge kv-badge-accent">Latest</span>}
-                  {run.kind === "LEGACY_WHOP" && <span className="kv-badge kv-badge-muted">Legacy</span>}
+                  {run.kind === "LEGACY_WHOP" ? (
+                    <span className="kv-badge kv-badge-muted">Legacy</span>
+                  ) : (
+                    <span className="kv-badge kv-badge-muted">Native</span>
+                  )}
                   <span className="knovera-youtube-source-title">
                     Created {formatDate(run.createdAt)} · Completed {formatDate(run.completedAt)}
                   </span>
@@ -971,7 +972,7 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
                 {expanded && (
                   <div className="knovera-synthesis-run-detail">
                     <div className="kv-card knovera-empty-state">
-                      <RunSummaryPanel run={run} isLatestCompleted={isLatestCompleted} />
+                      <RunSummaryPanel run={run} />
                     </div>
                     {runDetailError && (
                       <p role="alert" className="hint">

@@ -1665,3 +1665,95 @@ describe("SynthesisSetDetailPage — Run History Synthesis Result Viewer (Phase 
     URL.revokeObjectURL = originalRevokeObjectURL;
   });
 });
+
+/**
+ * Phase 4M follow-up (PR #36 cleanup round 2) — Status, Latest, and Kind
+ * must stay three visually separate concepts, never merged into one label
+ * or one text value. Round 1 fixed the expanded Kind tile by folding
+ * "Latest" into its value ("Legacy · Latest") — still a merge, just in a
+ * different spot. This round removes that merge entirely and makes the
+ * collapsed card's kind badge symmetric (Legacy already had one; Native
+ * did not).
+ */
+describe("SynthesisSetDetailPage — Run History Status/Latest/Kind separation (PR #36 cleanup round 2)", () => {
+  function runSummary(overrides: Partial<SynthesisSetRunSummary> = {}): SynthesisSetRunSummary {
+    return {
+      runId: "run-1",
+      kind: "NATIVE",
+      status: "COMPLETED",
+      createdAt: "2026-09-07T00:00:00.000Z",
+      startedAt: "2026-09-07T00:01:00.000Z",
+      completedAt: "2026-09-07T01:00:00.000Z",
+      model: "gemini-3.8-flash",
+      promptVersion: "v1",
+      sourceCount: 2,
+      readyCount: 2,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: 0.33,
+      processingDurationSeconds: 120,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: false,
+      ...overrides,
+    };
+  }
+
+  it("1: the latest completed NATIVE Run shows 'Latest' and 'Native' as separate collapsed-card badges", async () => {
+    const run = runSummary();
+    stubFetch({ set: makeSet(), runs: [run] });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+    expect(screen.getByText("Latest")).toBeInTheDocument();
+    expect(screen.getByText("Native")).toBeInTheDocument();
+  });
+
+  it("2: a LEGACY_WHOP Run shows a 'Legacy' collapsed-card badge", async () => {
+    const run = runSummary({ kind: "LEGACY_WHOP" });
+    stubFetch({ set: makeSet(), runs: [run] });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+    expect(screen.getByText("Legacy")).toBeInTheDocument();
+    expect(screen.queryByText("Native")).not.toBeInTheDocument();
+  });
+
+  it("3: the expanded Run Summary Kind tile always has the label 'Kind', with value 'Legacy' or 'Native'", async () => {
+    const nativeRun = runSummary();
+    stubFetch({ set: makeSet(), runs: [nativeRun], runInputs: { "run-1": { kind: "NATIVE", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await waitFor(() => expect(screen.getByText("Kind")).toBeInTheDocument());
+    const kindTile = screen.getByText("Kind").closest(".dashboard-tile")!;
+    expect(kindTile).toHaveTextContent("Native");
+  });
+
+  it("4: the expanded Kind tile value never contains 'Latest', even for the latest completed Run", async () => {
+    const run = runSummary();
+    stubFetch({ set: makeSet(), runs: [run], runInputs: { "run-1": { kind: "NATIVE", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await waitFor(() => expect(screen.getByText("Kind")).toBeInTheDocument());
+    const kindTile = screen.getByText("Kind").closest(".dashboard-tile")!;
+    expect(kindTile.textContent).not.toMatch(/Latest/);
+    expect(kindTile.textContent).not.toContain("Legacy · Latest");
+    expect(kindTile.textContent).not.toContain("Native · Latest");
+    // The collapsed card's own separate Latest badge is unaffected.
+    expect(screen.getByText("Latest")).toBeInTheDocument();
+  });
+
+  it("5: a historical (non-latest) LEGACY_WHOP Run's expanded Kind tile shows 'Legacy' with no Latest badge anywhere on that card", async () => {
+    const oldRun = runSummary({ runId: "run-old", kind: "LEGACY_WHOP", createdAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T01:00:00.000Z" });
+    const latestRun = runSummary({ runId: "run-latest", kind: "NATIVE", createdAt: "2026-09-01T00:00:00.000Z", completedAt: "2026-09-01T01:00:00.000Z" });
+    stubFetch({ set: makeSet(), runs: [latestRun, oldRun], runInputs: { "run-old": { kind: "LEGACY_WHOP", inputs: [] } } });
+    renderPage();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "View Details" })).toHaveLength(2));
+    // The second row is the older, non-latest Legacy run.
+    fireEvent.click(screen.getAllByRole("button", { name: "View Details" })[1]);
+    await waitFor(() => expect(screen.getByText("Kind")).toBeInTheDocument());
+    const kindTile = screen.getByText("Kind").closest(".dashboard-tile")!;
+    expect(kindTile).toHaveTextContent("Legacy");
+    expect(kindTile.textContent).not.toMatch(/Latest/);
+  });
+});
