@@ -1322,11 +1322,438 @@ describe("SynthesisSetDetailPage — Pre-4M Whop lesson membership + legacy hist
     await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "View Details" }));
 
+    // Frozen Inputs / Provenance is collapsed by default — expand it to see the actual rows.
+    fireEvent.click(await screen.findByRole("button", { name: "Show Inputs" }));
     await waitFor(() => expect(screen.getByText("Eligible Collection Video")).toBeInTheDocument());
     expect(screen.getByText("analysis #9001")).toBeInTheDocument();
     expect(screen.getByText("Lesson A")).toBeInTheDocument();
     expect(screen.getByText("analysis #9002")).toBeInTheDocument();
     expect(screen.getByText("The Trading Accelerator")).toBeInTheDocument();
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/runs/run-native/inputs"))).toBe(true);
+  });
+});
+
+/**
+ * Phase 4M follow-up — "Improve Phase 4M Run History Synthesis Output UX".
+ * Run History's "View Details" used to dump `JSON.stringify(output)` as
+ * the primary view; this replaces it with the same human-readable
+ * SynthesisResultViewer for both LEGACY_WHOP and NATIVE Runs. Covers the
+ * 26 numbered test requirements from that task.
+ */
+describe("SynthesisSetDetailPage — Run History Synthesis Result Viewer (Phase 4M follow-up)", () => {
+  const rule = {
+    description: "Never enter without confirmation.",
+    classification: "explicit" as const,
+    supportLevel: "MULTI_SOURCE" as const,
+    supportCount: 3,
+    sources: [],
+    conflictSources: [],
+    exceptions: [],
+    numericalValues: [],
+    scope: null,
+  };
+
+  const legacyOutput = {
+    title: "Scalping Playbook",
+    coreFramework: { sections: [{ key: "risk", title: "Risk Management", rules: [rule] }] },
+    playbook: {
+      title: "Scalping Playbook",
+      sections: [{ key: "core_setup", title: "Core Setup", content: "Wait for a retest of VWAP before entering." }],
+      conflictsAndAmbiguities: [],
+    },
+    decisionFramework: { readableSteps: ["Check HTF trend.", "Wait for VWAP retest.", "Enter on confirmation."] },
+  };
+
+  const canonicalStrategy = {
+    name: "Break & Retest",
+    purpose: "Trade the retest of a broken level.",
+    markets: ["ES"],
+    timeframes: ["5m"],
+    marketContext: [],
+    prerequisites: [],
+    setup: [],
+    entryRules: [rule],
+    confirmationRules: [],
+    stopLossRules: [],
+    profitTargetRules: [],
+    tradeManagementRules: [],
+    invalidationRules: [],
+    noTradeConditions: [],
+    visualDiscretionaryRules: [],
+    riskManagementRules: [],
+    positionSizingRules: [],
+    scalingInRules: [],
+    scalingOutRules: [],
+    runnerManagementRules: [],
+    warnings: [],
+    instructorPreferences: [],
+    variants: [],
+    examples: [],
+    ambiguities: [],
+    conflicts: [],
+    sourceLessonIds: [1],
+    supportingKnowledgeLessonIds: [],
+  };
+
+  const nativeOutput = {
+    clusters: [
+      {
+        cluster: { clusterKey: "c1", proposedCanonicalName: "Break & Retest", memberInstanceIds: [1, 2], similarityRationale: "", differencesNotes: "" },
+        canonicalStrategy,
+      },
+    ],
+    coreFramework: { sections: [] },
+    playbook: {
+      title: "Native Playbook",
+      sections: [{ key: "core_setup", title: "Core Setup", content: "Native content." }],
+      conflictsAndAmbiguities: [],
+    },
+    decisionFramework: { readableSteps: ["Step one.", "Step two."] },
+  };
+
+  function completedRun(overrides: Partial<SynthesisSetRunSummary> = {}): SynthesisSetRunSummary {
+    return {
+      runId: "run-1",
+      kind: "LEGACY_WHOP",
+      status: "COMPLETED",
+      createdAt: "2026-09-07T00:00:00.000Z",
+      startedAt: "2026-09-07T00:01:00.000Z",
+      completedAt: "2026-09-07T01:00:00.000Z",
+      model: "gemini-3.8-flash",
+      promptVersion: "v1",
+      sourceCount: 2,
+      readyCount: 2,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: 0.33,
+      processingDurationSeconds: 120,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: true,
+      ...overrides,
+    };
+  }
+
+  const inputRows = [{ kind: "SOURCE" as const, id: 201, title: "Eligible Collection Video", provider: "YOUTUBE", analysisId: 9001 }];
+
+  it("1: a completed LEGACY_WHOP Run renders human-readable Playbook sections, not raw JSON", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    expect(await screen.findByText("Scalping Playbook")).toBeInTheDocument();
+    expect(screen.getByText("Wait for a retest of VWAP before entering.")).toBeInTheDocument();
+  });
+
+  it("2: raw JSON is not visible by default for a completed LEGACY_WHOP Run", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("Scalping Playbook");
+    expect(screen.queryByText(/"coreFramework"/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View Raw JSON" })).toBeInTheDocument();
+  });
+
+  it("3: Core Framework renders readable sections and rules for a LEGACY_WHOP Run", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("Scalping Playbook");
+    fireEvent.click(screen.getByRole("button", { name: "Core Framework" }));
+    expect(await screen.findByText("Risk Management")).toBeInTheDocument();
+    expect(screen.getByText("Never enter without confirmation.")).toBeInTheDocument();
+  });
+
+  it("4: Decision Framework readable steps render for a LEGACY_WHOP Run", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("Scalping Playbook");
+    fireEvent.click(screen.getByRole("button", { name: "Decision Framework" }));
+    expect(await screen.findByText("Check HTF trend.")).toBeInTheDocument();
+    expect(screen.getByText("Wait for VWAP retest.")).toBeInTheDocument();
+    expect(screen.getByText("Enter on confirmation.")).toBeInTheDocument();
+  });
+
+  it("5: frozen input provenance still shows exact analysis IDs for a LEGACY_WHOP Run", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show Inputs" }));
+    expect(await screen.findByText("Eligible Collection Video")).toBeInTheDocument();
+    expect(screen.getByText("analysis #9001")).toBeInTheDocument();
+  });
+
+  it("6: frozen inputs are collapsed by default", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("Frozen Inputs / Provenance");
+    expect(screen.queryByText("Eligible Collection Video")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show Inputs" })).toBeInTheDocument();
+  });
+
+  it("7: expanding frozen inputs reveals the actual immutable input rows", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Show Inputs" }));
+    expect(await screen.findByText("Eligible Collection Video")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Hide Inputs" }));
+    expect(screen.queryByText("Eligible Collection Video")).not.toBeInTheDocument();
+  });
+
+  it("8: a completed NATIVE Run renders human-readable synthesis output", async () => {
+    const run = completedRun({ runId: "run-native", kind: "NATIVE" });
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-native": { kind: "NATIVE", result: nativeOutput } }, runInputs: { "run-native": { kind: "NATIVE", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    expect(await screen.findByText("Native Playbook")).toBeInTheDocument();
+    expect(screen.getByText("Native content.")).toBeInTheDocument();
+  });
+
+  it("9: native clusters/canonical strategies render as a readable tab and never crash", async () => {
+    const run = completedRun({ runId: "run-native", kind: "NATIVE" });
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-native": { kind: "NATIVE", result: nativeOutput } }, runInputs: { "run-native": { kind: "NATIVE", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("Native Playbook");
+    fireEvent.click(screen.getByRole("button", { name: "Canonical Strategies" }));
+    expect(await screen.findByText("Break & Retest")).toBeInTheDocument();
+  });
+
+  it("10: missing optional fields (no playbook.sections, no decisionFramework.readableSteps) never crash the viewer", async () => {
+    const run = completedRun({ runId: "run-sparse" });
+    const sparseOutput = { title: "Sparse", coreFramework: { sections: [] }, playbook: { title: "Sparse Playbook" }, decisionFramework: { nodes: [] } };
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-sparse": { kind: "LEGACY_WHOP", result: sparseOutput } }, runInputs: { "run-sparse": { kind: "LEGACY_WHOP", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    expect(await screen.findByText("Sparse Playbook")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Decision Framework" }));
+    expect(await screen.findByText("No decision framework is available for this run.")).toBeInTheDocument();
+  });
+
+  it("11: native and legacy Runs coexist in the same Run History list, each viewable", async () => {
+    const legacyRun = completedRun({ runId: "run-legacy" });
+    const nativeRun = completedRun({ runId: "run-native", kind: "NATIVE", createdAt: "2026-09-08T00:00:00.000Z" });
+    stubFetch({
+      set: makeSet(),
+      runs: [nativeRun, legacyRun],
+      runOutputs: { "run-legacy": { kind: "LEGACY_WHOP", result: legacyOutput }, "run-native": { kind: "NATIVE", result: nativeOutput } },
+      runInputs: { "run-legacy": { kind: "LEGACY_WHOP", inputs: inputRows }, "run-native": { kind: "NATIVE", inputs: inputRows } },
+    });
+    renderPage();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "View Details" })).toHaveLength(2));
+    fireEvent.click(screen.getAllByRole("button", { name: "View Details" })[0]);
+    expect(await screen.findByText("Native Playbook")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View Details" }));
+    expect(await screen.findByText("Scalping Playbook")).toBeInTheDocument();
+  });
+
+  it("12/13/14: raw JSON is available only after an explicit Advanced action, shows the real output, and hides again on toggle", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("Scalping Playbook");
+    expect(screen.queryByText(/"coreFramework"/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "View Raw JSON" }));
+    expect(await screen.findByText(/"coreFramework"/)).toBeInTheDocument();
+    expect(screen.getByText(/"risk"/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide Raw JSON" }));
+    expect(screen.queryByText(/"coreFramework"/)).not.toBeInTheDocument();
+  });
+
+  it("15: a FAILED Run's expanded detail still shows its sanitized error and never attempts to render synthesis tabs", async () => {
+    const run = completedRun({ status: "FAILED", hasOutput: false, errorType: "gemini_error", sanitizedError: "Synthesis failed.", estimatedCost: null });
+    stubFetch({ set: makeSet(), runs: [run], runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    expect(await screen.findByText("Frozen Inputs / Provenance")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Playbook" })).not.toBeInTheDocument();
+    expect(screen.queryByText("No output yet.")).not.toBeInTheDocument();
+  });
+
+  it("16: a QUEUED Run's expanded detail renders without output and without crashing", async () => {
+    const run = completedRun({ status: "QUEUED", hasOutput: false, completedAt: null, startedAt: null, estimatedCost: null, processingDurationSeconds: null });
+    stubFetch({ set: makeSet(), runs: [run], runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    expect(await screen.findByText("No output yet.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Playbook" })).not.toBeInTheDocument();
+  });
+
+  it("17: a RUNNING Run's expanded detail renders without output and without crashing", async () => {
+    const run = completedRun({ status: "RUNNING", hasOutput: false, completedAt: null, estimatedCost: null, processingDurationSeconds: null });
+    stubFetch({ set: makeSet(), runs: [run], runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    expect(await screen.findByText("No output yet.")).toBeInTheDocument();
+  });
+
+  it("18: a Run with hasOutput: false never fetches the output endpoint", async () => {
+    const run = completedRun({ status: "RUNNING", hasOutput: false, completedAt: null });
+    const fetchMock = stubFetch({ set: makeSet(), runs: [run], runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("No output yet.");
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/output"))).toBe(false);
+  });
+
+  it("19/20: Download JSON and Download Markdown are available for the Playbook when playbook data exists", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    const createObjectURL = vi.fn((_obj: Blob | MediaSource) => "blob:mock-url");
+    URL.createObjectURL = createObjectURL as typeof URL.createObjectURL;
+    URL.revokeObjectURL = vi.fn();
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("Scalping Playbook");
+
+    fireEvent.click(screen.getByRole("button", { name: "Download JSON" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download Markdown" }));
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    const jsonBlob = createObjectURL.mock.calls[0][0] as Blob;
+    expect(jsonBlob.type).toBe("application/json");
+    const mdBlob = createObjectURL.mock.calls[1][0] as Blob;
+    expect(mdBlob.type).toBe("text/markdown");
+    expect(clickSpy).toHaveBeenCalledTimes(2);
+
+    clickSpy.mockRestore();
+    URL.createObjectURL = originalCreateObjectURL;
+    URL.revokeObjectURL = originalRevokeObjectURL;
+  });
+
+  it("21: Download Full Run JSON is available for a completed Run with output", async () => {
+    const run = completedRun();
+    stubFetch({ set: makeSet(), runs: [run], runOutputs: { "run-1": { kind: "LEGACY_WHOP", result: legacyOutput } }, runInputs: { "run-1": { kind: "LEGACY_WHOP", inputs: inputRows } } });
+
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    const createObjectURL = vi.fn((_obj: Blob | MediaSource) => "blob:mock-url");
+    URL.createObjectURL = createObjectURL as typeof URL.createObjectURL;
+    URL.revokeObjectURL = vi.fn();
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await screen.findByText("Scalping Playbook");
+    fireEvent.click(screen.getByRole("button", { name: "Download Full Run JSON" }));
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+    const blob = createObjectURL.mock.calls[0][0] as Blob;
+    const parsed = JSON.parse(await blob.text());
+    expect(parsed.title).toBe("Scalping Playbook");
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+
+    clickSpy.mockRestore();
+    URL.createObjectURL = originalCreateObjectURL;
+    URL.revokeObjectURL = originalRevokeObjectURL;
+  });
+});
+
+/**
+ * Phase 4M follow-up (PR #36 cleanup round 2) — Status, Latest, and Kind
+ * must stay three visually separate concepts, never merged into one label
+ * or one text value. Round 1 fixed the expanded Kind tile by folding
+ * "Latest" into its value ("Legacy · Latest") — still a merge, just in a
+ * different spot. This round removes that merge entirely and makes the
+ * collapsed card's kind badge symmetric (Legacy already had one; Native
+ * did not).
+ */
+describe("SynthesisSetDetailPage — Run History Status/Latest/Kind separation (PR #36 cleanup round 2)", () => {
+  function runSummary(overrides: Partial<SynthesisSetRunSummary> = {}): SynthesisSetRunSummary {
+    return {
+      runId: "run-1",
+      kind: "NATIVE",
+      status: "COMPLETED",
+      createdAt: "2026-09-07T00:00:00.000Z",
+      startedAt: "2026-09-07T00:01:00.000Z",
+      completedAt: "2026-09-07T01:00:00.000Z",
+      model: "gemini-3.8-flash",
+      promptVersion: "v1",
+      sourceCount: 2,
+      readyCount: 2,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: 0.33,
+      processingDurationSeconds: 120,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: false,
+      ...overrides,
+    };
+  }
+
+  it("1: the latest completed NATIVE Run shows 'Latest' and 'Native' as separate collapsed-card badges", async () => {
+    const run = runSummary();
+    stubFetch({ set: makeSet(), runs: [run] });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+    expect(screen.getByText("Latest")).toBeInTheDocument();
+    expect(screen.getByText("Native")).toBeInTheDocument();
+  });
+
+  it("2: a LEGACY_WHOP Run shows a 'Legacy' collapsed-card badge", async () => {
+    const run = runSummary({ kind: "LEGACY_WHOP" });
+    stubFetch({ set: makeSet(), runs: [run] });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+    expect(screen.getByText("Legacy")).toBeInTheDocument();
+    expect(screen.queryByText("Native")).not.toBeInTheDocument();
+  });
+
+  it("3: the expanded Run Summary Kind tile always has the label 'Kind', with value 'Legacy' or 'Native'", async () => {
+    const nativeRun = runSummary();
+    stubFetch({ set: makeSet(), runs: [nativeRun], runInputs: { "run-1": { kind: "NATIVE", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await waitFor(() => expect(screen.getByText("Kind")).toBeInTheDocument());
+    const kindTile = screen.getByText("Kind").closest(".dashboard-tile")!;
+    expect(kindTile).toHaveTextContent("Native");
+  });
+
+  it("4: the expanded Kind tile value never contains 'Latest', even for the latest completed Run", async () => {
+    const run = runSummary();
+    stubFetch({ set: makeSet(), runs: [run], runInputs: { "run-1": { kind: "NATIVE", inputs: [] } } });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View Details" }));
+    await waitFor(() => expect(screen.getByText("Kind")).toBeInTheDocument());
+    const kindTile = screen.getByText("Kind").closest(".dashboard-tile")!;
+    expect(kindTile.textContent).not.toMatch(/Latest/);
+    expect(kindTile.textContent).not.toContain("Legacy · Latest");
+    expect(kindTile.textContent).not.toContain("Native · Latest");
+    // The collapsed card's own separate Latest badge is unaffected.
+    expect(screen.getByText("Latest")).toBeInTheDocument();
+  });
+
+  it("5: a historical (non-latest) LEGACY_WHOP Run's expanded Kind tile shows 'Legacy' with no Latest badge anywhere on that card", async () => {
+    const oldRun = runSummary({ runId: "run-old", kind: "LEGACY_WHOP", createdAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T01:00:00.000Z" });
+    const latestRun = runSummary({ runId: "run-latest", kind: "NATIVE", createdAt: "2026-09-01T00:00:00.000Z", completedAt: "2026-09-01T01:00:00.000Z" });
+    stubFetch({ set: makeSet(), runs: [latestRun, oldRun], runInputs: { "run-old": { kind: "LEGACY_WHOP", inputs: [] } } });
+    renderPage();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "View Details" })).toHaveLength(2));
+    // The second row is the older, non-latest Legacy run.
+    fireEvent.click(screen.getAllByRole("button", { name: "View Details" })[1]);
+    await waitFor(() => expect(screen.getByText("Kind")).toBeInTheDocument());
+    const kindTile = screen.getByText("Kind").closest(".dashboard-tile")!;
+    expect(kindTile).toHaveTextContent("Legacy");
+    expect(kindTile.textContent).not.toMatch(/Latest/);
   });
 });

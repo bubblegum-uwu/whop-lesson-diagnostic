@@ -42,6 +42,8 @@ import {
   type SynthesisSetRunSummary,
   type SynthesisSetRunInputRow,
 } from "../lib/synthesisSetRunsApi";
+import { SynthesisResultViewer } from "../components/synthesisResult/SynthesisResultViewer";
+import { formatCost, formatDurationSeconds, slugify } from "../components/synthesisResult/format";
 
 export interface SynthesisSetDetailPageProps {
   backendUrl: string | null;
@@ -153,6 +155,108 @@ async function loadFineTuneRowsForCourse(backendUrl: string, knoveraToken: strin
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
   return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+/** Run Summary's compact metadata — date AND time, unlike formatDate's date-only collapsed-card label above. */
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+/**
+ * Phase 4M follow-up — compact Run metadata, shown once a Run's detail is
+ * expanded. Never renders a raw object: every field here is one already-
+ * named value on SynthesisSetRunSummary, formatted plainly.
+ */
+function RunSummaryPanel({ run }: { run: SynthesisSetRunSummary }) {
+  return (
+    <div className="dashboard-tiles">
+      <div className="dashboard-tile">
+        <div className="dashboard-tile-value">{run.status}</div>
+        <div className="dashboard-tile-label">Status</div>
+      </div>
+      <div className="dashboard-tile">
+        <div className="dashboard-tile-value">{run.kind === "LEGACY_WHOP" ? "Legacy" : "Native"}</div>
+        <div className="dashboard-tile-label">Kind</div>
+      </div>
+      <div className="dashboard-tile">
+        <div className="dashboard-tile-value">{formatDateTime(run.createdAt)}</div>
+        <div className="dashboard-tile-label">Created</div>
+      </div>
+      {run.startedAt && (
+        <div className="dashboard-tile">
+          <div className="dashboard-tile-value">{formatDateTime(run.startedAt)}</div>
+          <div className="dashboard-tile-label">Started</div>
+        </div>
+      )}
+      {run.completedAt && (
+        <div className="dashboard-tile">
+          <div className="dashboard-tile-value">{formatDateTime(run.completedAt)}</div>
+          <div className="dashboard-tile-label">Completed</div>
+        </div>
+      )}
+      <div className="dashboard-tile">
+        <div className="dashboard-tile-value">{run.readyCount}</div>
+        <div className="dashboard-tile-label">Inputs</div>
+      </div>
+      {run.skippedNotReadyCount > 0 && (
+        <div className="dashboard-tile">
+          <div className="dashboard-tile-value">{run.skippedNotReadyCount}</div>
+          <div className="dashboard-tile-label">Skipped (not ready)</div>
+        </div>
+      )}
+      <div className="dashboard-tile">
+        <div className="dashboard-tile-value">{run.model ?? "—"}</div>
+        <div className="dashboard-tile-label">Model</div>
+      </div>
+      <div className="dashboard-tile">
+        <div className="dashboard-tile-value">{run.promptVersion ?? "—"}</div>
+        <div className="dashboard-tile-label">Prompt Version</div>
+      </div>
+      <div className="dashboard-tile">
+        <div className="dashboard-tile-value">{formatDurationSeconds(run.processingDurationSeconds)}</div>
+        <div className="dashboard-tile-label">Duration</div>
+      </div>
+      <div className="dashboard-tile">
+        <div className="dashboard-tile-value">{formatCost(run.estimatedCost)}</div>
+        <div className="dashboard-tile-label">Estimated Cost</div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Phase 4M follow-up — the Run's frozen input provenance, collapsed by
+ * default (a completed native Run may freeze dozens of inputs — showing
+ * every row immediately would dwarf the Synthesis Result above it). Purely
+ * a display toggle: the exact immutable rows underneath never change.
+ */
+function FrozenInputsSection({ inputs, loading }: { inputs: SynthesisSetRunInputRow[] | undefined; loading: boolean }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="kv-card knovera-empty-state">
+      <div className="knovera-page-header">
+        <h3 className="knovera-section-title">Frozen Inputs / Provenance</h3>
+        <button type="button" className="link-button" onClick={() => setOpen((v) => !v)} disabled={loading}>
+          {open ? "Hide Inputs" : "Show Inputs"}
+        </button>
+      </div>
+      <p className="hint">{loading && !inputs ? "Loading…" : `${inputs?.length ?? 0} input${(inputs?.length ?? 0) === 1 ? "" : "s"}`}</p>
+      {open && inputs && (
+        <ul className="knovera-youtube-source-list">
+          {inputs.map((input) => (
+            <li key={`${input.kind}-${input.id}`} className="kv-card knovera-youtube-source-row">
+              <div className="knovera-youtube-source-main">
+                <span className="knovera-youtube-source-label">{input.kind === "WHOP_LESSON" ? (input.courseTitle ?? "Whop") : input.provider}</span>
+                <span className="knovera-youtube-source-title">{input.title ?? "Untitled"}</span>
+              </div>
+              <span className="hint">analysis #{input.analysisId}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -836,7 +940,11 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
                     {run.status}
                   </span>
                   {isLatestCompleted && <span className="kv-badge kv-badge-accent">Latest</span>}
-                  {run.kind === "LEGACY_WHOP" && <span className="kv-badge kv-badge-muted">Legacy</span>}
+                  {run.kind === "LEGACY_WHOP" ? (
+                    <span className="kv-badge kv-badge-muted">Legacy</span>
+                  ) : (
+                    <span className="kv-badge kv-badge-muted">Native</span>
+                  )}
                   <span className="knovera-youtube-source-title">
                     Created {formatDate(run.createdAt)} · Completed {formatDate(run.completedAt)}
                   </span>
@@ -862,36 +970,30 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
                   </button>
                 </div>
                 {expanded && (
-                  <div className="kv-card knovera-empty-state">
-                    {runDetailLoading && !inputs && <p className="hint">Loading run details…</p>}
+                  <div className="knovera-synthesis-run-detail">
+                    <div className="kv-card knovera-empty-state">
+                      <RunSummaryPanel run={run} />
+                    </div>
                     {runDetailError && (
                       <p role="alert" className="hint">
                         {runDetailError}
                       </p>
                     )}
-                    {inputs && (
+                    {run.status === "FAILED" ? null : !run.hasOutput ? (
+                      <p className="hint">No output yet.</p>
+                    ) : runDetailLoading && output == null ? (
+                      <p className="hint">Loading run details…</p>
+                    ) : output != null ? (
                       <>
-                        <h3 className="knovera-section-title">Inputs (frozen at Run creation)</h3>
-                        <ul className="knovera-youtube-source-list">
-                          {inputs.map((input) => (
-                            <li key={`${input.kind}-${input.id}`} className="kv-card knovera-youtube-source-row">
-                              <div className="knovera-youtube-source-main">
-                                <span className="knovera-youtube-source-label">{input.kind === "WHOP_LESSON" ? (input.courseTitle ?? "Whop") : input.provider}</span>
-                                <span className="knovera-youtube-source-title">{input.title ?? "Untitled"}</span>
-                              </div>
-                              <span className="hint">analysis #{input.analysisId}</span>
-                            </li>
-                          ))}
-                        </ul>
+                        <h3 className="knovera-section-title">Synthesis Result</h3>
+                        <SynthesisResultViewer
+                          run={run}
+                          rawOutput={output}
+                          filenameBase={`${slugify(set.name)}-${(run.completedAt ?? run.createdAt).slice(0, 10)}-synthesis`}
+                        />
                       </>
-                    )}
-                    {!run.hasOutput && <p className="hint">No output yet.</p>}
-                    {run.hasOutput && output != null && (
-                      <>
-                        <h3 className="knovera-section-title">Output</h3>
-                        <pre>{JSON.stringify(output, null, 2)}</pre>
-                      </>
-                    )}
+                    ) : null}
+                    <FrozenInputsSection inputs={inputs} loading={runDetailLoading} />
                   </div>
                 )}
               </li>

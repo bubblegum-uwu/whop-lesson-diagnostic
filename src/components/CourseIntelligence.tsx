@@ -6,11 +6,14 @@ import {
   type ProjectSynthesisStatus,
   type SynthesisRunSummary,
   type CourseSynthesisData,
-  type CanonicalStrategyInfo,
-  type SynthesizedRule,
-  type SourceRef,
   type SynthesisProgressStage,
 } from "../lib/synthesisApi";
+import { formatCost, sourceTitle, downloadJsonFile } from "./synthesisResult/format";
+import { CanonicalStrategyCard } from "./synthesisResult/CanonicalStrategyCard";
+import { CoreFrameworkView } from "./synthesisResult/CoreFrameworkView";
+import { PlaybookView } from "./synthesisResult/PlaybookView";
+import { DecisionFrameworkView } from "./synthesisResult/DecisionFrameworkView";
+import { SourcesView } from "./synthesisResult/SourcesView";
 
 export interface CourseIntelligenceProps {
   backendUrl: string | null;
@@ -179,131 +182,6 @@ function SynthesisFailedPanel({ run, onRetry }: { run: SynthesisRunSummary; onRe
   );
 }
 
-function formatCost(value: number | null): string {
-  if (value == null) return "—";
-  return `$${value.toFixed(2)}`;
-}
-
-function sourceTitle(sources: SourceRef[]): string {
-  return sources.map((s) => `${s.lessonTitle}${s.startTimestamp ? ` @ ${s.startTimestamp}` : ""}: ${s.evidence}`).join("\n");
-}
-
-function RuleList({ rules }: { rules: SynthesizedRule[] }) {
-  if (rules.length === 0) return <p className="hint">None identified.</p>;
-  return (
-    <ul className="rule-list">
-      {rules.map((rule, i) => (
-        <li key={i} className="rule-item">
-          <div className="rule-header">
-            <span className={`badge badge-${rule.classification === "synthesized" ? "inferred" : rule.classification}`}>{rule.classification}</span>
-            <span className={`support-level support-${rule.supportLevel.toLowerCase()}`}>{rule.supportLevel.replace(/_/g, " ")}</span>
-            <span className="confidence">{rule.supportCount} lesson(s)</span>
-          </div>
-          <p className="rule-description" title={sourceTitle(rule.sources)}>
-            {rule.description}
-          </p>
-          {rule.conflictSources.length > 0 && (
-            <p className="rule-evidence" title={sourceTitle(rule.conflictSources)}>
-              ⚠ Conflicting evidence from {rule.conflictSources.length} source(s)
-            </p>
-          )}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function CanonicalStrategyCard({ info }: { info: CanonicalStrategyInfo }) {
-  const [expanded, setExpanded] = useState(false);
-  const s = info.strategy;
-  return (
-    <div className="strategy-card">
-      <div className="strategy-result-header">
-        <h3>{s.name}</h3>
-        <button className="link-button" onClick={() => setExpanded((v) => !v)}>
-          {expanded ? "Collapse" : "View"}
-        </button>
-      </div>
-      <div className="strategy-meta">
-        <span>{s.sourceLessonIds.length} supporting lesson instance(s)</span>
-        <span>{s.variants.length} variant(s)</span>
-        <span>{s.conflicts.length} conflict(s)</span>
-        <span>Markets: {s.markets.join(", ") || "—"}</span>
-        <span>Timeframes: {s.timeframes.join(", ") || "—"}</span>
-      </div>
-      {expanded && (
-        <>
-          <p className="drawer-summary">{s.purpose}</p>
-          <div className="rule-section">
-            <h4>Setup</h4>
-            <RuleList rules={s.setup} />
-          </div>
-          <div className="rule-section">
-            <h4>Entry</h4>
-            <RuleList rules={s.entryRules} />
-          </div>
-          <div className="rule-section">
-            <h4>Confirmation</h4>
-            <RuleList rules={s.confirmationRules} />
-          </div>
-          <div className="rule-section">
-            <h4>Stop Loss</h4>
-            <RuleList rules={s.stopLossRules} />
-          </div>
-          <div className="rule-section">
-            <h4>Profit Targets</h4>
-            <RuleList rules={s.profitTargetRules} />
-          </div>
-          <div className="rule-section">
-            <h4>Trade Management</h4>
-            <RuleList rules={s.tradeManagementRules} />
-          </div>
-          <div className="rule-section">
-            <h4>Invalidation</h4>
-            <RuleList rules={s.invalidationRules} />
-          </div>
-          <div className="rule-section">
-            <h4>No-Trade Conditions</h4>
-            <RuleList rules={s.noTradeConditions} />
-          </div>
-          {s.variants.length > 0 && (
-            <div className="rule-section">
-              <h4>Variants</h4>
-              <ul className="plain-list">
-                {s.variants.map((v, i) => (
-                  <li key={i}>{v.description}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {s.conflicts.length > 0 && (
-            <div className="rule-section">
-              <h4>Conflicts</h4>
-              <ul className="plain-list">
-                {s.conflicts.map((c, i) => (
-                  <li key={i} title={sourceTitle(c.sources)}>
-                    {c.description}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {s.ambiguities.length > 0 && (
-            <div className="rule-section">
-              <h4>Ambiguities</h4>
-              <ul className="plain-list">
-                {s.ambiguities.map((a, i) => (
-                  <li key={i}>{a}</li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
 interface ConfirmDialogState {
   force: boolean;
   analyzed: number;
@@ -449,37 +327,8 @@ export function CourseIntelligence({ backendUrl, knoveraToken, projectId }: Cour
 
   function downloadFullSynthesisJson() {
     if (!data) return;
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
     const slug = (status?.course?.title ?? "course").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
-    a.download = `${slug}-synthesis-full.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function downloadPlaybookJson() {
-    if (!data?.playbook) return;
-    const blob = new Blob([JSON.stringify(data.playbook, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "course-playbook.json";
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  function downloadPlaybookMarkdown() {
-    if (!data?.playbook) return;
-    const md = [`# ${data.playbook.title}`, ...data.playbook.sections.map((s) => `\n## ${s.title}\n\n${s.content}`)].join("\n");
-    const blob = new Blob([md], { type: "text/markdown" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "course-playbook.md";
-    a.click();
-    URL.revokeObjectURL(url);
+    downloadJsonFile(data, `${slug}-synthesis-full.json`);
   }
 
   return (
@@ -600,58 +449,16 @@ export function CourseIntelligence({ backendUrl, knoveraToken, projectId }: Cour
                 {data.canonicalStrategies.length === 0 ? (
                   <p className="hint">No canonical strategies were synthesized (no standalone setups were found among analyzed lessons).</p>
                 ) : (
-                  data.canonicalStrategies.map((info) => <CanonicalStrategyCard key={info.canonicalStrategyId} info={info} />)
+                  data.canonicalStrategies.map((info) => <CanonicalStrategyCard key={info.canonicalStrategyId} strategy={info.strategy} />)
                 )}
               </div>
             )}
 
-            {activeTab === "Core Framework" && (
-              <div>
-                {(data.coreFramework?.sections.length ?? 0) === 0 ? (
-                  <p className="hint">No cross-strategy principles were identified.</p>
-                ) : (
-                  data.coreFramework!.sections.map((section) => (
-                    <div className="rule-section" key={section.key}>
-                      <h4>{section.title}</h4>
-                      <RuleList rules={section.rules} />
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
+            {activeTab === "Core Framework" && <CoreFrameworkView coreFramework={data.coreFramework} />}
 
-            {activeTab === "Playbook" && data.playbook && (
-              <div className="result-panel">
-                <div className="detail-actions">
-                  <h3 style={{ margin: 0 }}>{data.playbook.title}</h3>
-                  <button className="link-button" onClick={downloadPlaybookJson}>
-                    Download JSON
-                  </button>
-                  <button className="link-button" onClick={downloadPlaybookMarkdown}>
-                    Download Markdown
-                  </button>
-                </div>
-                {data.playbook.sections.map((section) => (
-                  <div className="rule-section" key={section.key}>
-                    <h4>{section.title}</h4>
-                    <p className="drawer-summary" style={{ whiteSpace: "pre-wrap" }}>
-                      {section.content}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
+            {activeTab === "Playbook" && data.playbook && <PlaybookView playbook={data.playbook} filenameBase="course-playbook" />}
 
-            {activeTab === "Decision Framework" && (
-              <div>
-                <p className="hint">Structured JSON is also available for a future flowchart view; shown here as a step-by-step walkthrough.</p>
-                <ol className="plain-list">
-                  {(data.decisionFramework?.readableSteps ?? []).map((step, i) => (
-                    <li key={i}>{step}</li>
-                  ))}
-                </ol>
-              </div>
-            )}
+            {activeTab === "Decision Framework" && <DecisionFrameworkView decisionFramework={data.decisionFramework} />}
 
             {activeTab === "Conflicts" && (
               <div>
@@ -695,14 +502,7 @@ export function CourseIntelligence({ backendUrl, knoveraToken, projectId }: Cour
               </div>
             )}
 
-            {activeTab === "Sources" && (
-              <div className="rule-section">
-                <h4>Source Index</h4>
-                <pre className="json-block">{data.playbook?.sections.find((s) => s.key === "source_index")?.content ?? "—"}</pre>
-                <h4>Coverage Notes</h4>
-                <pre className="json-block">{data.playbook?.sections.find((s) => s.key === "coverage_notes")?.content ?? "—"}</pre>
-              </div>
-            )}
+            {activeTab === "Sources" && <SourcesView playbook={data.playbook} />}
           </div>
         </>
       )}
