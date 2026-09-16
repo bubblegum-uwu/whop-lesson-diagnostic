@@ -15,6 +15,7 @@ import { attachLegacyRunToSynthesisSet } from "../src/db/synthesisSetLegacyRunsR
 import { EMPTY_LESSON_KNOWLEDGE } from "../src/gemini/schema.js";
 import type { GeminiClient } from "../src/gemini/client.js";
 import type { JobTrigger } from "../src/jobs/runJobTrigger.js";
+import { SYNTHESIS_PROMPT_VERSION } from "../src/synthesis/version.js";
 import { createTestPool, randomId } from "./helpers/testDb.js";
 import { makeResponse } from "./helpers/httpMocks.js";
 
@@ -28,8 +29,8 @@ afterAll(async () => {
 function setDeps(): SynthesisSetsRouteDeps {
   return { pool };
 }
-function runDeps(jobTrigger: JobTrigger): SynthesisSetRunsRouteDeps {
-  return { pool, jobTrigger, geminiModel: GEMINI_MODEL };
+function runDeps(jobTrigger: JobTrigger, geminiModel: string = GEMINI_MODEL): SynthesisSetRunsRouteDeps {
+  return { pool, jobTrigger, geminiModel };
 }
 function fakeJobTrigger(): JobTrigger {
   return { triggerRun: vi.fn(async () => undefined) };
@@ -551,5 +552,95 @@ describe("Phase 4M follow-up — native Synthesis Set Run EXECUTION", () => {
     const kinds = (listed.body.runs as { runId: string; kind: string; status: string }[]).map((r) => `${r.kind}:${r.runId}:${r.status}`);
     expect(kinds).toContain(`LEGACY_WHOP:${legacyRun.runId}:COMPLETED`);
     expect(kinds.some((k) => k.startsWith(`NATIVE:${created.body.runId}:COMPLETED`))).toBe(true);
+  });
+
+  describe("Review follow-up — frozen model/promptVersion provenance, and lease/advisory-lock documentation", () => {
+    it("16: execution uses the model FROZEN ON THE RUN, never the worker's currently-configured model — Run metadata still records the frozen model afterward", async () => {
+      const project = await makeProject();
+      const source = await makeYouTubeSource(project.id);
+      await analyzeSource(source.id);
+      const { body: set } = await callCreateSet(project.id, "Strategies");
+      await callAddSource(project.id, set.id as number, source.id);
+
+      const MODEL_A = "model-frozen-at-creation-time";
+      const MODEL_B = "model-configured-later-at-execution-time";
+
+      // Create the Run while the route's own configured model is A.
+      const createHandler = createCreateSynthesisSetRunHandler(runDeps(fakeJobTrigger(), MODEL_A));
+      const { res, body: respBody } = makeResponse();
+      await createHandler({ params: { projectId: String(project.id), setId: String(set.id) }, body: {} } as any, res);
+      const created = respBody() as Record<string, unknown>;
+
+      const beforeExecution = await getSynthesisSetRunById(pool, created.runId as string);
+      expect(beforeExecution?.model).toBe(MODEL_A);
+
+      // Records the exact model string every generateStructured call actually received.
+      const modelsSeenByGemini: string[] = [];
+      const baseGemini = makeFakeGemini();
+      const gemini: GeminiClient = {
+        ...baseGemini,
+        generateStructured: vi.fn((prompt: string, model: string, ...rest: unknown[]) => {
+          modelsSeenByGemini.push(model);
+          return (baseGemini.generateStructured as unknown as (...args: unknown[]) => unknown)(prompt, model, ...rest) as ReturnType<GeminiClient["generateStructured"]>;
+        }),
+      };
+
+      // Execute the worker while ITS OWN configured default is a DIFFERENT model, B.
+      await runSynthesisSetRunLoop({ pool, gemini, model: MODEL_B, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+
+      expect(modelsSeenByGemini.length).toBeGreaterThan(0);
+      expect(modelsSeenByGemini.every((m) => m === MODEL_A)).toBe(true);
+      expect(modelsSeenByGemini).not.toContain(MODEL_B);
+
+      const afterExecution = await getSynthesisSetRunById(pool, created.runId as string);
+      expect(afterExecution?.status).toBe("COMPLETED");
+      expect(afterExecution?.model).toBe(MODEL_A); // still the frozen value — execution never rewrites it
+    });
+
+    it("17: a Run somehow missing its frozen model fails loudly rather than silently executing under the worker's currently-configured model", async () => {
+      const project = await makeProject();
+      const source = await makeYouTubeSource(project.id);
+      await analyzeSource(source.id);
+      const { body: set } = await callCreateSet(project.id, "Strategies");
+      await callAddSource(project.id, set.id as number, source.id);
+      const created = await callCreateRun(project.id, set.id as number, fakeJobTrigger());
+
+      // Simulates a Run whose frozen model is unexpectedly missing (e.g. a malformed/legacy row) — never producible through the real create path, which always freezes deps.geminiModel.
+      await pool.query(`UPDATE synthesis_set_runs SET model = NULL WHERE run_id = $1`, [created.body.runId]);
+
+      const gemini = makeFakeGemini();
+      await runSynthesisSetRunLoop({ pool, gemini, model: GEMINI_MODEL, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+
+      expect(gemini.generateStructured).not.toHaveBeenCalled(); // never silently falls back to deps.model and executes anyway
+      const run = await getSynthesisSetRunById(pool, created.body.runId as string);
+      expect(run?.status).toBe("FAILED");
+      expect(run?.sanitizedError).toContain("no frozen model");
+    });
+
+    it("18: a Run frozen under an older synthesis prompt version than the worker currently implements refuses to execute rather than silently running the CURRENT prompt logic under the OLD claimed version", async () => {
+      const project = await makeProject();
+      const source = await makeYouTubeSource(project.id);
+      await analyzeSource(source.id);
+      const { body: set } = await callCreateSet(project.id, "Strategies");
+      await callAddSource(project.id, set.id as number, source.id);
+      const created = await callCreateRun(project.id, set.id as number, fakeJobTrigger());
+
+      const beforeExecution = await getSynthesisSetRunById(pool, created.body.runId as string);
+      expect(beforeExecution?.promptVersion).toBe(SYNTHESIS_PROMPT_VERSION); // sanity: the real create path really did freeze the current version
+
+      // Simulates a Run that survived a deploy which bumped SYNTHESIS_PROMPT_VERSION — frozen under an older one this worker no longer implements.
+      await pool.query(`UPDATE synthesis_set_runs SET prompt_version = 'v0-superseded' WHERE run_id = $1`, [created.body.runId]);
+
+      const gemini = makeFakeGemini();
+      await runSynthesisSetRunLoop({ pool, gemini, model: GEMINI_MODEL, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } });
+
+      expect(gemini.generateStructured).not.toHaveBeenCalled(); // never runs current prompt logic under a false/stale claimed version
+      const run = await getSynthesisSetRunById(pool, created.body.runId as string);
+      expect(run?.status).toBe("FAILED");
+      expect(run?.sanitizedError).toContain("v0-superseded");
+      expect(run?.sanitizedError).toContain(SYNTHESIS_PROMPT_VERSION);
+      // The Run's own promptVersion field is never silently rewritten to match what actually ran (nothing ran) — it stays exactly as frozen, still queryable/honest.
+      expect(run?.promptVersion).toBe("v0-superseded");
+    });
   });
 });

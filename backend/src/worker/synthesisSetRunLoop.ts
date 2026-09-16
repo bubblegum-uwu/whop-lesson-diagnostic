@@ -4,6 +4,8 @@ import { claimNextEligibleSynthesisSetRun, markSynthesisSetRunCompleted, markSyn
 import { gatherSynthesisSetRunInput } from "../synthesis/gatherSynthesisSetRunInput.js";
 import { runSynthesis, type SynthesisResult } from "../synthesis/runSynthesis.js";
 import type { SynthesisStageDeps } from "../synthesis/geminiStage.js";
+import { SYNTHESIS_PROMPT_VERSION } from "../synthesis/version.js";
+import { SynthesisInvariantError } from "../synthesis/errors.js";
 import { estimateCost } from "../pricing/geminiPricing.js";
 import { classifyError } from "../pipeline/errorClassification.js";
 import { globalRedactor, type SecretRedactor } from "../lib/redact.js";
@@ -12,6 +14,17 @@ import { logger as defaultLogger, type SafeLogger } from "../lib/logger.js";
 export interface SynthesisSetRunWorkerDeps {
   pool: Pool;
   gemini: SynthesisStageDeps["gemini"];
+  /**
+   * The worker's own currently-configured default model (e.g.
+   * `config.geminiModel`) — kept here as the deployment's baseline, but
+   * NEVER read by processOneSynthesisSetRun to decide what model a Run
+   * actually executes under. That decision is `run.model` alone, frozen at
+   * Run creation (createSynthesisSetRun) — see the review fix documented
+   * on processOneSynthesisSetRun below. If worker config changes (a
+   * deploy bumps the configured model) between a Run's creation and its
+   * execution, the Run must still run under the model it was created
+   * with, never silently pick up the new default.
+   */
   model: string;
   redactor?: SecretRedactor;
   logger?: SafeLogger;
@@ -65,6 +78,39 @@ async function acquireLock(pool: Pool): Promise<Lock> {
  * migration's doc comment and synthesisSetRunsRepo.ts's LEASE_DURATION):
  *   1. No heartbeat/lease renewal mid-run — the 15-minute lease claimed
  *      up front must simply outlast one execution.
+ *
+ *      ACCEPTED PHASE 4M LIMITATION (review follow-up): the session-level
+ *      pg_advisory_lock this loop takes (see acquireLock above) is held by
+ *      one Postgres connection/session and is automatically released the
+ *      moment that session dies — a worker crash, container eviction, or
+ *      lost DB connection. If that death happens WHILE an outbound Gemini
+ *      HTTP request from processOneSynthesisSetRun is still in flight, the
+ *      advisory lock is gone immediately, but the Run's row-level lease
+ *      (claimed up front, 15 minutes, not renewed) is still held until it
+ *      expires. Once it expires, a second worker execution can claim the
+ *      SAME Run and start a SECOND, fully independent Gemini call for the
+ *      same frozen input — real duplicate cost, not merely a race. This is
+ *      NOT a data-corruption risk: `markSynthesisSetRunCompleted`/
+ *      `markSynthesisSetRunFailed` are fenced on `run_id AND lease_owner`
+ *      (see synthesisSetRunsRepo.ts), so whichever execution's write lands
+ *      second with the now-stale first lease_owner simply fails its
+ *      `WHERE lease_owner = $2` match and is discarded — the persisted
+ *      result is always whichever execution's write is accepted first,
+ *      never a corrupt mix of two. What fencing does NOT prevent is BOTH
+ *      executions actually calling Gemini and being billed. Phase 4M
+ *      deliberately accepts this (rather than adding heartbeat/lease
+ *      renewal here, which would be a real architecture change to this
+ *      loop) because: the failure mode requires the specific overlap of
+ *      "worker/DB-session dies mid-call" AND "the SAME Run's lease then
+ *      expires before any other work reclaims it," which is rare relative
+ *      to normal operation, and the advisory lock alone already prevents
+ *      the much more common case (two healthy concurrent workers both
+ *      entering this loop) from ever double-executing. If duplicate-cost
+ *      exposure from this specific edge case becomes a real problem,
+ *      add heartbeat/lease renewal matching worker/synthesisLoop.ts's
+ *      mechanism (renewSynthesisLease-equivalent) as a follow-up — do not
+ *      shorten the 15-minute lease as a substitute; that only narrows the
+ *      window, it doesn't close it.
  *   2. No incremental stage-progress persistence — synthesis_set_runs has
  *      no current_stage/completed_items columns (out of scope for this
  *      follow-up); onProgress is passed as a no-op. The Run's status
@@ -76,6 +122,31 @@ async function acquireLock(pool: Pool): Promise<Lock> {
  * gatherSynthesisSetRunInput, which itself only ever queries
  * synthesis_set_run_sources/synthesis_set_run_lessons — never
  * synthesis_set_sources/synthesis_set_lessons).
+ *
+ * FROZEN PROVENANCE MUST NEVER LIE (review follow-up): a Run's `model` and
+ * `promptVersion` are frozen once, at creation (createSynthesisSetRun),
+ * specifically so they remain a truthful record of what actually produced
+ * the result even if worker config or prompt logic changes before a QUEUED
+ * Run gets executed. Both are checked BEFORE any Gemini call:
+ *   - `run.model` is read directly — never `deps.model` (the worker's own
+ *     currently-configured default) — so a worker redeployed with a
+ *     different configured model still executes old queued Runs under the
+ *     exact model they were created with. A Run somehow missing its frozen
+ *     model fails loudly (SynthesisInvariantError, below) rather than
+ *     silently falling back to whatever the worker happens to be
+ *     configured with right now.
+ *   - `run.promptVersion` is compared against the CURRENT
+ *     SYNTHESIS_PROMPT_VERSION constant. This codebase keeps exactly one
+ *     live prompt implementation per version (see synthesis/version.ts —
+ *     there is no versioned-dispatch mechanism to run an OLDER prompt on
+ *     demand), so a Run frozen under an older prompt version cannot
+ *     actually be executed truthfully post-deploy: executing it anyway
+ *     would run the CURRENT prompt logic while the persisted
+ *     `promptVersion` field kept claiming the old one — a lie. Refusing
+ *     explicitly (SynthesisInvariantError) is the smallest safe behavior
+ *     available without building versioned prompt dispatch; it fails the
+ *     Run (visible, queryable, retriable via a fresh Run) rather than
+ *     silently substituting current logic under false provenance.
  */
 async function processOneSynthesisSetRun(run: SynthesisSetRunRow, leaseOwner: string, deps: SynthesisSetRunWorkerDeps): Promise<void> {
   const redactor = deps.redactor ?? globalRedactor;
@@ -83,12 +154,21 @@ async function processOneSynthesisSetRun(run: SynthesisSetRunRow, leaseOwner: st
   const startedAt = new Date();
 
   try {
+    if (!run.model) {
+      throw new SynthesisInvariantError(`Run ${run.runId} has no frozen model recorded — refusing to execute under an unknown/guessed model.`);
+    }
+    if (run.promptVersion !== SYNTHESIS_PROMPT_VERSION) {
+      throw new SynthesisInvariantError(
+        `Run ${run.runId} was frozen under synthesis prompt version "${run.promptVersion ?? "(none)"}", but this worker only implements "${SYNTHESIS_PROMPT_VERSION}" — refusing to execute under a different prompt version than the Run's own provenance claims.`,
+      );
+    }
+
     const setResult = await deps.pool.query<{ name: string }>(`SELECT name FROM synthesis_sets WHERE id = $1`, [run.synthesisSetId]);
     const synthesisSetName = setResult.rows[0]?.name ?? "Synthesis Set";
 
     const input = await gatherSynthesisSetRunInput(deps.pool, synthesisSetName, run.runId);
 
-    const result: SynthesisResult = await runSynthesis({ gemini: deps.gemini, model: deps.model }, input);
+    const result: SynthesisResult = await runSynthesis({ gemini: deps.gemini, model: run.model }, input);
 
     const completedAt = new Date();
     const estimatedCost = estimateCost(result.usage);
