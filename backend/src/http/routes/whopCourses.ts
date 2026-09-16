@@ -7,6 +7,8 @@ import { getWhopLessonImportsOwnedByOtherProject } from "../../db/whopLessonImpo
 import { getWhopLessonAnalysisStatus } from "../../db/whopLessonAnalysisStatusRepo.js";
 import { syncCourse, type CourseSyncConfig } from "../../pipeline/courseSync.js";
 import { buildWhopProjectSource } from "./projectSources.js";
+import { buildCourseLessonSummaries } from "./courseLessons.js";
+import { buildAnalysisSummary } from "./analysisSummary.js";
 import type { WhopCourseClient } from "../../whop/courseClient.js";
 import type { WhopOAuthClient } from "../../whop/oauthClient.js";
 import { getValidAccessToken, AuthRequiredError } from "../../whop/sessionService.js";
@@ -160,7 +162,8 @@ export function createListWhopCoursesHandler(deps: { pool: Pool }) {
   };
 }
 
-async function resolveOwnedCourse(pool: Pool, projectIdParam: string | string[], courseIdParam: string | string[]) {
+/** Exported for reuse by the dashboard handler below — the SAME project+course ownership resolution, never a duplicated/divergent check. */
+export async function resolveOwnedCourse(pool: Pool, projectIdParam: string | string[], courseIdParam: string | string[]) {
   const projectId = Number(projectIdParam);
   const courseId = Number(courseIdParam);
   if (!Number.isInteger(projectId) || !Number.isInteger(courseId)) return null;
@@ -248,5 +251,41 @@ export function createListWhopCourseLessonsHandler(deps: { pool: Pool }) {
       items,
       pagination: { limit, offset, totalCount: allLessons.length },
     });
+  };
+}
+
+/**
+ * GET /api/projects/:projectId/whop-courses/:courseId/dashboard — Phase
+ * 4K-D follow-up. The rich, course-SCOPED counterpart to the legacy global
+ * `/api/course/lessons` + `/api/analysis/summary` pair: the same
+ * `CourseLessonSummary[]` (job/analysis status, progress, cost, result) and
+ * `AnalysisSummary` (dashboard counters/spend) shapes the original
+ * single-course CourseTable/DashboardSummary components already render,
+ * but resolved via `resolveOwnedCourse` (project+courseId ownership) rather
+ * than the deployment's single globally-configured `config.course.courseId`
+ * — this is what makes the rich course-management UI safe for a project
+ * with more than one connected Whop course (Phase 4K): requesting course A
+ * can never return or leak course B's lessons/stats.
+ *
+ * Reuses buildCourseLessonSummaries/buildAnalysisSummary UNCHANGED from
+ * courseLessons.ts/analysisSummary.ts — same repo queries, same
+ * aggregation, same pipeline/analysisSummary.js label/confidence helpers —
+ * so this endpoint can never silently drift from what the legacy one
+ * returns for the same underlying data. Read-only: never calls Whop, never
+ * enqueues analysis, never mutates anything.
+ */
+export function createGetWhopCourseDashboardHandler(deps: { pool: Pool }) {
+  return async function getWhopCourseDashboardHandler(req: Request, res: Response): Promise<void> {
+    const resolved = await resolveOwnedCourse(deps.pool, req.params.projectId, req.params.courseId);
+    if (!resolved) {
+      res.status(404).json({ error: { message: "Unknown Whop course.", type: "course_not_found" } });
+      return;
+    }
+    const { course } = resolved;
+
+    const [courseSummary, lessons] = await Promise.all([buildWhopProjectSource(deps.pool, course), buildCourseLessonSummaries(deps.pool, course.id)]);
+    const summary = await buildAnalysisSummary(deps.pool, lessons.map((l) => l.id), lessons.length);
+
+    res.status(200).json({ course: courseSummary, lessons, summary });
   };
 }

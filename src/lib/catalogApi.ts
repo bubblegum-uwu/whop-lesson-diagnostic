@@ -6,6 +6,7 @@
  * course-connect/refresh calls (this client never sees or handles that).
  */
 import type { YouTubeProjectSource, ProjectSourceOriginSummary } from "./sourcesApi";
+import type { CourseLessonSummary, AnalysisSummary } from "./courseApi";
 function authHeaders(knoveraToken: string): HeadersInit {
   return { Authorization: `Bearer ${knoveraToken}` };
 }
@@ -454,5 +455,26 @@ export async function listWhopCourseLessons(
   const qs = params.toString();
   const res = await fetch(`${backendUrl}/api/projects/${projectId}/whop-courses/${courseId}/lessons${qs ? `?${qs}` : ""}`, { headers: authHeaders(knoveraToken) });
   await throwOnError(res, `Failed to load course lessons (${res.status}).`);
+  return await res.json();
+}
+
+/**
+ * Phase 4K-D follow-up — GET /api/projects/:projectId/whop-courses/:courseId/dashboard.
+ * The rich, course-SCOPED counterpart to the legacy global course lessons/
+ * summary endpoints (courseApi.ts's getCourseLessons/getAnalysisSummary):
+ * the exact same CourseLessonSummary[]/AnalysisSummary shapes those already
+ * return, but for one specific courseId within one specific project — never
+ * the deployment's single globally-configured legacy course. This is what
+ * WhopCourseDetailPage.tsx uses to render the full CourseTable/
+ * DashboardSummary experience per-course (see that page's doc comment).
+ */
+export async function getWhopCourseDashboard(
+  backendUrl: string,
+  knoveraToken: string,
+  projectId: number,
+  courseId: number,
+): Promise<{ course: WhopCourseSummary; lessons: CourseLessonSummary[]; summary: AnalysisSummary }> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/whop-courses/${courseId}/dashboard`, { headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to load course dashboard (${res.status}).`);
   return await res.json();
 }

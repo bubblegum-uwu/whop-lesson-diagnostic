@@ -6,6 +6,7 @@ import {
   createListWhopCoursesHandler,
   createRefreshWhopCourseHandler,
   createListWhopCourseLessonsHandler,
+  createGetWhopCourseDashboardHandler,
   type WhopCoursesRouteDeps,
 } from "../src/http/routes/whopCourses.js";
 import { saveAuthSession, deleteAuthSession } from "../src/db/authSessionRepo.js";
@@ -76,6 +77,12 @@ function callLessons(projectId: string, courseId: string) {
   const handler = createListWhopCourseLessonsHandler({ pool });
   const { res, statusCode, body } = makeResponse();
   return handler({ params: { projectId, courseId }, query: {} } as unknown as Request, res).then(() => ({ statusCode: statusCode(), body: body() as Record<string, unknown> }));
+}
+
+function callDashboard(projectId: string, courseId: string) {
+  const handler = createGetWhopCourseDashboardHandler({ pool });
+  const { res, statusCode, body } = makeResponse();
+  return handler({ params: { projectId, courseId } } as unknown as Request, res).then(() => ({ statusCode: statusCode(), body: body() as Record<string, unknown> }));
 }
 
 function courseUrl(courseId: string) {
@@ -245,5 +252,110 @@ describe("POST /api/projects/:projectId/whop-courses/:courseId/refresh (Phase 4K
 
     const { body } = await callLessons(String(project.id), String(internalCourseId));
     expect((body.pagination as Record<string, unknown>).totalCount).toBe(1);
+  });
+});
+
+describe("GET /api/projects/:projectId/whop-courses/:courseId/dashboard (Phase 4K-D follow-up)", () => {
+  async function connectCourseWithLessons(projectId: number, title: string, lessonWhopIds: string[]) {
+    await establishSession();
+    const courseId = randomId("cors");
+    await callConnect(String(projectId), courseUrl(courseId), makeCourseClient(courseId, title, lessonWhopIds));
+    const { body: listed } = await callList(String(projectId));
+    const course = (listed.courses as Array<Record<string, unknown>>).find((c) => c.name === title)!;
+    return { whopCourseId: courseId, internalCourseId: course.courseId as number };
+  }
+
+  it("returns the rich per-lesson job/analysis shape (status, cost, analyzed timestamp) plus dashboard summary/spend, keyed by projectId+courseId", async () => {
+    const project = await makeProject();
+    const { internalCourseId } = await connectCourseWithLessons(project.id, "Trading Accelerator", ["lesn_1", "lesn_2"]);
+
+    const lessonsResult = await pool.query<{ id: string }>(`SELECT id FROM lessons WHERE course_id = $1 ORDER BY whop_lesson_id ASC`, [internalCourseId]);
+    await createLessonAnalysis(pool, {
+      lessonId: Number(lessonsResult.rows[0].id),
+      jobId: (await pool.query<{ job_id: string }>(`INSERT INTO analysis_jobs (lesson_id, analysis_fingerprint, status) VALUES ($1, $2, 'COMPLETED') RETURNING job_id`, [lessonsResult.rows[0].id, randomId("fp")])).rows[0].job_id,
+      status: "completed",
+      strategyFound: true,
+      validatedJson: { lesson: { title: "t", duration_seconds: 600 }, strategy_found: true, strategies: [], knowledge: EMPTY_LESSON_KNOWLEDGE },
+      analysisSummary: "Break & Retest",
+      model: "gemini-3.8-flash",
+      promptVersion: "v2",
+      extractorVersion: "v2",
+      schemaVersion: "v2",
+      analysisFingerprint: randomId("fp"),
+      startedAt: new Date(),
+      completedAt: new Date(),
+      processingDurationSeconds: 90,
+      inputTokens: 100,
+      outputTokens: 50,
+      thinkingTokens: 5,
+      estimatedCost: 0.08,
+    });
+
+    const { statusCode, body } = await callDashboard(String(project.id), String(internalCourseId));
+    expect(statusCode).toBe(200);
+    expect((body.course as Record<string, unknown>).name).toBe("Trading Accelerator");
+
+    const lessons = body.lessons as Array<Record<string, unknown>>;
+    expect(lessons).toHaveLength(2);
+    const analyzedLesson = lessons.find((l) => (l.analysis as Record<string, unknown> | null) != null)!;
+    const analysis = analyzedLesson.analysis as Record<string, unknown>;
+    expect(analysis.estimatedCost).toBe(0.08);
+    expect(analysis.processingDurationSeconds).toBe(90);
+    expect(analysis.completedAt).toBeTruthy();
+    const notYetAnalyzed = lessons.find((l) => l.analysis == null)!;
+    expect((notYetAnalyzed.job as Record<string, unknown>).status).toBe("NOT_ANALYZED");
+
+    const summary = body.summary as Record<string, unknown>;
+    expect(summary.totalLessons).toBe(2);
+    expect(summary.strategyLessons).toBe(1);
+    expect(summary.remaining).toBe(1);
+    expect(summary.totalCost).toBe(0.08);
+    expect(summary.averageCostPerLesson).toBe(0.08);
+  });
+
+  it("MULTI-COURSE ISOLATION: course A's dashboard never includes course B's lessons, and vice versa", async () => {
+    const project = await makeProject();
+    const a = await connectCourseWithLessons(project.id, "Course A", ["a1", "a2"]);
+    const b = await connectCourseWithLessons(project.id, "Course B", ["b1"]);
+
+    const { body: dashA } = await callDashboard(String(project.id), String(a.internalCourseId));
+    expect((dashA.lessons as unknown[]).length).toBe(2);
+    expect((dashA.summary as Record<string, unknown>).totalLessons).toBe(2);
+
+    const { body: dashB } = await callDashboard(String(project.id), String(b.internalCourseId));
+    expect((dashB.lessons as unknown[]).length).toBe(1);
+    expect((dashB.summary as Record<string, unknown>).totalLessons).toBe(1);
+  });
+
+  it("cross-project isolation: a course belonging to a different project returns 404, not another project's data", async () => {
+    const projectA = await makeProject();
+    const projectB = await makeProject();
+    const { internalCourseId } = await connectCourseWithLessons(projectA.id, "Owned By A", ["lesn_1"]);
+
+    const { statusCode, body } = await callDashboard(String(projectB.id), String(internalCourseId));
+    expect(statusCode).toBe(404);
+    expect((body.error as Record<string, unknown>).type).toBe("course_not_found");
+  });
+
+  it("is read-only: reading the dashboard never enqueues an analysis job, never calls Whop, never mutates any row", async () => {
+    const project = await makeProject();
+    const { internalCourseId } = await connectCourseWithLessons(project.id, "Read Only Course", ["lesn_1"]);
+
+    const before = await pool.query(`SELECT COUNT(*) AS count FROM analysis_jobs`);
+    await callDashboard(String(project.id), String(internalCourseId));
+    await callDashboard(String(project.id), String(internalCourseId));
+    const after = await pool.query(`SELECT COUNT(*) AS count FROM analysis_jobs`);
+
+    expect((after.rows[0] as { count: string }).count).toBe((before.rows[0] as { count: string }).count);
+  });
+
+  it("matches the legacy per-lesson shape exactly (job + analysis fields), reusing the same builder as /api/course/lessons — never a second, divergent mapping", async () => {
+    const project = await makeProject();
+    const { internalCourseId } = await connectCourseWithLessons(project.id, "Shape Check", ["lesn_1"]);
+    const { body } = await callDashboard(String(project.id), String(internalCourseId));
+    const lesson = (body.lessons as Array<Record<string, unknown>>)[0];
+    expect(Object.keys(lesson).sort()).toEqual(
+      ["id", "title", "chapterTitle", "chapterOrder", "courseOrder", "durationSeconds", "videoAvailable", "sourceUrl", "lastSyncedAt", "job", "analysis"].sort(),
+    );
   });
 });

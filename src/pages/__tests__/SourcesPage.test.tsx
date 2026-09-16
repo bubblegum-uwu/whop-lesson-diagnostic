@@ -43,20 +43,10 @@ const WHOP_SOURCE = {
 function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps {
   return {
     courseTitle: null,
-    lessons: [],
     connected: true,
-    syncing: false,
-    authRequired: false,
-    lastSyncedAt: null,
-    summary: null,
     courseErrorMessage: null,
     onSignIn: () => {},
-    onSync: () => {},
     onDisconnect: () => {},
-    onEnqueue: () => {},
-    onRetry: () => {},
-    onCancel: () => {},
-    onLoadAnalysis: async () => null,
     identifyState: { phase: "idle" },
     onFindUserId: () => {},
     backendUrl: "https://backend.example.com",
@@ -178,14 +168,14 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     expect(screen.queryByText("Analyze All Unanalyzed")).not.toBeInTheDocument();
   });
 
-  it("M/G: existing lesson-management AND Diagnostic Tools remain functional/visible for MasterMind (a project that does own a source)", async () => {
+  it("M/G: provider-level Disconnect Whop AND Diagnostic Tools remain functional/visible for MasterMind (a project that does own a source) — never the legacy inline course table", async () => {
     stubFetch([WHOP_SOURCE]);
     renderSources("/projects/7/sources", { connected: true });
 
     await waitFor(() => expect(screen.getByText("Connected")).toBeInTheDocument());
-    expect(screen.getByText("Sync Course")).toBeInTheDocument();
     expect(screen.getByText("Disconnect Whop")).toBeInTheDocument();
     expect(screen.getByText("Diagnostic Tools")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
   it("D: a confirmed-empty project hides Diagnostic Tools (legacy Whop-only utilities with nothing to operate on)", async () => {

@@ -4,16 +4,11 @@ import { CourseTable } from "../CourseTable";
 import type { CourseLessonSummary } from "../../lib/courseApi";
 
 const baseProps = {
-  courseTitle: "Scarface Trades Mastermind",
   lessons: [] as CourseLessonSummary[],
   connected: false,
-  syncing: false,
   authRequired: false,
-  lastSyncedAt: null,
   summary: null,
   onSignIn: vi.fn(),
-  onSync: vi.fn(),
-  onDisconnect: vi.fn(),
   onEnqueue: vi.fn(),
   onRetry: vi.fn(),
   onCancel: vi.fn(),
@@ -60,12 +55,15 @@ describe("CourseTable", () => {
     render(<CourseTable {...baseProps} lessons={[makeLesson()]} />);
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByText("Support & Resistance")).toBeInTheDocument();
-    // Sync/Disconnect require a live connection; a reconnect entry point
-    // takes their place instead, and neither destructive/mutating action
-    // is offered while disconnected.
-    expect(screen.getByRole("button", { name: /connect whop to sync/i })).toBeInTheDocument();
+    // Phase 4K-D follow-up: Sync/Disconnect/Connect-to-sync controls no
+    // longer live inside CourseTable at all (see its own doc comment) —
+    // course identity/connection controls are now owned by the parent page
+    // (WhopCourseDetailPage's own "Refresh Course", SourcesPage's provider
+    // card "Disconnect Whop"), never duplicated here.
+    expect(screen.queryByRole("button", { name: /connect whop to sync/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Sync Course" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Disconnect Whop" })).not.toBeInTheDocument();
+    expect(screen.getByText(/whop is not connected/i)).toBeInTheDocument();
   });
 
   it("Phase 4D correction: disables the row Analyze action for a NOT_ANALYZED lesson while Whop is disconnected — analyzing always fetches the video from Whop", () => {
@@ -161,11 +159,6 @@ describe("CourseTable", () => {
     render(<CourseTable {...baseProps} connected lessons={[]} />);
     expect(screen.getByText(/no lessons synced yet/i)).toBeInTheDocument();
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
-  });
-
-  it("disables the sync button and shows syncing state while a sync is in flight", () => {
-    render(<CourseTable {...baseProps} connected syncing />);
-    expect(screen.getByRole("button", { name: /syncing/i })).toBeDisabled();
   });
 
   it("queues a single lesson via the row Analyze action, after confirming the batch dialog", () => {

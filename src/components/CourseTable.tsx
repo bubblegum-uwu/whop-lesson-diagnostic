@@ -3,19 +3,32 @@ import { PROCESSING_STATUSES, type AnalysisSummary, type CourseLessonSummary, ty
 import { StatusBadge } from "./StatusBadge";
 import { LessonDetailDrawer } from "./LessonDetailDrawer";
 import { RowActionsMenu } from "./RowActionsMenu";
-import { DashboardSummary } from "./DashboardSummary";
 
+/**
+ * Phase 4K-D follow-up — CourseTable is now embedded exclusively on
+ * WhopCourseDetailPage (the per-course route), never on SourcesPage (which
+ * is collection/container-only — see that page's own doc comment). Its own
+ * course identity header (title, Sync/Disconnect) and top-level
+ * DashboardSummary tiles were REMOVED here because the parent page now owns
+ * that presentation using its own course-scoped data (see
+ * WhopCourseDetailPage.tsx) — rendering them here too would duplicate the
+ * same numbers under two different headings. `summary` is still accepted
+ * because it's used internally for the batch-confirm dialog's cost
+ * estimate (`estimatedCostSummary` below), not for a visual dashboard.
+ * `connected`/`authRequired`/`onSignIn` are still accepted because they
+ * gate the toolbar/row actions (Analyze/Retry/Re-analyze always fetch the
+ * lesson's video from Whop) and the "nothing synced yet, not connected"
+ * empty state — Whop connection status remains directly relevant to what
+ * this table can let the operator DO, even though the connect/disconnect
+ * CONTROLS themselves now live only on the Sources page's Whop provider
+ * card.
+ */
 export interface CourseTableProps {
-  courseTitle: string | null;
   lessons: CourseLessonSummary[];
   connected: boolean;
-  syncing: boolean;
   authRequired: boolean;
-  lastSyncedAt: string | null;
   summary: AnalysisSummary | null;
   onSignIn: () => void;
-  onSync: () => void;
-  onDisconnect: () => void;
   onEnqueue: (lessonIds: number[], force?: boolean) => void;
   onRetry: (jobId: string) => void;
   onCancel: (jobId: string) => void;
@@ -246,16 +259,11 @@ function RowActions({ lesson, job, connected, onView, onAnalyze, onRetry, onCanc
 }
 
 export function CourseTable({
-  courseTitle,
   lessons,
   connected,
-  syncing,
   authRequired,
-  lastSyncedAt,
   summary,
   onSignIn,
-  onSync,
-  onDisconnect,
   onEnqueue,
   onRetry,
   onCancel,
@@ -352,8 +360,6 @@ export function CourseTable({
   if (!connected && lessons.length === 0) {
     return (
       <div className="course-section">
-        <h2>Scarface Trades Mastermind</h2>
-        <DashboardSummary summary={summary} />
         {authRequired ? (
           <div className="error-panel" role="alert">
             <p>Whop authorization expired. Reconnect to resume course sync.</p>
@@ -431,30 +437,11 @@ export function CourseTable({
 
   return (
     <div className="course-section">
-      <div className="course-header">
-        <h2>{courseTitle ?? "Scarface Trades Mastermind"}</h2>
-        <div className="course-actions">
-          {connected ? (
-            <>
-              <button onClick={onSync} disabled={syncing}>
-                {syncing ? "Syncing…" : "Sync Course"}
-              </button>
-              <button onClick={onDisconnect} className="link-button">
-                Disconnect Whop
-              </button>
-            </>
-          ) : (
-            <button onClick={onSignIn}>Connect Whop to sync</button>
-          )}
-        </div>
-      </div>
-      <DashboardSummary summary={summary} />
       {!connected && (
         <p className="hint">
           {authRequired ? "Whop authorization expired — reconnect to resume syncing." : "Whop is not connected — these lessons were synced previously and stay visible, but syncing new ones requires reconnecting."}
         </p>
       )}
-      {lastSyncedAt && <p className="hint">Last synced: {new Date(lastSyncedAt).toLocaleString()}</p>}
 
       {/* Flex row, not an overlay: when the drawer is open it's a real sibling
           with its own fixed width, so .course-main (flex: 1 1 auto, min-width: 0)

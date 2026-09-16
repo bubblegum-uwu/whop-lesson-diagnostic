@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { WhopIcon, YouTubeIcon, DiscordIcon } from "../components/ProviderIcons";
-import { CourseTable, type CourseTableProps } from "../components/CourseTable";
 import { FindWhopUserId, type FindWhopUserIdState } from "../components/FindWhopUserId";
 import { ConfigForm } from "../components/ConfigForm";
 import { DiagnosticResult } from "../components/DiagnosticResult";
@@ -15,7 +14,6 @@ import { BatchImportDialog } from "../components/BatchImportDialog";
 import { AddYouTubeChannelDialog } from "../components/AddYouTubeChannelDialog";
 import { ImportDiscordChannelDialog } from "../components/ImportDiscordChannelDialog";
 import { ConnectWhopCourseDialog } from "../components/ConnectWhopCourseDialog";
-import type { AnalysisSummary } from "../lib/courseApi";
 import type { DiagnosticDisplayPayload } from "../lib/diagnosticPayload";
 import type { LessonFetchOutcome } from "../lib/whopApi";
 import { useResolvedProject } from "../lib/useResolvedProject";
@@ -48,21 +46,12 @@ export type DiagnosticFlowState =
 
 export interface SourcesPageProps {
   courseTitle: string | null;
-  lessons: CourseTableProps["lessons"];
   /** LIVE Whop provider-connection state (GET /api/auth/status) — distinct from whether this project has ever had a persisted source, see sourcesState below. Drives the provider card's Connected/Not Connected badge. */
   connected: boolean;
-  syncing: boolean;
-  authRequired: boolean;
-  lastSyncedAt: string | null;
-  summary: AnalysisSummary | null;
   courseErrorMessage: string | null;
   onSignIn: () => void;
-  onSync: () => void;
+  /** Provider-level "Disconnect Whop" — see the Whop provider card's connected-actions block below. Never a per-course action (see WhopCourseDetailPage's own, course-scoped Refresh Course instead). */
   onDisconnect: () => void;
-  onEnqueue: (lessonIds: number[], force?: boolean) => void;
-  onRetry: (jobId: string) => void;
-  onCancel: (jobId: string) => void;
-  onLoadAnalysis: (lessonId: number) => Promise<unknown | null>;
 
   identifyState: FindWhopUserIdState;
   onFindUserId: () => void;
@@ -283,6 +272,16 @@ export function SourcesPage(props: SourcesPageProps) {
               >
                 Bulk Import Lessons
               </button>
+              {/* Phase 4K-D follow-up — the ONLY "Disconnect Whop" entry point in the
+                  app now that the legacy inline CourseTable (which used to render
+                  its own Disconnect Whop button) no longer renders on this page.
+                  This disconnects the whole Whop PROVIDER connection — never a
+                  single course — so it belongs here, not on any one course's own
+                  detail page (see WhopCourseDetailPage.tsx's course-scoped
+                  "Refresh Course" instead). */}
+              <button type="button" className="link-button" onClick={props.onDisconnect}>
+                Disconnect Whop
+              </button>
             </div>
           )}
         </div>
@@ -472,24 +471,6 @@ export function SourcesPage(props: SourcesPageProps) {
         </>
       )}
 
-      {props.backendUrl && !confirmedNeverHadWhopSource && (
-        <CourseTable
-          courseTitle={props.courseTitle}
-          lessons={props.lessons}
-          connected={props.connected}
-          syncing={props.syncing}
-          authRequired={props.authRequired}
-          lastSyncedAt={props.lastSyncedAt}
-          summary={props.summary}
-          onSignIn={props.onSignIn}
-          onSync={props.onSync}
-          onDisconnect={props.onDisconnect}
-          onEnqueue={props.onEnqueue}
-          onRetry={props.onRetry}
-          onCancel={props.onCancel}
-          onLoadAnalysis={props.onLoadAnalysis}
-        />
-      )}
       {props.courseErrorMessage && <div className="error-box">{props.courseErrorMessage}</div>}
 
       {/* Phase 4C correction: these are Whop-specific utilities (single-lesson
