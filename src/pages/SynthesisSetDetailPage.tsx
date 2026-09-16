@@ -176,8 +176,11 @@ function RunSummaryPanel({ run, isLatestCompleted }: { run: SynthesisSetRunSumma
         <div className="dashboard-tile-label">Status</div>
       </div>
       <div className="dashboard-tile">
-        <div className="dashboard-tile-value">{run.kind === "LEGACY_WHOP" ? "Legacy" : "Native"}</div>
-        <div className="dashboard-tile-label">{isLatestCompleted ? "Latest" : "Kind"}</div>
+        <div className="dashboard-tile-value">
+          {run.kind === "LEGACY_WHOP" ? "Legacy" : "Native"}
+          {isLatestCompleted && " · Latest"}
+        </div>
+        <div className="dashboard-tile-label">Kind</div>
       </div>
       <div className="dashboard-tile">
         <div className="dashboard-tile-value">{formatDateTime(run.createdAt)}</div>
