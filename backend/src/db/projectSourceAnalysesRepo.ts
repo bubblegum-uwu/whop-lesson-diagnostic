@@ -145,6 +145,21 @@ export async function getByJobId(db: Queryable, jobId: string): Promise<ProjectS
 }
 
 /**
+ * Fetches an EXACT, already-frozen set of analyses by id — mirrors
+ * lessonAnalysesRepo.getByAnalysisIds exactly, applied to
+ * project_source_analyses. Used by the Phase 4M native Run executor (see
+ * synthesis/gatherSynthesisSetRunInput.ts), which reads the exact
+ * project_source_analysis_id rows frozen into a Run's own
+ * synthesis_set_run_sources snapshot — never "the current analysis of this
+ * source", which could have changed since the Run was created.
+ */
+export async function getByAnalysisIds(db: Queryable, analysisIds: number[]): Promise<ProjectSourceAnalysis[]> {
+  if (analysisIds.length === 0) return [];
+  const result = await db.query(`SELECT ${COLUMNS} FROM project_source_analyses WHERE analysis_id = ANY($1::bigint[])`, [analysisIds]);
+  return (result.rows as ProjectSourceAnalysisRow[]).map(mapRow);
+}
+
+/**
  * Phase 4L — the batched form of "does this source have a usable
  * successful analysis" (the exact same rule getLatestByProjectSource's
  * non-null return already embodies: a completed/no_strategy row exists),

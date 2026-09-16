@@ -1,10 +1,17 @@
 import { loadConfig } from "./config.js";
 import { createApp } from "./http/app.js";
-import { buildWorkerLoopDeps, buildSynthesisWorkerDeps, buildProjectSourceAnalysisWorkerDeps, buildDiscordCaptureWorkerDeps } from "./workerDeps.js";
+import {
+  buildWorkerLoopDeps,
+  buildSynthesisWorkerDeps,
+  buildProjectSourceAnalysisWorkerDeps,
+  buildDiscordCaptureWorkerDeps,
+  buildSynthesisSetRunWorkerDeps,
+} from "./workerDeps.js";
 import { runWorkerLoop } from "./worker/mainLoop.js";
 import { runSynthesisLoop } from "./worker/synthesisLoop.js";
 import { runProjectSourceAnalysisLoop } from "./worker/projectSourceAnalysisLoop.js";
 import { runDiscordCaptureLoop } from "./worker/discordCaptureLoop.js";
+import { runSynthesisSetRunLoop } from "./worker/synthesisSetRunLoop.js";
 import { globalRedactor } from "./lib/redact.js";
 import { logger } from "./lib/logger.js";
 
@@ -40,12 +47,21 @@ if (config.discordBotToken) globalRedactor.register(config.discordBotToken);
  * pattern as a THIRD, independent phase run after synthesis has drained,
  * under its own advisory lock (see worker/projectSourceAnalysisLoop.ts).
  * Same reasoning: preferred over introducing a second Cloud Run Job.
+ *
+ * Phase 4M follow-up — native Synthesis Set Run execution reuses the same
+ * pattern as a FIFTH, independent phase run after Discord capture has
+ * drained, under its own advisory lock (see worker/synthesisSetRunLoop.ts).
+ * Triggered by the same jobTrigger.triggerRun() call as every other
+ * phase — see http/routes/synthesisSetRuns.ts's create-run handler — so
+ * queueing a native Run wakes this same container/execution, never a
+ * second Cloud Run Job.
  */
 if (config.serviceRole === "worker") {
   runWorkerLoop(buildWorkerLoopDeps(config))
     .then(() => runSynthesisLoop(buildSynthesisWorkerDeps(config)))
     .then(() => runProjectSourceAnalysisLoop(buildProjectSourceAnalysisWorkerDeps(config)))
     .then(() => runDiscordCaptureLoop(buildDiscordCaptureWorkerDeps(config)))
+    .then(() => runSynthesisSetRunLoop(buildSynthesisSetRunWorkerDeps(config)))
     .then(() => process.exit(0))
     .catch((err) => {
       logger.error("Worker execution failed", { message: err instanceof Error ? err.message : String(err) });

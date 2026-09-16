@@ -8,6 +8,7 @@ import type { WorkerLoopDeps } from "./worker/mainLoop.js";
 import type { SynthesisWorkerDeps } from "./worker/synthesisLoop.js";
 import type { ProjectSourceAnalysisWorkerDeps } from "./worker/projectSourceAnalysisLoop.js";
 import type { DiscordCaptureWorkerDeps } from "./worker/discordCaptureLoop.js";
+import type { SynthesisSetRunWorkerDeps } from "./worker/synthesisSetRunLoop.js";
 
 /** Shared wiring for the Cloud Run Job entrypoint (SERVICE_ROLE=worker) — no HTTP routes are ever mounted here. */
 export function buildWorkerLoopDeps(config: AppConfig): WorkerLoopDeps {
@@ -76,5 +77,19 @@ export function buildProjectSourceAnalysisWorkerDeps(config: AppConfig): Project
 export function buildDiscordCaptureWorkerDeps(config: AppConfig): DiscordCaptureWorkerDeps {
   return {
     pool: createPool(config.db),
+  };
+}
+
+/**
+ * Phase 4M follow-up — shared wiring for the Cloud Run Job's FIFTH phase
+ * (native Synthesis Set Run execution). Builds its own Pool/Gemini client,
+ * same precedent as every phase above — never shares mutable state with
+ * lesson-analysis/synthesis/project-source-analysis/Discord-capture wiring.
+ */
+export function buildSynthesisSetRunWorkerDeps(config: AppConfig): SynthesisSetRunWorkerDeps {
+  return {
+    pool: createPool(config.db),
+    gemini: createGeminiClient(config.geminiApiKey),
+    model: config.geminiModel,
   };
 }
