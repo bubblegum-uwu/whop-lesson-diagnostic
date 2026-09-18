@@ -3,9 +3,12 @@ import type { Pool } from "pg";
 import { getProjectById } from "../../db/projectsRepo.js";
 import { getCourseByWhopId, getCoursesByProjectId } from "../../db/coursesRepo.js";
 import { listLessons } from "../../db/lessonsRepo.js";
+import { getLatestJobsByLesson, getSummaryCounts } from "../../db/analysisJobsRepo.js";
+import { getLatestByLessons, getCourseSpendSummary } from "../../db/lessonAnalysesRepo.js";
 import { getWhopLessonImportsOwnedByOtherProject } from "../../db/whopLessonImportsRepo.js";
 import { getWhopLessonAnalysisStatus } from "../../db/whopLessonAnalysisStatusRepo.js";
 import { syncCourse, type CourseSyncConfig } from "../../pipeline/courseSync.js";
+import { buildCourseLessonSummaries, buildCourseAnalysisSummary, buildWhopCourseSummaryFields } from "../../pipeline/courseDashboard.js";
 import { buildWhopProjectSource } from "./projectSources.js";
 import type { WhopCourseClient } from "../../whop/courseClient.js";
 import type { WhopOAuthClient } from "../../whop/oauthClient.js";
@@ -247,6 +250,48 @@ export function createListWhopCourseLessonsHandler(deps: { pool: Pool }) {
       course: await buildWhopProjectSource(deps.pool, course),
       items,
       pagination: { limit, offset, totalCount: allLessons.length },
+    });
+  };
+}
+
+/**
+ * GET /api/projects/:projectId/whop-courses/:courseId/dashboard — the rich,
+ * course-scoped counterpart to the legacy single-course `/api/course/lessons`
+ * + `/api/analysis/summary` pair (courseLessons.ts / analysisSummary.ts),
+ * now keyed by a real `:courseId` instead of one deployment-wide configured
+ * course. Backs the dedicated Whop Course Detail page's full CourseTable
+ * experience (search/filter/batch-analyze/lesson detail drawer) for
+ * whichever course was actually opened — never a globally "the" course.
+ *
+ * Reuses the exact same repositories and shaping logic those legacy routes
+ * use (see pipeline/courseDashboard.ts), applied to THIS course's own
+ * lesson id set via `resolveOwnedCourse` — no duplicated business logic,
+ * no re-derivation of job/analysis state, no second round of queries for
+ * fields this handler already fetched (see buildWhopCourseSummaryFields).
+ * Pure read: never analyzes anything, never mutates a job or analysis row.
+ */
+export function createGetWhopCourseDashboardHandler(deps: { pool: Pool }) {
+  return async function getWhopCourseDashboardHandler(req: Request, res: Response): Promise<void> {
+    const resolved = await resolveOwnedCourse(deps.pool, req.params.projectId, req.params.courseId);
+    if (!resolved) {
+      res.status(404).json({ error: { message: "Unknown Whop course.", type: "course_not_found" } });
+      return;
+    }
+    const { course } = resolved;
+
+    const lessons = await listLessons(deps.pool, course.id);
+    const lessonIds = lessons.map((l) => l.id);
+    const [jobsByLesson, analysesByLesson, counts, spend] = await Promise.all([
+      getLatestJobsByLesson(deps.pool, lessonIds),
+      getLatestByLessons(deps.pool, lessonIds),
+      getSummaryCounts(deps.pool, lessonIds),
+      getCourseSpendSummary(deps.pool, lessonIds),
+    ]);
+
+    res.status(200).json({
+      course: buildWhopCourseSummaryFields(course, lessons.length, counts, spend),
+      summary: buildCourseAnalysisSummary(lessons.length, counts, spend),
+      lessons: buildCourseLessonSummaries(lessons, jobsByLesson, analysesByLesson),
     });
   };
 }

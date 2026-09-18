@@ -6,6 +6,7 @@
  * course-connect/refresh calls (this client never sees or handles that).
  */
 import type { YouTubeProjectSource, ProjectSourceOriginSummary } from "./sourcesApi";
+import type { AnalysisSummary, CourseLessonSummary } from "./courseApi";
 function authHeaders(knoveraToken: string): HeadersInit {
   return { Authorization: `Bearer ${knoveraToken}` };
 }
@@ -438,6 +439,27 @@ export async function importYouTubeSourcesFromDiscordChannel(
   });
   await throwOnError(res, `Failed to import YouTube videos from Discord (${res.status}).`);
   return await res.json();
+}
+
+export interface WhopCourseDashboard {
+  course: WhopCourseSummary;
+  summary: AnalysisSummary;
+  lessons: CourseLessonSummary[];
+}
+
+/**
+ * GET /api/projects/:projectId/whop-courses/:courseId/dashboard — Phase 4K
+ * follow-up. The rich, course-scoped counterpart to the legacy single-course
+ * `/api/course/lessons` + `/api/analysis/summary` pair: same job/analysis
+ * richness (CourseLessonSummary, AnalysisSummary — same types the legacy
+ * CourseTable always used), now keyed by a real courseId so the Whop Course
+ * Detail page manages exactly the course it was opened for, never a
+ * globally "the" course. Pure read — never analyzes anything, never syncs.
+ */
+export async function getWhopCourseDashboard(backendUrl: string, knoveraToken: string, projectId: number, courseId: number): Promise<WhopCourseDashboard> {
+  const res = await fetch(`${backendUrl}/api/projects/${projectId}/whop-courses/${courseId}/dashboard`, { headers: authHeaders(knoveraToken) });
+  await throwOnError(res, `Failed to load course dashboard (${res.status}).`);
+  return (await res.json()) as WhopCourseDashboard;
 }
 
 /** GET /api/projects/:projectId/whop-courses/:courseId/lessons */

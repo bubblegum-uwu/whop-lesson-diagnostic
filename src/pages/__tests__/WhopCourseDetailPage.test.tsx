@@ -1,7 +1,8 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { MemoryRouter, Routes, Route, Link } from "react-router-dom";
 import { WhopCourseDetailPage } from "../WhopCourseDetailPage";
+import type { CourseLessonSummary, AnalysisSummary } from "../../lib/courseApi";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -24,32 +25,120 @@ const PROJECT = {
   latestSynthesisCompletedAt: null,
 };
 
-const COURSE = {
-  provider: "WHOP",
-  sourceType: "COURSE",
-  courseId: 5,
-  externalId: "cors_abc",
-  name: "Trading Accelerator",
-  lessonCount: 2,
-  analyzedLessonCount: 1,
-  queuedCount: 0,
-  processingCount: 0,
-  failedCount: 0,
-  remainingCount: 0,
-  lastSyncedAt: "2026-01-01T00:00:00.000Z",
-  totalCost: 1.5,
-};
+function makeCourse(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    provider: "WHOP",
+    sourceType: "COURSE",
+    courseId: 5,
+    externalId: "cors_abc",
+    name: "Trading Accelerator",
+    lessonCount: 2,
+    analyzedLessonCount: 1,
+    queuedCount: 0,
+    processingCount: 0,
+    failedCount: 0,
+    remainingCount: 0,
+    lastSyncedAt: "2026-01-01T00:00:00.000Z",
+    totalCost: 1.5,
+    ...overrides,
+  };
+}
 
-const LESSON_ANALYZED = { id: 201, title: "Intro", chapterTitle: "Foundations", sourceUrl: "https://whop.com/x", durationSeconds: 600, status: "ANALYZED", eligibleForSynthesis: true };
-const LESSON_NOT_ANALYZED = { id: 202, title: "Advanced Setups", chapterTitle: null, sourceUrl: "https://whop.com/y", durationSeconds: 900, status: "NOT_ANALYZED", eligibleForSynthesis: false };
+function makeSummary(overrides: Partial<AnalysisSummary> = {}): AnalysisSummary {
+  return {
+    totalLessons: 2,
+    analyzed: 1,
+    strategyLessons: 1,
+    noStrategy: 0,
+    processing: 0,
+    queued: 0,
+    failed: 0,
+    authRequired: 0,
+    remaining: 1,
+    totalCost: 0.08,
+    averageCostPerLesson: 0.08,
+    averageProcessingSeconds: 155,
+    ...overrides,
+  };
+}
 
-function stubFetch(overrides: { onEnqueue?: (body: unknown) => void } = {}) {
+function makeLesson(overrides: Partial<CourseLessonSummary> = {}): CourseLessonSummary {
+  return {
+    id: 201,
+    title: "Introduction To Accelerator",
+    chapterTitle: "Foundations",
+    chapterOrder: 1,
+    courseOrder: 1,
+    durationSeconds: 600,
+    videoAvailable: true,
+    sourceUrl: "https://whop.com/x/lesn_201",
+    lastSyncedAt: "2026-01-01T00:00:00Z",
+    job: { jobId: "job_201", status: "COMPLETED" },
+    analysis: {
+      analysisId: 1,
+      strategyFound: true,
+      extractedStrategiesLabel: "Break & Retest",
+      ruleCounts: [],
+      confidence: 0.9,
+      summary: "Break and retest continuation.",
+      hasSupportingKnowledge: true,
+      knowledgeItemCounts: [],
+      schemaVersion: "v2",
+      estimatedCost: 0.08,
+      processingDurationSeconds: 155,
+      completedAt: "2026-01-01T00:05:00Z",
+    },
+    ...overrides,
+  };
+}
+
+const NOT_ANALYZED_LESSON = makeLesson({
+  id: 202,
+  title: "Advanced Setups",
+  chapterTitle: null,
+  courseOrder: 2,
+  durationSeconds: 900,
+  sourceUrl: "https://whop.com/x/lesn_202",
+  job: { jobId: null, status: "NOT_ANALYZED" },
+  analysis: null,
+});
+
+interface StubConfig {
+  course?: ReturnType<typeof makeCourse>;
+  summary?: AnalysisSummary;
+  lessons?: CourseLessonSummary[];
+  connected?: boolean;
+  onEnqueue?: (body: unknown) => void;
+  onRetry?: (jobId: string) => void;
+  onRefresh?: () => void;
+}
+
+function stubFetch(config: StubConfig = {}) {
+  const course = config.course ?? makeCourse();
+  const summary = config.summary ?? makeSummary();
+  const lessons = config.lessons ?? [makeLesson(), NOT_ANALYZED_LESSON];
+  const connected = config.connected ?? true;
+
   const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
     if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
-    if (url.includes("/whop-courses/5/lessons")) return jsonResponse(200, { course: COURSE, items: [LESSON_ANALYZED, LESSON_NOT_ANALYZED], pagination: { limit: 200, offset: 0, totalCount: 2 } });
+    if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected, status: connected ? "active" : null, whopUserId: connected ? "user_1" : null });
+    if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) return jsonResponse(200, { course, summary, lessons });
+    if (url.includes(`/whop-courses/${course.courseId}/refresh`) && init?.method === "POST") {
+      config.onRefresh?.();
+      return jsonResponse(200, { course });
+    }
     if (url.endsWith("/api/analysis/jobs") && init?.method === "POST") {
-      overrides.onEnqueue?.(JSON.parse(init.body as string));
-      return jsonResponse(200, { queued: [202] });
+      const body = JSON.parse(init.body as string);
+      config.onEnqueue?.(body);
+      return jsonResponse(202, { queued: (body.lessonIds as number[]).map((id) => ({ lessonId: id, jobId: `job_${id}` })), skipped: [] });
+    }
+    const retryMatch = url.match(/\/api\/analysis\/jobs\/([^/]+)\/retry$/);
+    if (retryMatch && init?.method === "POST") {
+      config.onRetry?.(decodeURIComponent(retryMatch[1]));
+      return jsonResponse(202, { jobId: retryMatch[1], status: "QUEUED" });
+    }
+    if (url.includes("/course/lessons/") && url.endsWith("/analysis")) {
+      return jsonResponse(200, { validatedJson: { strategy_found: true, strategies: [] } });
     }
     return jsonResponse(404, {});
   });
@@ -68,26 +157,167 @@ function renderPage(initialPath = "/projects/7/whop-courses/5") {
   );
 }
 
-describe("WhopCourseDetailPage (Phase 4K)", () => {
-  it("shows lessons with analyzed/not-analyzed status distinctly", async () => {
+describe("WhopCourseDetailPage — rich course management UI (Phase 4K follow-up)", () => {
+  it("1: loads the requested courseId's dashboard and renders its rich stats and lessons", async () => {
     stubFetch();
     renderPage();
     await waitFor(() => expect(screen.getByRole("heading", { name: "Trading Accelerator" })).toBeInTheDocument());
-    expect(screen.getByText("Analyzed")).toBeInTheDocument();
-    expect(screen.getByText("Not analyzed")).toBeInTheDocument();
+    // DashboardSummary tiles.
+    expect(screen.getByText("Total Lessons")).toBeInTheDocument();
+    expect(screen.getAllByText("Analyzed").length).toBeGreaterThan(0);
+    expect(screen.getByText("Introduction To Accelerator")).toBeInTheDocument();
+    expect(screen.getByText("Advanced Setups")).toBeInTheDocument();
   });
 
-  // Phase 4L — "Remove Collection" was removed everywhere, and Whop
-  // Course never had one to begin with. Also confirms this page never
-  // exposes a misleading "Add Collection to Project" — Whop cross-project
-  // collection assignment isn't safely supported yet (courses.project_id
-  // is a single, exclusive FK in the current schema).
-  it("never shows a Remove Collection or Add Collection to Project action", async () => {
+  it("2/3: multi-course isolation — Course A's page shows only Course A's data, Course B's page shows only Course B's data", async () => {
+    const courseA = makeCourse({ courseId: 5, name: "Course A" });
+    const courseB = makeCourse({ courseId: 9, name: "Course B" });
+    const lessonA = makeLesson({ id: 301, title: "Course A Lesson" });
+    const lessonB = makeLesson({ id: 401, title: "Course B Lesson" });
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes("/whop-courses/5/dashboard")) return jsonResponse(200, { course: courseA, summary: makeSummary(), lessons: [lessonA] });
+      if (url.includes("/whop-courses/9/dashboard")) return jsonResponse(200, { course: courseB, summary: makeSummary(), lessons: [lessonB] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { unmount } = renderPage("/projects/7/whop-courses/5");
+    await waitFor(() => expect(screen.getByText("Course A Lesson")).toBeInTheDocument());
+    expect(screen.queryByText("Course B Lesson")).not.toBeInTheDocument();
+    unmount();
+
+    renderPage("/projects/7/whop-courses/9");
+    await waitFor(() => expect(screen.getByText("Course B Lesson")).toBeInTheDocument());
+    expect(screen.queryByText("Course A Lesson")).not.toBeInTheDocument();
+  });
+
+  it("4: navigating from Course A directly to Course B (same mounted page) never keeps showing Course A's lessons", async () => {
+    const courseA = makeCourse({ courseId: 5, name: "Course A" });
+    const courseB = makeCourse({ courseId: 9, name: "Course B" });
+    const lessonA = makeLesson({ id: 301, title: "Course A Lesson" });
+    const lessonB = makeLesson({ id: 401, title: "Course B Lesson" });
+    let resolveB!: (value: Response) => void;
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes("/whop-courses/5/dashboard")) return jsonResponse(200, { course: courseA, summary: makeSummary(), lessons: [lessonA] });
+      if (url.includes("/whop-courses/9/dashboard")) return new Promise<Response>((resolve) => (resolveB = resolve));
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // A real in-router navigation (not a MemoryRouter remount, which never
+    // actually changes the current location — it only reads initialEntries
+    // once) between two sibling course routes, the way Sources' own course
+    // cards would link between courses.
+    render(
+      <MemoryRouter initialEntries={["/projects/7/whop-courses/5"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/whop-courses/:courseId"
+            element={
+              <>
+                <Link to="/projects/7/whop-courses/9">Go to Course B</Link>
+                <WhopCourseDetailPage backendUrl="https://backend.example.com" knoveraToken="token" />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("Course A Lesson")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("link", { name: "Go to Course B" }));
+    // Course A's lesson must disappear immediately, before Course B's fetch resolves.
+    await waitFor(() => expect(screen.queryByText("Course A Lesson")).not.toBeInTheDocument());
+    expect(screen.queryByText("Course B Lesson")).not.toBeInTheDocument();
+
+    resolveB(jsonResponse(200, { course: courseB, summary: makeSummary(), lessons: [lessonB] }));
+    await waitFor(() => expect(screen.getByText("Course B Lesson")).toBeInTheDocument());
+  });
+
+  it("5: an unknown/foreign courseId shows a not-found state, never a broken page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+        if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: false, status: null, whopUserId: null });
+        if (url.includes("/dashboard")) return jsonResponse(404, { error: { message: "Unknown Whop course.", type: "course_not_found" } });
+        return jsonResponse(404, {});
+      }),
+    );
+    renderPage();
+    await waitFor(() => expect(screen.getByText("This Whop course doesn't exist.")).toBeInTheDocument());
+  });
+
+  it("6: search filters the lesson list", async () => {
+    stubFetch();
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Advanced Setups")).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("Search lessons"), { target: { value: "Advanced" } });
+    await waitFor(() => expect(screen.queryByText("Introduction To Accelerator")).not.toBeInTheDocument());
+    expect(screen.getByText("Advanced Setups")).toBeInTheDocument();
+  });
+
+  it("7: Select All Unanalyzed + Analyze Selected enqueues exactly the unanalyzed lesson via the real analysis job API", async () => {
+    let enqueued: unknown;
+    stubFetch({ onEnqueue: (body) => (enqueued = body) });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Advanced Setups")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Select All Unanalyzed" }));
+    fireEvent.click(screen.getByRole("button", { name: /Analyze Selected/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(enqueued).toEqual({ lessonIds: [202], force: true }));
+  });
+
+  it("8: Retry Failed retries the real failed job's jobId", async () => {
+    let retriedJobId: string | undefined;
+    stubFetch({
+      lessons: [makeLesson({ id: 203, title: "Failed Lesson", job: { jobId: "job_203", status: "FAILED", sanitizedError: "boom" }, analysis: null })],
+      onRetry: (jobId) => (retriedJobId = jobId),
+    });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Retry Failed" }));
+    await waitFor(() => expect(retriedJobId).toBe("job_203"));
+  });
+
+  it("9: View opens the rich lesson detail drawer with the real analysis, not raw analysis inline on the page", async () => {
+    stubFetch();
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    await waitFor(() => expect(screen.getByText("Break and retest continuation.")).toBeInTheDocument());
+  });
+
+  it("10: Refresh Course calls the course-scoped refresh endpoint for THIS course, never a global sync", async () => {
+    let refreshed = false;
+    const fetchMock = stubFetch({ onRefresh: () => (refreshed = true) });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(refreshed).toBe(true));
+    expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/whop-courses/5/refresh"))).toBe(true);
+  });
+
+  it("11: Refresh Course never enqueues an analysis job", async () => {
+    let enqueueCalled = false;
+    const fetchMock = stubFetch({ onEnqueue: () => (enqueueCalled = true) });
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/refresh"))).toBe(true));
+    expect(enqueueCalled).toBe(false);
+  });
+
+  it("12: reads existing analysis data (cost, duration, result) without mutating or re-running anything", async () => {
     stubFetch();
     renderPage();
     await waitFor(() => expect(screen.getByRole("heading", { name: "Trading Accelerator" })).toBeInTheDocument());
-    expect(screen.queryByRole("button", { name: "Remove Collection" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Add Collection to Project" })).not.toBeInTheDocument();
+    expect(screen.getAllByText("$0.08").length).toBeGreaterThan(0);
+    // No re-analysis / Gemini call is ever implied by simply viewing the page.
+    const fetchMock = vi.mocked(fetch) as unknown as ReturnType<typeof vi.fn>;
+    expect(fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).endsWith("/api/analysis/jobs") && (c[1] as RequestInit | undefined)?.method === "POST")).toBe(false);
   });
 
   it("checking a lesson's checkbox never triggers analysis", async () => {
@@ -98,28 +328,330 @@ describe("WhopCourseDetailPage (Phase 4K)", () => {
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/analysis/jobs"))).toBe(false);
   });
 
-  it("individual Analyze enqueues exactly that lesson via the existing lesson-analysis job API", async () => {
-    let enqueued: unknown;
-    stubFetch({ onEnqueue: (body) => (enqueued = body) });
-    renderPage();
-    await waitFor(() => expect(screen.getByText("Advanced Setups")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
-    await waitFor(() => expect(enqueued).toEqual({ lessonIds: [202], force: false }));
-  });
-
-  it("Select All Unanalyzed + batch analyze enqueues exactly the unanalyzed lesson", async () => {
-    let enqueued: unknown;
-    stubFetch({ onEnqueue: (body) => (enqueued = body) });
-    renderPage();
-    await waitFor(() => expect(screen.getByText("Advanced Setups")).toBeInTheDocument());
-    fireEvent.click(screen.getByRole("button", { name: "Select All Unanalyzed" }));
-    fireEvent.click(screen.getByRole("button", { name: /Analyze Selected/ }));
-    await waitFor(() => expect(enqueued).toEqual({ lessonIds: [202], force: false }));
-  });
-
   it("displays chapter titles when present, and omits them when absent", async () => {
     stubFetch();
     renderPage();
-    await waitFor(() => expect(screen.getByText("Foundations")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("Foundations").length).toBeGreaterThan(0));
+  });
+
+  it("← Sources navigates back to the Sources page", async () => {
+    stubFetch();
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Trading Accelerator" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "← Sources" }));
+    expect(screen.getByText("SOURCES_MARKER")).toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — background refresh must not unmount CourseTable (follow-up)", () => {
+  it("a background refresh (Refresh Course) never blanks the page to 'Loading course…' and preserves search state", async () => {
+    const course = makeCourse();
+    let refreshCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes(`/whop-courses/${course.courseId}/refresh`) && init?.method === "POST") {
+        refreshCount += 1;
+        return jsonResponse(200, { course });
+      }
+      if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) {
+        return jsonResponse(200, { course, summary: makeSummary(), lessons: [makeLesson(), NOT_ANALYZED_LESSON] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Advanced Setups")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Search lessons"), { target: { value: "Advanced" } });
+    await waitFor(() => expect(screen.queryByText("Introduction To Accelerator")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(refreshCount).toBe(1));
+
+    // The rich course UI must have stayed mounted throughout — never
+    // replaced with the entity-load "Loading course…" placeholder.
+    expect(screen.queryByText("Loading course…")).not.toBeInTheDocument();
+    // CourseTable's own local search state must have survived (proof it
+    // was never unmounted/remounted by the background refresh).
+    expect(screen.getByLabelText("Search lessons")).toHaveValue("Advanced");
+    expect(screen.getByText("Advanced Setups")).toBeInTheDocument();
+  });
+
+  it("an open lesson detail drawer stays open across a background refresh, not merely because data refreshed", async () => {
+    const course = makeCourse();
+    let refreshCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes(`/whop-courses/${course.courseId}/refresh`) && init?.method === "POST") {
+        refreshCount += 1;
+        return jsonResponse(200, { course });
+      }
+      if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) {
+        return jsonResponse(200, { course, summary: makeSummary(), lessons: [makeLesson(), NOT_ANALYZED_LESSON] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    await waitFor(() => expect(screen.getByText("Break and retest continuation.")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(refreshCount).toBe(1));
+
+    expect(screen.getByText("Break and retest continuation.")).toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — stale background responses must never overwrite a different course (follow-up)", () => {
+  it("a stale in-flight Course A background refresh resolving after navigating to Course B never overwrites Course B", async () => {
+    const courseA = makeCourse({ courseId: 5, name: "Course A" });
+    const courseB = makeCourse({ courseId: 9, name: "Course B" });
+    const lessonA = makeLesson({ id: 301, title: "Course A Lesson" });
+    const staleLessonA = makeLesson({ id: 301, title: "Course A Lesson (STALE REFRESH)" });
+    const lessonB = makeLesson({ id: 401, title: "Course B Lesson" });
+    let resolveStaleA!: (value: Response) => void;
+    let staleRefreshRequested = false;
+
+    // This exercises exactly the same background-refresh code path
+    // (loadDashboard called with isEntityLoad: false, fenced by
+    // activeCourseKeyRef) that an SSE analysis event also drives — the
+    // vulnerable mechanism is identical, and Refresh Course gives full
+    // control over exactly when the in-flight response resolves.
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes("/whop-courses/5/refresh") && init?.method === "POST") {
+        staleRefreshRequested = true;
+        return jsonResponse(200, { course: courseA });
+      }
+      if (url.includes("/whop-courses/5/dashboard")) {
+        if (!staleRefreshRequested) return jsonResponse(200, { course: courseA, summary: makeSummary(), lessons: [lessonA] });
+        // The background refresh's dashboard re-fetch, deliberately held open.
+        return new Promise<Response>((resolve) => (resolveStaleA = resolve));
+      }
+      if (url.includes("/whop-courses/9/dashboard")) return jsonResponse(200, { course: courseB, summary: makeSummary(), lessons: [lessonB] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/projects/7/whop-courses/5"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/whop-courses/:courseId"
+            element={
+              <>
+                <Link to="/projects/7/whop-courses/9">Go to Course B</Link>
+                <WhopCourseDetailPage backendUrl="https://backend.example.com" knoveraToken="token" />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("Course A Lesson")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(staleRefreshRequested).toBe(true));
+
+    fireEvent.click(screen.getByRole("link", { name: "Go to Course B" }));
+    await waitFor(() => expect(screen.getByText("Course B Lesson")).toBeInTheDocument());
+    expect(screen.queryByText("Course A Lesson")).not.toBeInTheDocument();
+
+    // The stale Course A background request finally resolves — its result
+    // must be discarded, not applied on top of Course B.
+    resolveStaleA(jsonResponse(200, { course: courseA, summary: makeSummary(), lessons: [staleLessonA] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText("Course B Lesson")).toBeInTheDocument();
+    expect(screen.queryByText("Course A Lesson (STALE REFRESH)")).not.toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — stale SAME-course out-of-order responses must never overwrite newer data (follow-up)", () => {
+  it("an older same-course background refresh (R1) resolving after a newer one (R2) does not overwrite R2's fresher data", async () => {
+    const course = makeCourse();
+    const initialLesson = makeLesson({ id: 201, title: "Lesson One", job: { jobId: "job_201", status: "ANALYZING" }, analysis: null });
+    const staleLessonR1 = makeLesson({ id: 201, title: "Older Refresh", job: { jobId: "job_201", status: "ANALYZING" }, analysis: null });
+    const newerLessonR2 = makeLesson({ id: 201, title: "Newest Refresh", job: { jobId: "job_201", status: "COMPLETED" } });
+
+    let resolveR1!: (value: Response) => void;
+    let dashboardCallCount = 0;
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes(`/whop-courses/${course.courseId}/refresh`) && init?.method === "POST") return jsonResponse(200, { course });
+      if (url.endsWith("/api/analysis/jobs") && init?.method === "POST") return jsonResponse(202, { queued: [{ lessonId: 202, jobId: "job_202" }], skipped: [] });
+      if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) {
+        dashboardCallCount += 1;
+        if (dashboardCallCount === 1) {
+          // Initial entity load — resolves immediately.
+          return jsonResponse(200, { course, summary: makeSummary(), lessons: [initialLesson, NOT_ANALYZED_LESSON] });
+        }
+        if (dashboardCallCount === 2) {
+          // R1 — the first background refresh (triggered by Refresh Course),
+          // deliberately held open so R2 can be started and resolve first.
+          return new Promise<Response>((resolve) => (resolveR1 = resolve));
+        }
+        // R2 — the second background refresh (triggered by Analyze
+        // Selected), resolves immediately with NEWER data.
+        return jsonResponse(200, { course, summary: makeSummary(), lessons: [newerLessonR2, NOT_ANALYZED_LESSON] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Lesson One")).toBeInTheDocument());
+
+    // Start R1 via Refresh Course (held open).
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(dashboardCallCount).toBe(2));
+
+    // Start R2 via a different action (Analyze Selected) while R1 is still
+    // in flight — a real scenario during active analysis where several SSE
+    // refreshes can overlap. R2 resolves immediately.
+    fireEvent.click(screen.getByRole("button", { name: "Select All Unanalyzed" }));
+    fireEvent.click(screen.getByRole("button", { name: /Analyze Selected/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(dashboardCallCount).toBe(3));
+
+    // R2 (newer, started second, resolved first) commits.
+    await waitFor(() => expect(screen.getByText("Newest Refresh")).toBeInTheDocument());
+
+    // R1 (older, started first) finally resolves with a stale snapshot —
+    // it must be discarded, not applied on top of R2's fresher data.
+    resolveR1(jsonResponse(200, { course, summary: makeSummary(), lessons: [staleLessonR1, NOT_ANALYZED_LESSON] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText("Newest Refresh")).toBeInTheDocument();
+    expect(screen.queryByText("Older Refresh")).not.toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — SSE background refresh must not invalidate the initial entity load (follow-up)", () => {
+  it("does not subscribe to background SSE refresh until the course has actually loaded, so the initial load can never be stale-discarded out from under itself", async () => {
+    const course = makeCourse();
+    let resolveInitial!: (value: Response) => void;
+    let initialResolved = false;
+    let eventsEndpointCallCount = 0;
+    let eventsEndpointCallCountWhileLoading = 0;
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.endsWith("/api/analysis/events")) {
+        eventsEndpointCallCount += 1;
+        // The initial entity load hasn't resolved yet in this test until we
+        // explicitly call resolveInitial below — any SSE subscription
+        // attempt observed before that point would be exactly the bug this
+        // test guards against (a background refresh starting, and thus
+        // being able to invalidate, the still-in-flight initial load).
+        if (!initialResolved) eventsEndpointCallCountWhileLoading += 1;
+        // No body -> subscribeAnalysisEvents's real implementation treats
+        // this as "nothing to stream" and returns without ever firing a
+        // background refresh — good enough to prove whether/when a
+        // subscription attempt happened at all.
+        return jsonResponse(200, {});
+      }
+      if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) {
+        return new Promise<Response>((resolve) => (resolveInitial = resolve));
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("Loading course…")).toBeInTheDocument());
+    // Give any wrongly-early SSE subscription attempt a chance to fire
+    // while the page is still in the "loading" phase.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(eventsEndpointCallCountWhileLoading).toBe(0);
+
+    // The initial request finally succeeds.
+    initialResolved = true;
+    resolveInitial(jsonResponse(200, { course, summary: makeSummary(), lessons: [makeLesson()] }));
+
+    // The page must actually reach "loaded" — never stuck on "Loading course…".
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Trading Accelerator" })).toBeInTheDocument());
+    expect(screen.queryByText("Loading course…")).not.toBeInTheDocument();
+
+    // Only now — once loaded — does background SSE subscribing begin.
+    await waitFor(() => expect(eventsEndpointCallCount).toBeGreaterThan(0));
+  });
+});
+
+describe("WhopCourseDetailPage — persisted course data is independent of live Whop connection status (follow-up)", () => {
+  it("the dashboard still renders (and Analyze fails safe to disconnected) when getAuthStatus() fails", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(500, { error: { message: "Auth status unavailable." } });
+      if (url.includes("/whop-courses/5/dashboard")) return jsonResponse(200, { course: makeCourse(), summary: makeSummary(), lessons: [makeLesson(), NOT_ANALYZED_LESSON] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    // Persisted course/lesson data renders even though the live
+    // connection-status request failed.
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Trading Accelerator" })).toBeInTheDocument());
+    expect(screen.getByText("Introduction To Accelerator")).toBeInTheDocument();
+    expect(screen.getByText("Advanced Setups")).toBeInTheDocument();
+    expect(screen.queryByText("This Whop course doesn't exist.")).not.toBeInTheDocument();
+
+    // Analyze/Retry/Refresh controls fail safe to the "disconnected"
+    // default rather than assuming connected.
+    expect(screen.getByRole("button", { name: "Connect Whop to sync" })).toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — course-local transient state resets on course change (follow-up)", () => {
+  it("Course A's action error and busy Refresh state do not leak onto Course B after navigating away", async () => {
+    const courseA = makeCourse({ courseId: 5, name: "Course A" });
+    const courseB = makeCourse({ courseId: 9, name: "Course B" });
+    const lessonA = makeLesson({ id: 301, title: "Course A Lesson" });
+    const lessonB = makeLesson({ id: 401, title: "Course B Lesson" });
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes("/whop-courses/5/refresh") && init?.method === "POST") {
+        return jsonResponse(500, { error: { message: "Needs Whop reconnect" } });
+      }
+      if (url.includes("/whop-courses/5/dashboard")) return jsonResponse(200, { course: courseA, summary: makeSummary(), lessons: [lessonA] });
+      if (url.includes("/whop-courses/9/dashboard")) return jsonResponse(200, { course: courseB, summary: makeSummary(), lessons: [lessonB] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/projects/7/whop-courses/5"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/whop-courses/:courseId"
+            element={
+              <>
+                <Link to="/projects/7/whop-courses/9">Go to Course B</Link>
+                <WhopCourseDetailPage backendUrl="https://backend.example.com" knoveraToken="token" />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("Course A Lesson")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(screen.getByText("Needs Whop reconnect")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("link", { name: "Go to Course B" }));
+    await waitFor(() => expect(screen.getByText("Course B Lesson")).toBeInTheDocument());
+
+    expect(screen.queryByText("Needs Whop reconnect")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh Course" })).toBeInTheDocument();
   });
 });

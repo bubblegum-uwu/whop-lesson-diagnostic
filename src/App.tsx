@@ -30,21 +30,7 @@ import { fetchWhopUserInfo } from "./lib/whopIdentify";
 import { knoveraLogin, knoveraLogout, getKnoveraMe, InvalidKnoveraCredentialsError } from "./lib/knoveraAuthApi";
 import { loadKnoveraToken, saveKnoveraToken, clearKnoveraToken } from "./lib/knoveraSession";
 import { takePendingDiscordLinkToken } from "./lib/discordLinkPending";
-import {
-  establishAuthSession,
-  getAuthStatus,
-  disconnectAuthSession,
-  syncCourse,
-  getCourseLessons,
-  getAnalysisSummary,
-  enqueueAnalysisJobs,
-  retryAnalysisJob,
-  cancelAnalysisJob,
-  getLessonAnalysisJson,
-  subscribeAnalysisEvents,
-  type CourseLessonSummary,
-  type AnalysisSummary,
-} from "./lib/courseApi";
+import { establishAuthSession, getAuthStatus, disconnectAuthSession } from "./lib/courseApi";
 
 type AppState =
   | { phase: "config"; errorMessage: string | null; submitting: boolean }
@@ -68,28 +54,22 @@ interface CourseViewState {
   // runCourseCallbackFlow, right after exchange, purely to hand it to
   // establishAuthSession — never stored in ongoing state afterward.
   connecting: boolean;
-  syncing: boolean;
-  authRequired: boolean;
   // LIVE Whop provider-connection state (GET /api/auth/status) — see
   // SourcesPage.tsx's doc comment on why this is kept separate from
   // whether a course/lessons/analyses have ever been persisted.
+  //
+  // Phase 4K follow-up: course-specific state (lessons, per-course
+  // sync/analysis summary) no longer lives here — each Whop Course Detail
+  // page now owns its own scoped copy (see WhopCourseDetailPage.tsx),
+  // since Phase 4K made "the" single course assumption this state used to
+  // encode obsolete. This is provider-connection state only.
   connected: boolean;
-  courseTitle: string | null;
-  lastSyncedAt: string | null;
-  lessons: CourseLessonSummary[];
-  summary: AnalysisSummary | null;
   errorMessage: string | null;
 }
 
 const INITIAL_COURSE_STATE: CourseViewState = {
   connecting: false,
-  syncing: false,
-  authRequired: false,
   connected: false,
-  courseTitle: null,
-  lastSyncedAt: null,
-  lessons: [],
-  summary: null,
   errorMessage: null,
 };
 
@@ -160,24 +140,12 @@ export default function App() {
   async function refreshCourseState(token: string) {
     if (!backendUrl) return;
     try {
-      const [authStatus, courseLessons, summary] = await Promise.all([
-        getAuthStatus(backendUrl, token),
-        getCourseLessons(backendUrl, token),
-        getAnalysisSummary(backendUrl, token).catch(() => null),
-      ]);
-      setCourseState((prev) => ({
-        ...prev,
-        connected: authStatus.connected,
-        authRequired: authStatus.status === "auth_required",
-        courseTitle: courseLessons.course?.title ?? null,
-        lastSyncedAt: courseLessons.course?.lastSyncedAt ?? null,
-        lessons: courseLessons.lessons,
-        summary,
-      }));
+      const authStatus = await getAuthStatus(backendUrl, token);
+      setCourseState((prev) => ({ ...prev, connected: authStatus.connected }));
     } catch (err) {
       setCourseState((prev) => ({
         ...prev,
-        errorMessage: err instanceof Error ? err.message : "Failed to load course state.",
+        errorMessage: err instanceof Error ? err.message : "Failed to load Whop connection state.",
       }));
     }
   }
@@ -189,21 +157,6 @@ export default function App() {
   useEffect(() => {
     if (!backendUrl || !knoveraToken) return;
     void refreshCourseState(knoveraToken);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, knoveraToken]);
-
-  // Live-notification layer only (PR2): on any event, reload full state from
-  // Postgres via refreshCourseState — the SSE stream never carries the
-  // record of what happened on its own. Reconnects safely on drop. Uses the
-  // Knovera token (Phase 4D) — this stream is a Knovera-authed read, not a
-  // Whop-gated one.
-  useEffect(() => {
-    if (!backendUrl || !knoveraToken) return undefined;
-    const token = knoveraToken;
-    const unsubscribe = subscribeAnalysisEvents(backendUrl, token, () => {
-      void refreshCourseState(token);
-    });
-    return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl, knoveraToken]);
 
@@ -381,26 +334,6 @@ export default function App() {
     window.location.href = authorizeUrl;
   }
 
-  async function handleCourseSync() {
-    if (!backendUrl || !knoveraToken) return;
-    setCourseState((prev) => ({ ...prev, syncing: true, errorMessage: null }));
-    const outcome = await syncCourse(backendUrl, knoveraToken);
-    if (outcome.kind === "auth_required") {
-      // Phase 4D: this 401 means the WHOP provider connection is stale
-      // (courseSync.ts's own getValidAccessToken/AuthRequiredError path,
-      // behind requireWhopConnected's fast pre-check) — never the Knovera
-      // session, which is a separate, unaffected credential.
-      setCourseState((prev) => ({ ...prev, syncing: false, authRequired: true, connected: false }));
-      return;
-    }
-    if (outcome.kind === "error") {
-      setCourseState((prev) => ({ ...prev, syncing: false, errorMessage: outcome.message }));
-      return;
-    }
-    await refreshCourseState(knoveraToken);
-    setCourseState((prev) => ({ ...prev, syncing: false }));
-  }
-
   /**
    * Disconnects the Whop provider connection only. Phase 4D requirement:
    * this must NEVER touch the Knovera session — no navigation to /login, no
@@ -412,43 +345,6 @@ export default function App() {
     if (!backendUrl || !knoveraToken) return;
     await disconnectAuthSession(backendUrl, knoveraToken);
     await refreshCourseState(knoveraToken);
-  }
-
-  async function handleEnqueue(lessonIds: number[], force = false) {
-    if (!backendUrl || !knoveraToken) return;
-    try {
-      await enqueueAnalysisJobs(backendUrl, knoveraToken, lessonIds, force);
-      await refreshCourseState(knoveraToken);
-    } catch (err) {
-      setCourseState((prev) => ({
-        ...prev,
-        errorMessage: err instanceof Error ? err.message : "Failed to queue analysis.",
-      }));
-    }
-  }
-
-  async function handleRetry(jobId: string) {
-    if (!backendUrl || !knoveraToken) return;
-    try {
-      await retryAnalysisJob(backendUrl, knoveraToken, jobId);
-      await refreshCourseState(knoveraToken);
-    } catch (err) {
-      setCourseState((prev) => ({
-        ...prev,
-        errorMessage: err instanceof Error ? err.message : "Failed to retry job.",
-      }));
-    }
-  }
-
-  async function handleCancel(jobId: string) {
-    if (!backendUrl || !knoveraToken) return;
-    await cancelAnalysisJob(backendUrl, knoveraToken, jobId);
-    await refreshCourseState(knoveraToken);
-  }
-
-  async function handleLoadAnalysis(lessonId: number): Promise<unknown | null> {
-    if (!backendUrl || !knoveraToken) return null;
-    return getLessonAnalysisJson(backendUrl, knoveraToken, lessonId);
   }
 
   function handleReset() {
@@ -542,21 +438,10 @@ export default function App() {
           path="/projects/:projectId/sources"
           element={
             <SourcesPage
-              courseTitle={courseState.courseTitle}
-              lessons={courseState.lessons}
               connected={courseState.connected}
-              syncing={courseState.syncing}
-              authRequired={courseState.authRequired}
-              lastSyncedAt={courseState.lastSyncedAt}
-              summary={courseState.summary}
-              courseErrorMessage={courseState.errorMessage}
+              providerErrorMessage={courseState.errorMessage}
               onSignIn={handleCourseSignIn}
-              onSync={handleCourseSync}
               onDisconnect={handleCourseDisconnect}
-              onEnqueue={handleEnqueue}
-              onRetry={handleRetry}
-              onCancel={handleCancel}
-              onLoadAnalysis={handleLoadAnalysis}
               identifyState={identifyState}
               onFindUserId={handleFindUserId}
               backendUrl={backendUrl}

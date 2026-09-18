@@ -42,21 +42,10 @@ const WHOP_SOURCE = {
 
 function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps {
   return {
-    courseTitle: null,
-    lessons: [],
     connected: true,
-    syncing: false,
-    authRequired: false,
-    lastSyncedAt: null,
-    summary: null,
-    courseErrorMessage: null,
+    providerErrorMessage: null,
     onSignIn: () => {},
-    onSync: () => {},
     onDisconnect: () => {},
-    onEnqueue: () => {},
-    onRetry: () => {},
-    onCancel: () => {},
-    onLoadAnalysis: async () => null,
     identifyState: { phase: "idle" },
     onFindUserId: () => {},
     backendUrl: "https://backend.example.com",
@@ -111,7 +100,8 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     renderSources("/projects/7/sources");
 
     await waitFor(() => expect(screen.getByText("Connected")).toBeInTheDocument());
-    expect(screen.getByText(/The Trading Accelerator — course lessons, synced and analyzed via Whop\./)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/1 course connected — lessons synced and analyzed via Whop\./)).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "The Trading Accelerator" })).toBeInTheDocument();
   });
 
   it("C: shows a loading state while the sources fetch is in flight", async () => {
@@ -169,23 +159,29 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument();
   });
 
-  it("K: a project with no source never shows the Trading Accelerator course table", async () => {
+  it("K: a project with no source never shows a Whop Courses section or any lesson-management controls", async () => {
     stubFetch([]);
-    renderSources("/projects/7/sources", { courseTitle: "The Trading Accelerator" });
+    renderSources("/projects/7/sources");
 
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
-    expect(screen.queryByText("Sync Course")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Whop Courses" })).not.toBeInTheDocument();
     expect(screen.queryByText("Analyze All Unanalyzed")).not.toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
-  it("M/G: existing lesson-management AND Diagnostic Tools remain functional/visible for MasterMind (a project that does own a source)", async () => {
+  it("M/G: the Whop Courses card, provider-level Disconnect Whop, AND Diagnostic Tools remain visible for MasterMind (a project that does own a source) — no full lesson dashboard alongside them", async () => {
     stubFetch([WHOP_SOURCE]);
     renderSources("/projects/7/sources", { connected: true });
 
     await waitFor(() => expect(screen.getByText("Connected")).toBeInTheDocument());
-    expect(screen.getByText("Sync Course")).toBeInTheDocument();
-    expect(screen.getByText("Disconnect Whop")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Whop Courses" })).toBeInTheDocument());
+    expect(screen.getByRole("heading", { name: "The Trading Accelerator" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disconnect Whop" })).toBeInTheDocument();
     expect(screen.getByText("Diagnostic Tools")).toBeInTheDocument();
+    // No full lesson dashboard/table on this page anymore (Phase 4K follow-up).
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.queryByText("Analyze All Unanalyzed")).not.toBeInTheDocument();
   });
 
   it("D: a confirmed-empty project hides Diagnostic Tools (legacy Whop-only utilities with nothing to operate on)", async () => {
@@ -214,20 +210,17 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
       }),
     );
 
-    renderSources("/projects/8/sources", { courseTitle: "The Trading Accelerator" });
+    renderSources("/projects/8/sources");
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "SecondProject" })).toBeInTheDocument());
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
-    expect(screen.queryByText(/The Trading Accelerator — course lessons/)).not.toBeInTheDocument();
-    expect(screen.queryByText("Sync Course")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "The Trading Accelerator" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Whop Courses" })).not.toBeInTheDocument();
   });
 
-  it("preserves the pre-auth 'Connect Whop' entry point when signed out (CourseTable is the primary sign-in surface, not gated on an unresolvable sources check)", () => {
+  it("preserves the pre-auth 'Connect Whop' entry point when signed out, gated on nothing but live connection state", () => {
     renderSources("/projects/mastermind/sources", { backendUrl: "https://backend.example.com", knoveraToken: null, connected: false });
-    // Two "Connect Whop" entry points now legitimately coexist while signed
-    // out: the Phase 4D provider-card button (shown whenever Whop isn't
-    // live-connected) and CourseTable's own pre-existing sign-in button.
-    expect(screen.getAllByText("Connect Whop").length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByRole("button", { name: "Connect Whop" })).toBeInTheDocument();
   });
 });
 
@@ -302,12 +295,12 @@ describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
     expect(screen.queryByText(/lessons? analyzed/i)).not.toBeInTheDocument();
   });
 
-  it("a YouTube-only project (no Whop course) does not show the empty-state box or the Whop CourseTable", async () => {
+  it("a YouTube-only project (no Whop course) does not show the empty-state box or a Whop Courses section", async () => {
     stubFetch([YOUTUBE_SOURCE]);
-    renderSources("/projects/7/sources", { courseTitle: "The Trading Accelerator" });
+    renderSources("/projects/7/sources");
 
-    await waitFor(() => expect(screen.queryByText("Sync Course")).not.toBeInTheDocument());
-    expect(screen.queryByText("No sources connected yet.")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByText("No sources connected yet.")).not.toBeInTheDocument());
+    expect(screen.queryByRole("heading", { name: "Whop Courses" })).not.toBeInTheDocument();
   });
 
   it("I: adding a YouTube video works while Whop is disconnected (no live Whop connection)", async () => {
@@ -341,7 +334,7 @@ describe("SourcesPage — YouTube project sources (Phase 4H-A)", () => {
     stubFetch([WHOP_SOURCE, YOUTUBE_SOURCE]);
     renderSources("/projects/7/sources");
 
-    await waitFor(() => expect(screen.getByText(/The Trading Accelerator — course lessons/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("heading", { name: "The Trading Accelerator" })).toBeInTheDocument());
     await waitFor(() => expect(screen.queryByText("Loading sources…")).not.toBeInTheDocument());
   });
 });

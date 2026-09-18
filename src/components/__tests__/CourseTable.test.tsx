@@ -13,7 +13,6 @@ const baseProps = {
   summary: null,
   onSignIn: vi.fn(),
   onSync: vi.fn(),
-  onDisconnect: vi.fn(),
   onEnqueue: vi.fn(),
   onRetry: vi.fn(),
   onCancel: vi.fn(),
@@ -60,12 +59,13 @@ describe("CourseTable", () => {
     render(<CourseTable {...baseProps} lessons={[makeLesson()]} />);
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByText("Support & Resistance")).toBeInTheDocument();
-    // Sync/Disconnect require a live connection; a reconnect entry point
-    // takes their place instead, and neither destructive/mutating action
-    // is offered while disconnected.
+    // Refresh requires a live connection; a reconnect entry point takes its
+    // place instead, and no mutating action is offered while disconnected.
+    // Disconnect Whop is a provider-level control this table never renders
+    // (see the Whop provider card on Sources) — nothing to assert its
+    // absence against here, since it was never a prop in the first place.
     expect(screen.getByRole("button", { name: /connect whop to sync/i })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sync Course" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Disconnect Whop" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Refresh Course" })).not.toBeInTheDocument();
   });
 
   it("Phase 4D correction: disables the row Analyze action for a NOT_ANALYZED lesson while Whop is disconnected — analyzing always fetches the video from Whop", () => {
@@ -163,9 +163,9 @@ describe("CourseTable", () => {
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
-  it("disables the sync button and shows syncing state while a sync is in flight", () => {
+  it("disables the sync button and shows a refreshing state while a sync is in flight", () => {
     render(<CourseTable {...baseProps} connected syncing />);
-    expect(screen.getByRole("button", { name: /syncing/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /refreshing/i })).toBeDisabled();
   });
 
   it("queues a single lesson via the row Analyze action, after confirming the batch dialog", () => {
