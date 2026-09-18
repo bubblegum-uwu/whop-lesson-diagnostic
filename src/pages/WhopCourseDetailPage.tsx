@@ -76,6 +76,16 @@ type LoadState =
  *    bumps this counter via its own `loadDashboard` call, so it
  *    invalidates any older in-flight request the same way the key does.
  *
+ * Because BOTH fences share one counter, an SSE-triggered background
+ * refresh must never be allowed to start before the entity load it would
+ * race against has a chance to land — otherwise a background refresh that
+ * starts (and fails, silently, being a background refresh) while the
+ * entity load is still in flight would bump the counter out from under
+ * it, permanently discarding the entity load's own eventual success and
+ * leaving the page stuck on "Loading course…". SSE only subscribes once
+ * `state.phase === "loaded"` (see the SSE effect below) — there is
+ * nothing for a background refresh to usefully do before that anyway.
+ *
  * The course dashboard (persisted data) and the live Whop connection
  * status are loaded independently: a transient `getAuthStatus()` failure
  * is best-effort UI-capability state only and must never hide an
@@ -185,8 +195,18 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
   // course the operator isn't currently viewing (activeCourseKeyRef fences
   // a stale event's response the same way it fences every other async
   // refresh), and never unmounts the already-rendered CourseTable.
+  //
+  // Gated on state.phase === "loaded": subscribing any earlier would let an
+  // SSE-triggered background refresh bump dashboardRequestVersionRef before
+  // the initial entity load's own request resolves, which — if that
+  // background refresh then failed (its error is intentionally swallowed,
+  // being a background refresh) — would make the entity load's own
+  // eventually-successful response stale-and-discarded, leaving the page
+  // stuck on "Loading course…" with nothing left to recover it. Background
+  // refreshing only makes sense once there's a loaded page for it to
+  // refresh in place, so it simply doesn't start until one exists.
   useEffect(() => {
-    if (!backendUrl || !knoveraToken || resolvedProjectId == null || !Number.isInteger(courseId)) return undefined;
+    if (state.phase !== "loaded" || !backendUrl || !knoveraToken || resolvedProjectId == null || !Number.isInteger(courseId)) return undefined;
     const url = backendUrl;
     const token = knoveraToken;
     const projectId = resolvedProjectId;
@@ -196,7 +216,7 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
     });
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [backendUrl, knoveraToken, resolvedProjectId, courseId]);
+  }, [backendUrl, knoveraToken, resolvedProjectId, courseId, state.phase]);
 
   function refresh() {
     if (backendUrl && knoveraToken && resolvedProjectId != null) {

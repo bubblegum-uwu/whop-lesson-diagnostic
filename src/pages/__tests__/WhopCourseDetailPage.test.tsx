@@ -533,6 +533,58 @@ describe("WhopCourseDetailPage — stale SAME-course out-of-order responses must
   });
 });
 
+describe("WhopCourseDetailPage — SSE background refresh must not invalidate the initial entity load (follow-up)", () => {
+  it("does not subscribe to background SSE refresh until the course has actually loaded, so the initial load can never be stale-discarded out from under itself", async () => {
+    const course = makeCourse();
+    let resolveInitial!: (value: Response) => void;
+    let initialResolved = false;
+    let eventsEndpointCallCount = 0;
+    let eventsEndpointCallCountWhileLoading = 0;
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.endsWith("/api/analysis/events")) {
+        eventsEndpointCallCount += 1;
+        // The initial entity load hasn't resolved yet in this test until we
+        // explicitly call resolveInitial below — any SSE subscription
+        // attempt observed before that point would be exactly the bug this
+        // test guards against (a background refresh starting, and thus
+        // being able to invalidate, the still-in-flight initial load).
+        if (!initialResolved) eventsEndpointCallCountWhileLoading += 1;
+        // No body -> subscribeAnalysisEvents's real implementation treats
+        // this as "nothing to stream" and returns without ever firing a
+        // background refresh — good enough to prove whether/when a
+        // subscription attempt happened at all.
+        return jsonResponse(200, {});
+      }
+      if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) {
+        return new Promise<Response>((resolve) => (resolveInitial = resolve));
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    await waitFor(() => expect(screen.getByText("Loading course…")).toBeInTheDocument());
+    // Give any wrongly-early SSE subscription attempt a chance to fire
+    // while the page is still in the "loading" phase.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(eventsEndpointCallCountWhileLoading).toBe(0);
+
+    // The initial request finally succeeds.
+    initialResolved = true;
+    resolveInitial(jsonResponse(200, { course, summary: makeSummary(), lessons: [makeLesson()] }));
+
+    // The page must actually reach "loaded" — never stuck on "Loading course…".
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Trading Accelerator" })).toBeInTheDocument());
+    expect(screen.queryByText("Loading course…")).not.toBeInTheDocument();
+
+    // Only now — once loaded — does background SSE subscribing begin.
+    await waitFor(() => expect(eventsEndpointCallCount).toBeGreaterThan(0));
+  });
+});
+
 describe("WhopCourseDetailPage — persisted course data is independent of live Whop connection status (follow-up)", () => {
   it("the dashboard still renders (and Analyze fails safe to disconnected) when getAuthStatus() fails", async () => {
     const fetchMock = vi.fn(async (url: string) => {
