@@ -417,7 +417,7 @@ describe("WhopCourseDetailPage — stale background responses must never overwri
     let staleRefreshRequested = false;
 
     // This exercises exactly the same background-refresh code path
-    // (loadDashboard called with showLoading: false, fenced by
+    // (loadDashboard called with isEntityLoad: false, fenced by
     // activeCourseKeyRef) that an SSE analysis event also drives — the
     // vulnerable mechanism is identical, and Refresh Course gives full
     // control over exactly when the in-flight response resolves.
@@ -469,6 +469,67 @@ describe("WhopCourseDetailPage — stale background responses must never overwri
 
     expect(screen.getByText("Course B Lesson")).toBeInTheDocument();
     expect(screen.queryByText("Course A Lesson (STALE REFRESH)")).not.toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — stale SAME-course out-of-order responses must never overwrite newer data (follow-up)", () => {
+  it("an older same-course background refresh (R1) resolving after a newer one (R2) does not overwrite R2's fresher data", async () => {
+    const course = makeCourse();
+    const initialLesson = makeLesson({ id: 201, title: "Lesson One", job: { jobId: "job_201", status: "ANALYZING" }, analysis: null });
+    const staleLessonR1 = makeLesson({ id: 201, title: "Older Refresh", job: { jobId: "job_201", status: "ANALYZING" }, analysis: null });
+    const newerLessonR2 = makeLesson({ id: 201, title: "Newest Refresh", job: { jobId: "job_201", status: "COMPLETED" } });
+
+    let resolveR1!: (value: Response) => void;
+    let dashboardCallCount = 0;
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes(`/whop-courses/${course.courseId}/refresh`) && init?.method === "POST") return jsonResponse(200, { course });
+      if (url.endsWith("/api/analysis/jobs") && init?.method === "POST") return jsonResponse(202, { queued: [{ lessonId: 202, jobId: "job_202" }], skipped: [] });
+      if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) {
+        dashboardCallCount += 1;
+        if (dashboardCallCount === 1) {
+          // Initial entity load — resolves immediately.
+          return jsonResponse(200, { course, summary: makeSummary(), lessons: [initialLesson, NOT_ANALYZED_LESSON] });
+        }
+        if (dashboardCallCount === 2) {
+          // R1 — the first background refresh (triggered by Refresh Course),
+          // deliberately held open so R2 can be started and resolve first.
+          return new Promise<Response>((resolve) => (resolveR1 = resolve));
+        }
+        // R2 — the second background refresh (triggered by Analyze
+        // Selected), resolves immediately with NEWER data.
+        return jsonResponse(200, { course, summary: makeSummary(), lessons: [newerLessonR2, NOT_ANALYZED_LESSON] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Lesson One")).toBeInTheDocument());
+
+    // Start R1 via Refresh Course (held open).
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(dashboardCallCount).toBe(2));
+
+    // Start R2 via a different action (Analyze Selected) while R1 is still
+    // in flight — a real scenario during active analysis where several SSE
+    // refreshes can overlap. R2 resolves immediately.
+    fireEvent.click(screen.getByRole("button", { name: "Select All Unanalyzed" }));
+    fireEvent.click(screen.getByRole("button", { name: /Analyze Selected/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(dashboardCallCount).toBe(3));
+
+    // R2 (newer, started second, resolved first) commits.
+    await waitFor(() => expect(screen.getByText("Newest Refresh")).toBeInTheDocument());
+
+    // R1 (older, started first) finally resolves with a stale snapshot —
+    // it must be discarded, not applied on top of R2's fresher data.
+    resolveR1(jsonResponse(200, { course, summary: makeSummary(), lessons: [staleLessonR1, NOT_ANALYZED_LESSON] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText("Newest Refresh")).toBeInTheDocument();
+    expect(screen.queryByText("Older Refresh")).not.toBeInTheDocument();
   });
 });
 

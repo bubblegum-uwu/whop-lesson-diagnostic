@@ -56,13 +56,25 @@ type LoadState =
  *    `course`/`summary`/`lessons` data in place, in the same "loaded"
  *    phase, so CourseTable stays mounted throughout.
  *
- * Every async response (entity load or background refresh alike) is
- * fenced by `activeCourseKeyRef` — a request kicked off for Course A that
- * resolves after the operator has already navigated to Course B is
- * discarded rather than committed, so a slow in-flight request can never
- * overwrite a different course's already-rendered page (see
- * WhopCourseDetailPage.test.tsx's stale-background-response regression
- * test).
+ * Every async response (entity load or background refresh alike) must pass
+ * TWO fences before it's allowed to call setState:
+ *  - `activeCourseKeyRef` — a request kicked off for Course A that
+ *    resolves after the operator has already navigated to Course B is
+ *    discarded, so a slow in-flight request can never overwrite a
+ *    different course's already-rendered page (see
+ *    WhopCourseDetailPage.test.tsx's stale-cross-course-response
+ *    regression test).
+ *  - `dashboardRequestVersionRef` — a monotonically increasing counter
+ *    bumped by every `loadDashboard` call (entity load, SSE refresh,
+ *    action-triggered refresh alike). Even for the SAME course, multiple
+ *    background refreshes can be in flight at once (e.g. several SSE
+ *    events firing close together during active analysis) and can
+ *    resolve out of order; only the response whose version is still the
+ *    latest is allowed to commit, so a slower older request can never
+ *    overwrite a newer one's fresher data (see the same test file's
+ *    stale-same-course-response regression test). An entity change also
+ *    bumps this counter via its own `loadDashboard` call, so it
+ *    invalidates any older in-flight request the same way the key does.
  *
  * The course dashboard (persisted data) and the live Whop connection
  * status are loaded independently: a transient `getAuthStatus()` failure
@@ -97,27 +109,35 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
   // actually on screen by then.
   const activeCourseKeyRef = useRef<string>(courseKey);
 
+  // Bumped by every loadDashboard call. A response only commits if it's
+  // still the most recent request by the time it resolves — see the doc
+  // comment above.
+  const dashboardRequestVersionRef = useRef(0);
+
   /**
-   * Fetches this course's persisted dashboard data. `showLoading: true` is
-   * for an entity-changing load (blanks the page to "loading", and a
-   * failure becomes a page-level error state); `showLoading: false` is a
-   * background refresh that leaves the current "loaded" UI mounted and
-   * only swaps in fresh data on success — a background failure is
-   * swallowed rather than blanking out an already-working page (not-found
-   * is the one exception: the course genuinely no longer exists, so it
-   * always takes effect).
+   * Fetches this course's persisted dashboard data. `isEntityLoad: true`
+   * is for an entity-changing load — the page is already showing "loading"
+   * (set synchronously by the effect before this is called), and a
+   * failure becomes a page-level error state. `isEntityLoad: false` is a
+   * background refresh: the current "loaded" UI stays mounted, and a
+   * failure is swallowed rather than blanking out an already-working page
+   * (not-found is the one exception: the course genuinely no longer
+   * exists, so it always takes effect, entity load or not).
    */
-  async function loadDashboard(url: string, token: string, projectId: number, key: string, options: { showLoading: boolean }) {
-    if (options.showLoading) setState({ phase: "loading" });
+  async function loadDashboard(url: string, token: string, projectId: number, key: string, options: { isEntityLoad: boolean }) {
+    const requestVersion = ++dashboardRequestVersionRef.current;
+    function isStale() {
+      return activeCourseKeyRef.current !== key || dashboardRequestVersionRef.current !== requestVersion;
+    }
     try {
       const dashboard = await getWhopCourseDashboard(url, token, projectId, courseId);
-      if (activeCourseKeyRef.current !== key) return;
+      if (isStale()) return;
       setState({ phase: "loaded", course: dashboard.course, summary: dashboard.summary, lessons: dashboard.lessons });
     } catch (err) {
-      if (activeCourseKeyRef.current !== key) return;
+      if (isStale()) return;
       if (err instanceof CatalogApiError && err.type === "course_not_found") {
         setState({ phase: "not_found" });
-      } else if (options.showLoading) {
+      } else if (options.isEntityLoad) {
         setState({ phase: "error", message: err instanceof Error ? err.message : "Failed to load course." });
       }
     }
@@ -154,7 +174,7 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
     setState({ phase: "loading" });
     setActionError(null);
     setSyncing(false);
-    void loadDashboard(backendUrl, knoveraToken, resolvedProjectId, courseKey, { showLoading: false });
+    void loadDashboard(backendUrl, knoveraToken, resolvedProjectId, courseKey, { isEntityLoad: true });
     void loadConnectionState(backendUrl, knoveraToken, courseKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl, knoveraToken, resolvedProjectId, courseId]);
@@ -172,7 +192,7 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
     const projectId = resolvedProjectId;
     const key = courseKey;
     const unsubscribe = subscribeAnalysisEvents(url, token, () => {
-      void loadDashboard(url, token, projectId, key, { showLoading: false });
+      void loadDashboard(url, token, projectId, key, { isEntityLoad: false });
     });
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -180,7 +200,7 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
 
   function refresh() {
     if (backendUrl && knoveraToken && resolvedProjectId != null) {
-      void loadDashboard(backendUrl, knoveraToken, resolvedProjectId, courseKey, { showLoading: false });
+      void loadDashboard(backendUrl, knoveraToken, resolvedProjectId, courseKey, { isEntityLoad: false });
       void loadConnectionState(backendUrl, knoveraToken, courseKey);
     }
   }
