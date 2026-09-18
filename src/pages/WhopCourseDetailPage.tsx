@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { useResolvedProject } from "../lib/useResolvedProject";
@@ -43,6 +43,32 @@ type LoadState =
  * still in flight — the same pattern CourseIntelligence/SynthesisSetDetailPage
  * already use for their own per-entity state.
  *
+ * Two distinct kinds of (re)load:
+ *  - An ENTITY-CHANGING load (initial mount, projectId/courseId change)
+ *    blanks the page to "Loading course…" — there is no previous course's
+ *    CourseTable worth preserving.
+ *  - A BACKGROUND refresh (SSE analysis events, Analyze/Retry/Cancel/
+ *    Refresh Course follow-ups) must NOT unmount the already-rendered
+ *    CourseTable — it owns its own local UI state (search, filters,
+ *    selection, pagination, the open lesson detail drawer) that a
+ *    "loading" blank-out would silently reset on every live update while
+ *    an analysis run is in progress. Background refreshes replace only the
+ *    `course`/`summary`/`lessons` data in place, in the same "loaded"
+ *    phase, so CourseTable stays mounted throughout.
+ *
+ * Every async response (entity load or background refresh alike) is
+ * fenced by `activeCourseKeyRef` — a request kicked off for Course A that
+ * resolves after the operator has already navigated to Course B is
+ * discarded rather than committed, so a slow in-flight request can never
+ * overwrite a different course's already-rendered page (see
+ * WhopCourseDetailPage.test.tsx's stale-background-response regression
+ * test).
+ *
+ * The course dashboard (persisted data) and the live Whop connection
+ * status are loaded independently: a transient `getAuthStatus()` failure
+ * is best-effort UI-capability state only and must never hide an
+ * already-successfully-loaded course dashboard.
+ *
  * Provider-level Whop actions (Connect/Disconnect) live on the Sources
  * page's Whop provider card, not here — CourseTable itself no longer
  * exposes a Disconnect action (see CourseTableProps' doc comment). This
@@ -61,61 +87,102 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
 
   const resolvedProjectId = projectState.phase === "resolved" ? projectState.project.id : null;
   const courseId = courseIdParam ? Number(courseIdParam) : NaN;
+  const courseKey = `${resolvedProjectId ?? ""}:${courseId}`;
 
-  async function load(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
-    setState({ phase: "loading" });
+  // The only course/project this page instance is currently allowed to
+  // commit fetched state for. Every async handler below reads this
+  // ref — never a captured variable — at the moment its response arrives,
+  // so a request that outlives its own course (background refresh or
+  // otherwise) is discarded instead of clobbering whatever course is
+  // actually on screen by then.
+  const activeCourseKeyRef = useRef<string>(courseKey);
+
+  /**
+   * Fetches this course's persisted dashboard data. `showLoading: true` is
+   * for an entity-changing load (blanks the page to "loading", and a
+   * failure becomes a page-level error state); `showLoading: false` is a
+   * background refresh that leaves the current "loaded" UI mounted and
+   * only swaps in fresh data on success — a background failure is
+   * swallowed rather than blanking out an already-working page (not-found
+   * is the one exception: the course genuinely no longer exists, so it
+   * always takes effect).
+   */
+  async function loadDashboard(url: string, token: string, projectId: number, key: string, options: { showLoading: boolean }) {
+    if (options.showLoading) setState({ phase: "loading" });
     try {
-      const [dashboard, authStatus] = await Promise.all([getWhopCourseDashboard(url, token, projectId, courseId), getAuthStatus(url, token)]);
-      if (cancelledRef.current) return;
+      const dashboard = await getWhopCourseDashboard(url, token, projectId, courseId);
+      if (activeCourseKeyRef.current !== key) return;
       setState({ phase: "loaded", course: dashboard.course, summary: dashboard.summary, lessons: dashboard.lessons });
-      setConnected(authStatus.connected);
-      setAuthRequired(authStatus.status === "auth_required");
     } catch (err) {
-      if (cancelledRef.current) return;
+      if (activeCourseKeyRef.current !== key) return;
       if (err instanceof CatalogApiError && err.type === "course_not_found") {
         setState({ phase: "not_found" });
-      } else {
+      } else if (options.showLoading) {
         setState({ phase: "error", message: err instanceof Error ? err.message : "Failed to load course." });
       }
     }
   }
 
+  /**
+   * Live Whop provider connection status — best-effort, deliberately
+   * separate from `loadDashboard`. This is UI-capability state (whether
+   * Analyze/Retry/Re-analyze should be enabled), never a gate on viewing
+   * already-persisted course/lesson/analysis data. A transient failure
+   * here leaves whatever connection state was last known rather than
+   * hiding or erroring the course page.
+   */
+  async function loadConnectionState(url: string, token: string, key: string) {
+    try {
+      const authStatus = await getAuthStatus(url, token);
+      if (activeCourseKeyRef.current !== key) return;
+      setConnected(authStatus.connected);
+      setAuthRequired(authStatus.status === "auth_required");
+    } catch {
+      // Best-effort — see doc comment above.
+    }
+  }
+
   useEffect(() => {
+    activeCourseKeyRef.current = courseKey;
     if (!backendUrl || !knoveraToken || resolvedProjectId == null || !Number.isInteger(courseId)) {
       setState({ phase: "idle" });
       return;
     }
     // Reset synchronously — a courseId change (Course A -> Course B) must
-    // never keep showing Course A's lessons while Course B's fetch is in
-    // flight.
+    // never keep showing Course A's lessons, error banner, or busy state
+    // while the new course's fetch is in flight.
     setState({ phase: "loading" });
-    const cancelledRef = { current: false };
-    void load(backendUrl, knoveraToken, resolvedProjectId, cancelledRef);
-    return () => {
-      cancelledRef.current = true;
-    };
+    setActionError(null);
+    setSyncing(false);
+    void loadDashboard(backendUrl, knoveraToken, resolvedProjectId, courseKey, { showLoading: false });
+    void loadConnectionState(backendUrl, knoveraToken, courseKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl, knoveraToken, resolvedProjectId, courseId]);
 
   // Live-notification layer, scoped to this page's own courseId: on any
-  // analysis event, reload THIS course's dashboard — mirrors the app's
-  // former global refresh, but never leaks into a course the operator
-  // isn't currently viewing (a stale event simply causes an extra,
-  // harmless refetch of this course's own already-scoped endpoint).
+  // analysis event, refresh THIS course's dashboard in the background —
+  // mirrors the app's former global refresh, but never leaks into a
+  // course the operator isn't currently viewing (activeCourseKeyRef fences
+  // a stale event's response the same way it fences every other async
+  // refresh), and never unmounts the already-rendered CourseTable.
   useEffect(() => {
     if (!backendUrl || !knoveraToken || resolvedProjectId == null || !Number.isInteger(courseId)) return undefined;
     const url = backendUrl;
     const token = knoveraToken;
     const projectId = resolvedProjectId;
+    const key = courseKey;
     const unsubscribe = subscribeAnalysisEvents(url, token, () => {
-      void load(url, token, projectId, { current: false });
+      void loadDashboard(url, token, projectId, key, { showLoading: false });
     });
     return unsubscribe;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [backendUrl, knoveraToken, resolvedProjectId, courseId]);
 
   function refresh() {
-    if (backendUrl && knoveraToken && resolvedProjectId != null) void load(backendUrl, knoveraToken, resolvedProjectId, { current: false });
+    if (backendUrl && knoveraToken && resolvedProjectId != null) {
+      void loadDashboard(backendUrl, knoveraToken, resolvedProjectId, courseKey, { showLoading: false });
+      void loadConnectionState(backendUrl, knoveraToken, courseKey);
+    }
   }
 
   function goToSources() {
@@ -124,41 +191,52 @@ export function WhopCourseDetailPage({ backendUrl, knoveraToken }: WhopCourseDet
 
   async function handleRefreshCourse() {
     if (!backendUrl || !knoveraToken || resolvedProjectId == null) return;
+    const key = courseKey;
     setSyncing(true);
     setActionError(null);
     try {
       await refreshWhopCourse(backendUrl, knoveraToken, resolvedProjectId, courseId);
+      if (activeCourseKeyRef.current !== key) return;
       refresh();
     } catch (err) {
+      if (activeCourseKeyRef.current !== key) return;
       setActionError(err instanceof CatalogApiError ? err.message : "Failed to refresh course.");
     } finally {
-      setSyncing(false);
+      if (activeCourseKeyRef.current === key) setSyncing(false);
     }
   }
 
   async function handleEnqueue(lessonIds: number[], force = false) {
     if (!backendUrl || !knoveraToken) return;
+    const key = courseKey;
     try {
       await enqueueAnalysisJobs(backendUrl, knoveraToken, lessonIds, force);
+      if (activeCourseKeyRef.current !== key) return;
       refresh();
     } catch (err) {
+      if (activeCourseKeyRef.current !== key) return;
       setActionError(err instanceof Error ? err.message : "Failed to queue analysis.");
     }
   }
 
   async function handleRetry(jobId: string) {
     if (!backendUrl || !knoveraToken) return;
+    const key = courseKey;
     try {
       await retryAnalysisJob(backendUrl, knoveraToken, jobId);
+      if (activeCourseKeyRef.current !== key) return;
       refresh();
     } catch (err) {
+      if (activeCourseKeyRef.current !== key) return;
       setActionError(err instanceof Error ? err.message : "Failed to retry job.");
     }
   }
 
   async function handleCancel(jobId: string) {
     if (!backendUrl || !knoveraToken) return;
+    const key = courseKey;
     await cancelAnalysisJob(backendUrl, knoveraToken, jobId);
+    if (activeCourseKeyRef.current !== key) return;
     refresh();
   }
 

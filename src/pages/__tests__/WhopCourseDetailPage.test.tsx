@@ -342,3 +342,203 @@ describe("WhopCourseDetailPage — rich course management UI (Phase 4K follow-up
     expect(screen.getByText("SOURCES_MARKER")).toBeInTheDocument();
   });
 });
+
+describe("WhopCourseDetailPage — background refresh must not unmount CourseTable (follow-up)", () => {
+  it("a background refresh (Refresh Course) never blanks the page to 'Loading course…' and preserves search state", async () => {
+    const course = makeCourse();
+    let refreshCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes(`/whop-courses/${course.courseId}/refresh`) && init?.method === "POST") {
+        refreshCount += 1;
+        return jsonResponse(200, { course });
+      }
+      if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) {
+        return jsonResponse(200, { course, summary: makeSummary(), lessons: [makeLesson(), NOT_ANALYZED_LESSON] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Advanced Setups")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Search lessons"), { target: { value: "Advanced" } });
+    await waitFor(() => expect(screen.queryByText("Introduction To Accelerator")).not.toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(refreshCount).toBe(1));
+
+    // The rich course UI must have stayed mounted throughout — never
+    // replaced with the entity-load "Loading course…" placeholder.
+    expect(screen.queryByText("Loading course…")).not.toBeInTheDocument();
+    // CourseTable's own local search state must have survived (proof it
+    // was never unmounted/remounted by the background refresh).
+    expect(screen.getByLabelText("Search lessons")).toHaveValue("Advanced");
+    expect(screen.getByText("Advanced Setups")).toBeInTheDocument();
+  });
+
+  it("an open lesson detail drawer stays open across a background refresh, not merely because data refreshed", async () => {
+    const course = makeCourse();
+    let refreshCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes(`/whop-courses/${course.courseId}/refresh`) && init?.method === "POST") {
+        refreshCount += 1;
+        return jsonResponse(200, { course });
+      }
+      if (url.includes(`/whop-courses/${course.courseId}/dashboard`)) {
+        return jsonResponse(200, { course, summary: makeSummary(), lessons: [makeLesson(), NOT_ANALYZED_LESSON] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "View" }));
+    await waitFor(() => expect(screen.getByText("Break and retest continuation.")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(refreshCount).toBe(1));
+
+    expect(screen.getByText("Break and retest continuation.")).toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — stale background responses must never overwrite a different course (follow-up)", () => {
+  it("a stale in-flight Course A background refresh resolving after navigating to Course B never overwrites Course B", async () => {
+    const courseA = makeCourse({ courseId: 5, name: "Course A" });
+    const courseB = makeCourse({ courseId: 9, name: "Course B" });
+    const lessonA = makeLesson({ id: 301, title: "Course A Lesson" });
+    const staleLessonA = makeLesson({ id: 301, title: "Course A Lesson (STALE REFRESH)" });
+    const lessonB = makeLesson({ id: 401, title: "Course B Lesson" });
+    let resolveStaleA!: (value: Response) => void;
+    let staleRefreshRequested = false;
+
+    // This exercises exactly the same background-refresh code path
+    // (loadDashboard called with showLoading: false, fenced by
+    // activeCourseKeyRef) that an SSE analysis event also drives — the
+    // vulnerable mechanism is identical, and Refresh Course gives full
+    // control over exactly when the in-flight response resolves.
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes("/whop-courses/5/refresh") && init?.method === "POST") {
+        staleRefreshRequested = true;
+        return jsonResponse(200, { course: courseA });
+      }
+      if (url.includes("/whop-courses/5/dashboard")) {
+        if (!staleRefreshRequested) return jsonResponse(200, { course: courseA, summary: makeSummary(), lessons: [lessonA] });
+        // The background refresh's dashboard re-fetch, deliberately held open.
+        return new Promise<Response>((resolve) => (resolveStaleA = resolve));
+      }
+      if (url.includes("/whop-courses/9/dashboard")) return jsonResponse(200, { course: courseB, summary: makeSummary(), lessons: [lessonB] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/projects/7/whop-courses/5"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/whop-courses/:courseId"
+            element={
+              <>
+                <Link to="/projects/7/whop-courses/9">Go to Course B</Link>
+                <WhopCourseDetailPage backendUrl="https://backend.example.com" knoveraToken="token" />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("Course A Lesson")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(staleRefreshRequested).toBe(true));
+
+    fireEvent.click(screen.getByRole("link", { name: "Go to Course B" }));
+    await waitFor(() => expect(screen.getByText("Course B Lesson")).toBeInTheDocument());
+    expect(screen.queryByText("Course A Lesson")).not.toBeInTheDocument();
+
+    // The stale Course A background request finally resolves — its result
+    // must be discarded, not applied on top of Course B.
+    resolveStaleA(jsonResponse(200, { course: courseA, summary: makeSummary(), lessons: [staleLessonA] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByText("Course B Lesson")).toBeInTheDocument();
+    expect(screen.queryByText("Course A Lesson (STALE REFRESH)")).not.toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — persisted course data is independent of live Whop connection status (follow-up)", () => {
+  it("the dashboard still renders (and Analyze fails safe to disconnected) when getAuthStatus() fails", async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(500, { error: { message: "Auth status unavailable." } });
+      if (url.includes("/whop-courses/5/dashboard")) return jsonResponse(200, { course: makeCourse(), summary: makeSummary(), lessons: [makeLesson(), NOT_ANALYZED_LESSON] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    // Persisted course/lesson data renders even though the live
+    // connection-status request failed.
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Trading Accelerator" })).toBeInTheDocument());
+    expect(screen.getByText("Introduction To Accelerator")).toBeInTheDocument();
+    expect(screen.getByText("Advanced Setups")).toBeInTheDocument();
+    expect(screen.queryByText("This Whop course doesn't exist.")).not.toBeInTheDocument();
+
+    // Analyze/Retry/Refresh controls fail safe to the "disconnected"
+    // default rather than assuming connected.
+    expect(screen.getByRole("button", { name: "Connect Whop to sync" })).toBeInTheDocument();
+  });
+});
+
+describe("WhopCourseDetailPage — course-local transient state resets on course change (follow-up)", () => {
+  it("Course A's action error and busy Refresh state do not leak onto Course B after navigating away", async () => {
+    const courseA = makeCourse({ courseId: 5, name: "Course A" });
+    const courseB = makeCourse({ courseId: 9, name: "Course B" });
+    const lessonA = makeLesson({ id: 301, title: "Course A Lesson" });
+    const lessonB = makeLesson({ id: 401, title: "Course B Lesson" });
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/api/auth/status")) return jsonResponse(200, { connected: true, status: "active", whopUserId: "u" });
+      if (url.includes("/whop-courses/5/refresh") && init?.method === "POST") {
+        return jsonResponse(500, { error: { message: "Needs Whop reconnect" } });
+      }
+      if (url.includes("/whop-courses/5/dashboard")) return jsonResponse(200, { course: courseA, summary: makeSummary(), lessons: [lessonA] });
+      if (url.includes("/whop-courses/9/dashboard")) return jsonResponse(200, { course: courseB, summary: makeSummary(), lessons: [lessonB] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/projects/7/whop-courses/5"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/whop-courses/:courseId"
+            element={
+              <>
+                <Link to="/projects/7/whop-courses/9">Go to Course B</Link>
+                <WhopCourseDetailPage backendUrl="https://backend.example.com" knoveraToken="token" />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(screen.getByText("Course A Lesson")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh Course" }));
+    await waitFor(() => expect(screen.getByText("Needs Whop reconnect")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("link", { name: "Go to Course B" }));
+    await waitFor(() => expect(screen.getByText("Course B Lesson")).toBeInTheDocument());
+
+    expect(screen.queryByText("Needs Whop reconnect")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Refresh Course" })).toBeInTheDocument();
+  });
+});
