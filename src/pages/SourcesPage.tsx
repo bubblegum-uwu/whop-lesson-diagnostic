@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { WhopIcon, YouTubeIcon, DiscordIcon } from "../components/ProviderIcons";
@@ -71,18 +71,22 @@ type SourcesLoadState =
   | { phase: "error"; message: string };
 
 /**
- * "/projects/:projectId/sources". Provider cards (Whop, YouTube, and as of
- * Phase 4I, Discord — all three operational) plus the existing Whop
- * sync/lesson-analysis UI and the two standalone Whop utility tools
- * (single-lesson diagnostic, find-my-user-id), all reusing the SAME
- * components/handlers App.tsx already wires up — no analysis behavior
- * changed, only where it's rendered.
+ * "/projects/:projectId/sources" — COLLECTION/GROUP-ONLY (Phase 4L taxonomy
+ * correction, reaffirmed by the Phase 4K follow-up that moved the rich
+ * per-course lesson UI onto its own WhopCourseDetailPage): provider cards
+ * (Whop, YouTube, Discord), one card per connected Whop course, the
+ * Collections/à-la-carte grid, and the two standalone Whop utility tools
+ * (single-lesson diagnostic, find-my-user-id). No individual source or
+ * lesson row, and no per-course management UI, ever renders on this page —
+ * see the JSX comment above the Collections section for the full
+ * PERSISTED-vs-DERIVED group model.
  *
  * Loads this project's real connected sources from `GET
  * /api/projects/:projectId/sources` (via the same `useResolvedProject` hook
- * ProjectHeader uses) to keep the legacy course table/mutation UI below
- * from ever rendering for a project that has never owned a Whop course —
- * see `confirmedNeverHadSource` below.
+ * ProjectHeader uses) to keep the Whop Courses grid and Diagnostic Tools
+ * section below from ever rendering for a project that has never owned a
+ * Whop course — see `confirmedNeverHadWhopSource`/`confirmedNeverHadAnySource`
+ * below.
  *
  * Phase 4D — critically, that "has a source ever been persisted" signal is
  * kept SEPARATE from `props.connected` (the LIVE Whop provider-connection
@@ -104,34 +108,92 @@ export function SourcesPage(props: SourcesPageProps) {
   const [collections, setCollections] = useState<CatalogCollectionSummary[]>([]);
   const [alaCarteWhopLessons, setAlaCarteWhopLessons] = useState<AlaCarteWhopLessonSummary[]>([]);
 
-  async function loadSources(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
+  // The only project this page instance is currently allowed to commit
+  // fetched state for — shared across sources/collections/à-la-carte
+  // lessons. Set synchronously whenever the resolved project changes (see
+  // each dataset's own effect below), so a request kicked off for Project A
+  // that resolves after the operator has navigated to Project B is
+  // discarded rather than clobbering Project B's already-rendered page —
+  // same pattern WhopCourseDetailPage.tsx uses for its own per-entity state.
+  const activeProjectIdRef = useRef<number | null>(null);
+  // Bumped by every loadSources/loadCollections/loadAlaCarteWhopLessons call
+  // respectively. A response only commits if it is BOTH for the
+  // still-active project (activeProjectIdRef) AND still the most recent
+  // request for that dataset — this is what stops a slow initial load from
+  // overwriting a faster post-mutation background refresh. Example: the
+  // Sources page mounts and starts a slow initial GET /collections; before
+  // it resolves, the operator adds a YouTube source, whose own
+  // refreshSourceCatalog() kicks off a second, faster GET /collections that
+  // resolves first and shows the new card; without this fence, the slow
+  // initial request would then land and call setCollections([]),
+  // silently reverting the page back to "no collections" — the exact
+  // stale-UI symptom this file's earlier fix (refreshSourceCatalog) was
+  // meant to eliminate, just reached a different way. See
+  // SourcesPage.catalog.test.tsx's stale-request regression tests.
+  //
+  // Protection is required at BOTH ends of a request, not just completion:
+  // each loader also checks activeProjectIdRef BEFORE doing anything
+  // observable (before bumping its version ref or setting a "loading"
+  // state) — a mutation dialog's onAdded/onImported closure captures
+  // whichever project was active when the dialog was opened, so a POST
+  // that was still in flight when the operator navigated to a different
+  // project resolves into a closure for a project that is no longer
+  // active. Without the start-of-request check, that stale closure could
+  // still advance the CURRENT project's request-version counter and flash
+  // "Loading sources…" over an already-loaded, unrelated project, even
+  // though its own eventual response would correctly get discarded by the
+  // completion-time check above.
+  const sourcesRequestVersionRef = useRef(0);
+  const collectionsRequestVersionRef = useRef(0);
+  const alaCarteWhopLessonsRequestVersionRef = useRef(0);
+
+  async function loadSources(url: string, token: string, projectId: number) {
+    // Reject a stale caller BEFORE it can do anything observable — a
+    // mutation dialog's onAdded closure captures the project id at the
+    // time it was rendered, so a POST that was still in flight when the
+    // operator navigated to a different project resolves into a closure
+    // for a project that is no longer active. Checking this first stops
+    // that stale caller from bumping the request-version counter or
+    // flashing "Loading sources…" over whichever project's request IS
+    // still legitimately in flight — it must be a complete no-op.
+    if (activeProjectIdRef.current !== projectId) return;
+    const requestVersion = ++sourcesRequestVersionRef.current;
+    function isStale() {
+      return activeProjectIdRef.current !== projectId || sourcesRequestVersionRef.current !== requestVersion;
+    }
     setSourcesState({ phase: "loading" });
     try {
       const result = await getProjectSources(url, token, projectId);
-      if (!cancelledRef.current) setSourcesState({ phase: "loaded", sources: result.sources });
+      if (isStale()) return;
+      setSourcesState({ phase: "loaded", sources: result.sources });
     } catch (err) {
-      if (!cancelledRef.current) {
-        setSourcesState({ phase: "error", message: err instanceof Error ? err.message : "Failed to load sources." });
-      }
+      if (isStale()) return;
+      setSourcesState({ phase: "error", message: err instanceof Error ? err.message : "Failed to load sources." });
     }
   }
 
   useEffect(() => {
     if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
+      activeProjectIdRef.current = null;
       setSourcesState({ phase: "idle" });
       return;
     }
-    const cancelledRef = { current: false };
-    void loadSources(props.backendUrl, props.knoveraToken, projectState.project.id, cancelledRef);
-    return () => {
-      cancelledRef.current = true;
-    };
+    activeProjectIdRef.current = projectState.project.id;
+    void loadSources(props.backendUrl, props.knoveraToken, projectState.project.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
 
   async function loadCollections(url: string, token: string, projectId: number) {
+    // See loadSources's identical guard above — a stale caller (e.g. a
+    // mutation dialog's onAdded closure whose POST finished after the
+    // operator navigated away) must be a complete no-op, never advancing
+    // the request-version counter.
+    if (activeProjectIdRef.current !== projectId) return;
+    const requestVersion = ++collectionsRequestVersionRef.current;
     try {
-      setCollections(await listSourceCollections(url, token, projectId));
+      const result = await listSourceCollections(url, token, projectId);
+      if (activeProjectIdRef.current !== projectId || collectionsRequestVersionRef.current !== requestVersion) return;
+      setCollections(result);
     } catch {
       // Best-effort — a transient collections-list failure only hides the
       // Collections/Uncollected cards below, never the rest of the page.
@@ -140,9 +202,11 @@ export function SourcesPage(props: SourcesPageProps) {
 
   useEffect(() => {
     if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
+      activeProjectIdRef.current = null;
       setCollections([]);
       return;
     }
+    activeProjectIdRef.current = projectState.project.id;
     void loadCollections(props.backendUrl, props.knoveraToken, projectState.project.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
@@ -154,8 +218,13 @@ export function SourcesPage(props: SourcesPageProps) {
   // loadCollections: a transient failure here never hides the rest of the
   // Sources page.
   async function loadAlaCarteWhopLessons(url: string, token: string, projectId: number) {
+    // See loadSources's identical guard above.
+    if (activeProjectIdRef.current !== projectId) return;
+    const requestVersion = ++alaCarteWhopLessonsRequestVersionRef.current;
     try {
-      setAlaCarteWhopLessons(await listAlaCarteWhopLessons(url, token, projectId));
+      const result = await listAlaCarteWhopLessons(url, token, projectId);
+      if (activeProjectIdRef.current !== projectId || alaCarteWhopLessonsRequestVersionRef.current !== requestVersion) return;
+      setAlaCarteWhopLessons(result);
     } catch {
       // Best-effort — see loadCollections's identical rationale above.
     }
@@ -163,9 +232,11 @@ export function SourcesPage(props: SourcesPageProps) {
 
   useEffect(() => {
     if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
+      activeProjectIdRef.current = null;
       setAlaCarteWhopLessons([]);
       return;
     }
+    activeProjectIdRef.current = projectState.project.id;
     void loadAlaCarteWhopLessons(props.backendUrl, props.knoveraToken, projectState.project.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
@@ -194,12 +265,11 @@ export function SourcesPage(props: SourcesPageProps) {
   // Only a completed, successful lookup that found zero Whop sources counts
   // as "confirmed never had a Whop source" — idle (signed out / not yet
   // resolved), loading, and error all fall back to the pre-Phase-4C
-  // behavior below (which includes CourseTable's own "Connect Whop"
-  // prompt), so those states must never hide it. This is independent of
-  // live Whop connection — see the component doc comment above. Gates the
-  // Whop-specific CourseTable/DashboardSummary block and Diagnostic Tools
-  // below — both are Whop utilities, unaffected by whether this project
-  // also has video sources.
+  // behavior below (the Whop provider card's own "Connect Whop" prompt),
+  // so those states must never hide it. This is independent of live Whop
+  // connection — see the component doc comment above. Gates the Whop
+  // Courses grid and Diagnostic Tools below — both are Whop utilities,
+  // unaffected by whether this project also has video sources.
   const confirmedNeverHadWhopSource = sourcesState.phase === "loaded" && whopSources.length === 0;
   // The top empty-state box, by contrast, is about this project having NO
   // source at all — a project with video sources but no Whop course must
@@ -210,7 +280,7 @@ export function SourcesPage(props: SourcesPageProps) {
 
   function refreshSources() {
     if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) {
-      void loadSources(props.backendUrl, props.knoveraToken, resolvedProjectId, { current: false });
+      void loadSources(props.backendUrl, props.knoveraToken, resolvedProjectId);
     }
   }
 
@@ -222,6 +292,29 @@ export function SourcesPage(props: SourcesPageProps) {
 
   function refreshAlaCarteWhopLessons() {
     if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) void loadAlaCarteWhopLessons(props.backendUrl, props.knoveraToken, resolvedProjectId);
+  }
+
+  /**
+   * The Sources page is COLLECTION/GROUP-ONLY (see the JSX comment above the
+   * Collections section): the card the operator actually sees after adding
+   * a YouTube/Discord source almost always comes from `collections` (GET
+   * .../collections, which merges persisted source_collections rows AND
+   * DERIVED groups computed from project_source_origins — see the backend's
+   * derivedSourceGroupsRepo.ts doc comment), never from `sources` directly.
+   * A raw project_sources add — manual YouTube/Discord, batch import, or a
+   * Discord-channel-scan import — always lands as a DERIVED group (Manual
+   * YouTube / a channel's own card / Unclassified) with no source_collections
+   * row of its own, so refreshing `sources` alone leaves that card
+   * invisible until a hard reload re-runs both loads. `sources` itself
+   * still needs its own refresh too — it drives `confirmedNeverHadAnySource`
+   * (the top empty-state box) and ImportDiscordChannelDialog's
+   * existingYouTubeExternalIds dedup preview, neither of which `collections`
+   * covers. Every mutation that can add/remove a project_sources row calls
+   * this, not refreshSources() alone.
+   */
+  function refreshSourceCatalog() {
+    refreshSources();
+    refreshCollections();
   }
 
   return (
@@ -465,9 +558,9 @@ export function SourcesPage(props: SourcesPageProps) {
       {/* Phase 4C correction: these are Whop-specific utilities (single-lesson
           diagnostic, find-my-user-id) — legacy implementation UI that has no
           purpose on a project confirmed to have no Whop course. Hidden only
-          on that definitive signal, same as CourseTable above, so it never
-          disappears mid-load or pre-auth (where it's still the way to sign
-          in) — and never hidden for MasterMind, which does have a source.
+          on that definitive signal, same as the Whop Courses grid above, so
+          it never disappears mid-load or pre-auth (where it's still the way
+          to sign in) — and never hidden for MasterMind, which does have a source.
           Phase 4H-A/4I: this gate stays Whop-specific (confirmedNeverHadWhopSource,
           not confirmedNeverHadAnySource) — a project with only video
           sources (YouTube/Discord) still has no Whop course to run these
@@ -522,7 +615,7 @@ export function SourcesPage(props: SourcesPageProps) {
           onClose={() => setShowAddYouTubeDialog(false)}
           onAdded={() => {
             setShowAddYouTubeDialog(false);
-            refreshSources();
+            refreshSourceCatalog();
           }}
         />
       )}
@@ -535,7 +628,7 @@ export function SourcesPage(props: SourcesPageProps) {
           onClose={() => setShowAddDiscordDialog(false)}
           onAdded={() => {
             setShowAddDiscordDialog(false);
-            refreshSources();
+            refreshSourceCatalog();
           }}
         />
       )}
@@ -547,7 +640,7 @@ export function SourcesPage(props: SourcesPageProps) {
           projectId={resolvedProjectId}
           provider={batchImportProvider}
           onClose={() => setBatchImportProvider(null)}
-          onImported={batchImportProvider === "WHOP_LESSON" ? refreshAlaCarteWhopLessons : refreshSources}
+          onImported={batchImportProvider === "WHOP_LESSON" ? refreshAlaCarteWhopLessons : refreshSourceCatalog}
         />
       )}
 
@@ -559,8 +652,7 @@ export function SourcesPage(props: SourcesPageProps) {
           onClose={() => setShowAddYouTubeChannelDialog(false)}
           onAdded={() => {
             setShowAddYouTubeChannelDialog(false);
-            refreshCollections();
-            refreshSources();
+            refreshSourceCatalog();
           }}
         />
       )}
@@ -572,7 +664,7 @@ export function SourcesPage(props: SourcesPageProps) {
           projectId={resolvedProjectId}
           existingYouTubeExternalIds={existingYouTubeExternalIds}
           onClose={() => setShowImportDiscordChannelDialog(false)}
-          onImported={refreshSources}
+          onImported={refreshSourceCatalog}
         />
       )}
 
