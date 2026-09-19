@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
-import { MemoryRouter, Routes, Route } from "react-router-dom";
+import { MemoryRouter, Routes, Route, Link } from "react-router-dom";
 import { SourcesPage, type SourcesPageProps } from "../SourcesPage";
 
 afterEach(() => {
@@ -357,5 +357,145 @@ describe("SourcesPage — stale collection UI after adding a source (regression)
     fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
 
     await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · À-LA-CARTE" })).toBeInTheDocument());
+  });
+});
+
+describe("SourcesPage — stale request protection (follow-up)", () => {
+  it("REGRESSION: a slow initial /collections request resolving AFTER a faster post-add refresh must not revert the new card", async () => {
+    let collectionsCallCount = 0;
+    let resolveInitialCollections!: (value: Response) => void;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/sources") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, sources: [] });
+      if (url.endsWith("/sources/youtube") && init?.method === "POST") return jsonResponse(201, { source: { id: 101, provider: "YOUTUBE" }, duplicate: false });
+      if (url.endsWith("/collections") && (!init || init.method === undefined)) {
+        collectionsCallCount += 1;
+        if (collectionsCallCount === 1) {
+          // The initial page-load request (R1) — deliberately held open so
+          // it resolves AFTER the post-add refresh below.
+          return new Promise<Response>((resolve) => (resolveInitialCollections = resolve));
+        }
+        // The post-add refresh's own request (R2) — resolves immediately
+        // with the new card.
+        return jsonResponse(200, { projectId: 7, collections: [manualYouTubeCollection()] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSources();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument());
+    await waitFor(() => expect(collectionsCallCount).toBe(1)); // R1 is now in flight, held open.
+
+    fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("YouTube URL"), { target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add Video" }));
+
+    await waitFor(() => expect(collectionsCallCount).toBe(2)); // R2 fired and already resolved.
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · À-LA-CARTE" })).toBeInTheDocument());
+
+    // R1 (older, started first) finally resolves with the STALE pre-add
+    // snapshot. It must be discarded, not applied on top of R2's data.
+    resolveInitialCollections(jsonResponse(200, { projectId: 7, collections: [] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByRole("heading", { name: "YOUTUBE · À-LA-CARTE" })).toBeInTheDocument();
+  });
+
+  it("REGRESSION: same-project /sources requests resolving out of order — the newest response wins, never the oldest", async () => {
+    const newCourse = whopSource(9, "New Course B");
+    let sourcesCallCount = 0;
+    let resolveInitialSources!: (value: Response) => void;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/sources") && (!init || init.method === undefined)) {
+        sourcesCallCount += 1;
+        if (sourcesCallCount === 1) {
+          // The initial page-load request (R1) — deliberately held open.
+          return new Promise<Response>((resolve) => (resolveInitialSources = resolve));
+        }
+        // The post-add refresh's own request (R2) — resolves immediately.
+        return jsonResponse(200, { projectId: 7, sources: [newCourse] });
+      }
+      if (url.endsWith("/sources/youtube") && init?.method === "POST") return jsonResponse(201, { source: { id: 101, provider: "YOUTUBE" }, duplicate: false });
+      if (url.endsWith("/collections")) return jsonResponse(200, { projectId: 7, collections: [] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSources();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument());
+    await waitFor(() => expect(sourcesCallCount).toBe(1)); // R1 is now in flight, held open.
+
+    fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("YouTube URL"), { target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add Video" }));
+
+    await waitFor(() => expect(sourcesCallCount).toBe(2)); // R2 fired and already resolved.
+    await waitFor(() => expect(screen.getByRole("heading", { name: "New Course B" })).toBeInTheDocument());
+
+    // R1 (older, started first) finally resolves with the STALE pre-add
+    // snapshot (no Whop courses at all). It must be discarded.
+    resolveInitialSources(jsonResponse(200, { projectId: 7, sources: [] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(screen.getByRole("heading", { name: "New Course B" })).toBeInTheDocument();
+  });
+
+  it("REGRESSION: navigating Project A -> Project B never lets Project A's slow, stale sources/collections responses leak onto Project B", async () => {
+    const PROJECT_A = { ...PROJECT, id: 7, name: "Project A" };
+    const PROJECT_B = { ...PROJECT, id: 9, name: "Project B" };
+    const collectionA = { ...COLLECTION, groupKey: "a1", id: 101, title: "Project A Channel" };
+    const collectionB = { ...COLLECTION, groupKey: "b1", id: 102, title: "Project B Channel" };
+    const courseA = whopSource(501, "Project A Course");
+    const courseB = whopSource(502, "Project B Course");
+    let resolveProjectASources!: (value: Response) => void;
+    let resolveProjectACollections!: (value: Response) => void;
+
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT_A, PROJECT_B] });
+      if (url.endsWith("/api/projects/7/sources")) return new Promise<Response>((resolve) => (resolveProjectASources = resolve));
+      if (url.endsWith("/api/projects/9/sources")) return jsonResponse(200, { projectId: 9, sources: [courseB] });
+      if (url.endsWith("/api/projects/7/collections")) return new Promise<Response>((resolve) => (resolveProjectACollections = resolve));
+      if (url.endsWith("/api/projects/9/collections")) return jsonResponse(200, { projectId: 9, collections: [collectionB] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/projects/7/sources"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/sources"
+            element={
+              <>
+                <Link to="/projects/9/sources">Go to Project B</Link>
+                <SourcesPage {...baseProps()} />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("link", { name: "Go to Project B" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Project B Course" })).toBeInTheDocument());
+    expect(screen.getByText(/Project B Channel/)).toBeInTheDocument();
+
+    // Project A's slow, still-in-flight requests (started before
+    // navigation) finally resolve with Project A's own data.
+    resolveProjectASources(jsonResponse(200, { projectId: 7, sources: [courseA] }));
+    resolveProjectACollections(jsonResponse(200, { projectId: 7, collections: [collectionA] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Project B's data must remain — Project A's stale response must never land.
+    expect(screen.getByRole("heading", { name: "Project B Course" })).toBeInTheDocument();
+    expect(screen.getByText(/Project B Channel/)).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Project A Course" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/Project A Channel/)).not.toBeInTheDocument();
   });
 });

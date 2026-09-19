@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { WhopIcon, YouTubeIcon, DiscordIcon } from "../components/ProviderIcons";
@@ -108,34 +108,65 @@ export function SourcesPage(props: SourcesPageProps) {
   const [collections, setCollections] = useState<CatalogCollectionSummary[]>([]);
   const [alaCarteWhopLessons, setAlaCarteWhopLessons] = useState<AlaCarteWhopLessonSummary[]>([]);
 
-  async function loadSources(url: string, token: string, projectId: number, cancelledRef: { current: boolean }) {
+  // The only project this page instance is currently allowed to commit
+  // fetched state for — shared across sources/collections/à-la-carte
+  // lessons. Set synchronously whenever the resolved project changes (see
+  // each dataset's own effect below), so a request kicked off for Project A
+  // that resolves after the operator has navigated to Project B is
+  // discarded rather than clobbering Project B's already-rendered page —
+  // same pattern WhopCourseDetailPage.tsx uses for its own per-entity state.
+  const activeProjectIdRef = useRef<number | null>(null);
+  // Bumped by every loadSources/loadCollections/loadAlaCarteWhopLessons call
+  // respectively. A response only commits if it is BOTH for the
+  // still-active project (activeProjectIdRef) AND still the most recent
+  // request for that dataset — this is what stops a slow initial load from
+  // overwriting a faster post-mutation background refresh. Example: the
+  // Sources page mounts and starts a slow initial GET /collections; before
+  // it resolves, the operator adds a YouTube source, whose own
+  // refreshSourceCatalog() kicks off a second, faster GET /collections that
+  // resolves first and shows the new card; without this fence, the slow
+  // initial request would then land and call setCollections([]),
+  // silently reverting the page back to "no collections" — the exact
+  // stale-UI symptom this file's earlier fix (refreshSourceCatalog) was
+  // meant to eliminate, just reached a different way. See
+  // SourcesPage.catalog.test.tsx's stale-request regression tests.
+  const sourcesRequestVersionRef = useRef(0);
+  const collectionsRequestVersionRef = useRef(0);
+  const alaCarteWhopLessonsRequestVersionRef = useRef(0);
+
+  async function loadSources(url: string, token: string, projectId: number) {
+    const requestVersion = ++sourcesRequestVersionRef.current;
+    function isStale() {
+      return activeProjectIdRef.current !== projectId || sourcesRequestVersionRef.current !== requestVersion;
+    }
     setSourcesState({ phase: "loading" });
     try {
       const result = await getProjectSources(url, token, projectId);
-      if (!cancelledRef.current) setSourcesState({ phase: "loaded", sources: result.sources });
+      if (isStale()) return;
+      setSourcesState({ phase: "loaded", sources: result.sources });
     } catch (err) {
-      if (!cancelledRef.current) {
-        setSourcesState({ phase: "error", message: err instanceof Error ? err.message : "Failed to load sources." });
-      }
+      if (isStale()) return;
+      setSourcesState({ phase: "error", message: err instanceof Error ? err.message : "Failed to load sources." });
     }
   }
 
   useEffect(() => {
     if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
+      activeProjectIdRef.current = null;
       setSourcesState({ phase: "idle" });
       return;
     }
-    const cancelledRef = { current: false };
-    void loadSources(props.backendUrl, props.knoveraToken, projectState.project.id, cancelledRef);
-    return () => {
-      cancelledRef.current = true;
-    };
+    activeProjectIdRef.current = projectState.project.id;
+    void loadSources(props.backendUrl, props.knoveraToken, projectState.project.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
 
   async function loadCollections(url: string, token: string, projectId: number) {
+    const requestVersion = ++collectionsRequestVersionRef.current;
     try {
-      setCollections(await listSourceCollections(url, token, projectId));
+      const result = await listSourceCollections(url, token, projectId);
+      if (activeProjectIdRef.current !== projectId || collectionsRequestVersionRef.current !== requestVersion) return;
+      setCollections(result);
     } catch {
       // Best-effort — a transient collections-list failure only hides the
       // Collections/Uncollected cards below, never the rest of the page.
@@ -144,9 +175,11 @@ export function SourcesPage(props: SourcesPageProps) {
 
   useEffect(() => {
     if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
+      activeProjectIdRef.current = null;
       setCollections([]);
       return;
     }
+    activeProjectIdRef.current = projectState.project.id;
     void loadCollections(props.backendUrl, props.knoveraToken, projectState.project.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
@@ -158,8 +191,11 @@ export function SourcesPage(props: SourcesPageProps) {
   // loadCollections: a transient failure here never hides the rest of the
   // Sources page.
   async function loadAlaCarteWhopLessons(url: string, token: string, projectId: number) {
+    const requestVersion = ++alaCarteWhopLessonsRequestVersionRef.current;
     try {
-      setAlaCarteWhopLessons(await listAlaCarteWhopLessons(url, token, projectId));
+      const result = await listAlaCarteWhopLessons(url, token, projectId);
+      if (activeProjectIdRef.current !== projectId || alaCarteWhopLessonsRequestVersionRef.current !== requestVersion) return;
+      setAlaCarteWhopLessons(result);
     } catch {
       // Best-effort — see loadCollections's identical rationale above.
     }
@@ -167,9 +203,11 @@ export function SourcesPage(props: SourcesPageProps) {
 
   useEffect(() => {
     if (projectState.phase !== "resolved" || !props.backendUrl || !props.knoveraToken) {
+      activeProjectIdRef.current = null;
       setAlaCarteWhopLessons([]);
       return;
     }
+    activeProjectIdRef.current = projectState.project.id;
     void loadAlaCarteWhopLessons(props.backendUrl, props.knoveraToken, projectState.project.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectState, props.backendUrl, props.knoveraToken]);
@@ -213,7 +251,7 @@ export function SourcesPage(props: SourcesPageProps) {
 
   function refreshSources() {
     if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) {
-      void loadSources(props.backendUrl, props.knoveraToken, resolvedProjectId, { current: false });
+      void loadSources(props.backendUrl, props.knoveraToken, resolvedProjectId);
     }
   }
 
