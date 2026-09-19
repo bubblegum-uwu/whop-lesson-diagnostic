@@ -498,4 +498,85 @@ describe("SourcesPage — stale request protection (follow-up)", () => {
     expect(screen.queryByRole("heading", { name: "Project A Course" })).not.toBeInTheDocument();
     expect(screen.queryByText(/Project A Channel/)).not.toBeInTheDocument();
   });
+
+  it("REGRESSION: a stale mutation callback (Add YouTube Video's onAdded) resolving after navigating to Project B is a complete no-op", async () => {
+    const PROJECT_A = { ...PROJECT, id: 7, name: "Project A" };
+    const PROJECT_B = { ...PROJECT, id: 9, name: "Project B" };
+    const courseB = whopSource(502, "Project B Course");
+    const collectionB = { ...COLLECTION, groupKey: "b1", id: 102, title: "Project B Channel" };
+
+    let resolveProjectAPost!: (value: Response) => void;
+    let projectASourcesCallCount = 0;
+    let projectACollectionsCallCount = 0;
+
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT_A, PROJECT_B] });
+      if (url.endsWith("/api/projects/7/sources") && (!init || init.method === undefined)) {
+        projectASourcesCallCount += 1;
+        return jsonResponse(200, { projectId: 7, sources: [] });
+      }
+      if (url.endsWith("/api/projects/7/collections") && (!init || init.method === undefined)) {
+        projectACollectionsCallCount += 1;
+        return jsonResponse(200, { projectId: 7, collections: [] });
+      }
+      if (url.endsWith("/api/projects/7/sources/youtube") && init?.method === "POST") {
+        // Project A's add — deliberately held open until AFTER navigating away.
+        return new Promise<Response>((resolve) => (resolveProjectAPost = resolve));
+      }
+      if (url.endsWith("/api/projects/9/sources")) return jsonResponse(200, { projectId: 9, sources: [courseB] });
+      if (url.endsWith("/api/projects/9/collections")) return jsonResponse(200, { projectId: 9, collections: [collectionB] });
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <MemoryRouter initialEntries={["/projects/7/sources"]}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/sources"
+            element={
+              <>
+                <Link to="/projects/9/sources">Go to Project B</Link>
+                <SourcesPage {...baseProps()} />
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("YouTube URL"), { target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add Video" }));
+
+    // The POST is now in flight, held open. Navigate away before it resolves.
+    fireEvent.click(screen.getByRole("link", { name: "Go to Project B" }));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "Project B Course" })).toBeInTheDocument());
+    expect(screen.getByText(/Project B Channel/)).toBeInTheDocument();
+
+    const sourcesCallsBeforeStalePost = projectASourcesCallCount;
+    const collectionsCallsBeforeStalePost = projectACollectionsCallCount;
+
+    // Project A's old POST finally succeeds — its onAdded closure still
+    // captures Project A's projectId (via SourcesPage's refreshSourceCatalog
+    // as it existed at the time the dialog was opened) and calls it.
+    resolveProjectAPost(jsonResponse(201, { source: { id: 101, provider: "YOUTUBE" }, duplicate: false }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Project B must remain visible throughout — never reverted to
+    // "Loading sources…", never invalidated by the stale closure.
+    expect(screen.getByRole("heading", { name: "Project B Course" })).toBeInTheDocument();
+    expect(screen.getByText(/Project B Channel/)).toBeInTheDocument();
+    expect(screen.queryByText("Loading sources…")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Project A Course" })).not.toBeInTheDocument();
+
+    // The stale closure must never have started a new Project A
+    // sources/collections request once Project B became active.
+    expect(projectASourcesCallCount).toBe(sourcesCallsBeforeStalePost);
+    expect(projectACollectionsCallCount).toBe(collectionsCallsBeforeStalePost);
+  });
 });

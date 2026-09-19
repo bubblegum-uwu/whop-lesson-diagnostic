@@ -130,11 +130,33 @@ export function SourcesPage(props: SourcesPageProps) {
   // stale-UI symptom this file's earlier fix (refreshSourceCatalog) was
   // meant to eliminate, just reached a different way. See
   // SourcesPage.catalog.test.tsx's stale-request regression tests.
+  //
+  // Protection is required at BOTH ends of a request, not just completion:
+  // each loader also checks activeProjectIdRef BEFORE doing anything
+  // observable (before bumping its version ref or setting a "loading"
+  // state) — a mutation dialog's onAdded/onImported closure captures
+  // whichever project was active when the dialog was opened, so a POST
+  // that was still in flight when the operator navigated to a different
+  // project resolves into a closure for a project that is no longer
+  // active. Without the start-of-request check, that stale closure could
+  // still advance the CURRENT project's request-version counter and flash
+  // "Loading sources…" over an already-loaded, unrelated project, even
+  // though its own eventual response would correctly get discarded by the
+  // completion-time check above.
   const sourcesRequestVersionRef = useRef(0);
   const collectionsRequestVersionRef = useRef(0);
   const alaCarteWhopLessonsRequestVersionRef = useRef(0);
 
   async function loadSources(url: string, token: string, projectId: number) {
+    // Reject a stale caller BEFORE it can do anything observable — a
+    // mutation dialog's onAdded closure captures the project id at the
+    // time it was rendered, so a POST that was still in flight when the
+    // operator navigated to a different project resolves into a closure
+    // for a project that is no longer active. Checking this first stops
+    // that stale caller from bumping the request-version counter or
+    // flashing "Loading sources…" over whichever project's request IS
+    // still legitimately in flight — it must be a complete no-op.
+    if (activeProjectIdRef.current !== projectId) return;
     const requestVersion = ++sourcesRequestVersionRef.current;
     function isStale() {
       return activeProjectIdRef.current !== projectId || sourcesRequestVersionRef.current !== requestVersion;
@@ -162,6 +184,11 @@ export function SourcesPage(props: SourcesPageProps) {
   }, [projectState, props.backendUrl, props.knoveraToken]);
 
   async function loadCollections(url: string, token: string, projectId: number) {
+    // See loadSources's identical guard above — a stale caller (e.g. a
+    // mutation dialog's onAdded closure whose POST finished after the
+    // operator navigated away) must be a complete no-op, never advancing
+    // the request-version counter.
+    if (activeProjectIdRef.current !== projectId) return;
     const requestVersion = ++collectionsRequestVersionRef.current;
     try {
       const result = await listSourceCollections(url, token, projectId);
@@ -191,6 +218,8 @@ export function SourcesPage(props: SourcesPageProps) {
   // loadCollections: a transient failure here never hides the rest of the
   // Sources page.
   async function loadAlaCarteWhopLessons(url: string, token: string, projectId: number) {
+    // See loadSources's identical guard above.
+    if (activeProjectIdRef.current !== projectId) return;
     const requestVersion = ++alaCarteWhopLessonsRequestVersionRef.current;
     try {
       const result = await listAlaCarteWhopLessons(url, token, projectId);
