@@ -89,17 +89,44 @@ describe("SourcesPage — Discord project sources (Phase 4I)", () => {
     expect(screen.getByLabelText("Discord Attachment URL")).toBeInTheDocument();
   });
 
-  it("a successful add closes the dialog, refreshes the sources list, and renders the new Discord source under a 'Discord Video' label", async () => {
+  it("a successful add closes the dialog, refreshes BOTH the sources list and the collections catalog (regression), and renders the new Discord source under a 'Discord Video' label", async () => {
     let sourcesCallCount = 0;
+    let collectionsCallCount = 0;
+    // A raw-CDN-URL Discord add carries no origin at all, so the backend
+    // classifies it into the "Unclassified Sources" DERIVED group (see
+    // derivedSourceGroupsRepo.ts's classifyRow doc comment) — visible only
+    // through GET /collections, never the raw /sources list.
+    const unclassifiedCollection = {
+      groupKey: "derived:unclassified",
+      kind: "DERIVED",
+      id: null,
+      provider: "DISCORD",
+      sourceType: "UNCLASSIFIED",
+      originProvider: null,
+      originContainerId: null,
+      externalId: null,
+      title: "Unclassified Sources",
+      sourceUrl: null,
+      status: null,
+      sanitizedError: null,
+      lastSyncedAt: null,
+      itemCount: 1,
+      analyzedCount: 0,
+      hasMoreHistory: false,
+    };
     const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [MASTERMIND_API_PROJECT] });
       if (url === "https://backend.example.com/api/projects/7/sources/discord" && init?.method === "POST") {
         expect(JSON.parse(init!.body as string)).toEqual({ url: DISCORD_URL });
         return jsonResponse(201, { source: DISCORD_SOURCE, duplicate: false });
       }
-      if (url === "https://backend.example.com/api/projects/7/sources") {
+      if (url === "https://backend.example.com/api/projects/7/sources" && (!init || init.method === undefined)) {
         sourcesCallCount += 1;
         return jsonResponse(200, { projectId: 7, sources: sourcesCallCount === 1 ? [] : [DISCORD_SOURCE] });
+      }
+      if (url === "https://backend.example.com/api/projects/7/collections" && (!init || init.method === undefined)) {
+        collectionsCallCount += 1;
+        return jsonResponse(200, { projectId: 7, collections: collectionsCallCount === 1 ? [] : [unclassifiedCollection] });
       }
       if (url === "https://backend.example.com/api/projects/7/sources/5/analysis") return jsonResponse(200, analysisJson());
       return jsonResponse(404, {});
@@ -118,9 +145,14 @@ describe("SourcesPage — Discord project sources (Phase 4I)", () => {
     // collection/group-only, driven entirely by GET /collections (see
     // CollectionDetailPage.tsx and the taxonomy-correction group model),
     // never by the raw /sources list — so a newly-added source never
-    // renders as a row here regardless of grouping; this only verifies the
-    // dialog closed and the sources list was refreshed (sourcesCallCount).
+    // renders as a row here regardless of grouping; this verifies BOTH the
+    // raw sources list AND the collections catalog get refreshed
+    // (collectionsCallCount) — refreshing only `sources` was the bug that
+    // left the new card invisible until a hard reload.
     await waitFor(() => expect(sourcesCallCount).toBeGreaterThan(1));
+    await waitFor(() => expect(collectionsCallCount).toBeGreaterThan(1));
+    await waitFor(() => expect(screen.getByRole("heading", { name: "DISCORD · UNCLASSIFIED" })).toBeInTheDocument());
+    expect(screen.getByText("Unclassified Sources · 1 item · 0 analyzed")).toBeInTheDocument();
   });
 
   it("a malformed Discord URL is rejected client-side (never reaches the network) with the parser's own message", async () => {

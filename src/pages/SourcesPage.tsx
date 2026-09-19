@@ -71,18 +71,22 @@ type SourcesLoadState =
   | { phase: "error"; message: string };
 
 /**
- * "/projects/:projectId/sources". Provider cards (Whop, YouTube, and as of
- * Phase 4I, Discord — all three operational) plus the existing Whop
- * sync/lesson-analysis UI and the two standalone Whop utility tools
- * (single-lesson diagnostic, find-my-user-id), all reusing the SAME
- * components/handlers App.tsx already wires up — no analysis behavior
- * changed, only where it's rendered.
+ * "/projects/:projectId/sources" — COLLECTION/GROUP-ONLY (Phase 4L taxonomy
+ * correction, reaffirmed by the Phase 4K follow-up that moved the rich
+ * per-course lesson UI onto its own WhopCourseDetailPage): provider cards
+ * (Whop, YouTube, Discord), one card per connected Whop course, the
+ * Collections/à-la-carte grid, and the two standalone Whop utility tools
+ * (single-lesson diagnostic, find-my-user-id). No individual source or
+ * lesson row, and no per-course management UI, ever renders on this page —
+ * see the JSX comment above the Collections section for the full
+ * PERSISTED-vs-DERIVED group model.
  *
  * Loads this project's real connected sources from `GET
  * /api/projects/:projectId/sources` (via the same `useResolvedProject` hook
- * ProjectHeader uses) to keep the legacy course table/mutation UI below
- * from ever rendering for a project that has never owned a Whop course —
- * see `confirmedNeverHadSource` below.
+ * ProjectHeader uses) to keep the Whop Courses grid and Diagnostic Tools
+ * section below from ever rendering for a project that has never owned a
+ * Whop course — see `confirmedNeverHadWhopSource`/`confirmedNeverHadAnySource`
+ * below.
  *
  * Phase 4D — critically, that "has a source ever been persisted" signal is
  * kept SEPARATE from `props.connected` (the LIVE Whop provider-connection
@@ -194,12 +198,11 @@ export function SourcesPage(props: SourcesPageProps) {
   // Only a completed, successful lookup that found zero Whop sources counts
   // as "confirmed never had a Whop source" — idle (signed out / not yet
   // resolved), loading, and error all fall back to the pre-Phase-4C
-  // behavior below (which includes CourseTable's own "Connect Whop"
-  // prompt), so those states must never hide it. This is independent of
-  // live Whop connection — see the component doc comment above. Gates the
-  // Whop-specific CourseTable/DashboardSummary block and Diagnostic Tools
-  // below — both are Whop utilities, unaffected by whether this project
-  // also has video sources.
+  // behavior below (the Whop provider card's own "Connect Whop" prompt),
+  // so those states must never hide it. This is independent of live Whop
+  // connection — see the component doc comment above. Gates the Whop
+  // Courses grid and Diagnostic Tools below — both are Whop utilities,
+  // unaffected by whether this project also has video sources.
   const confirmedNeverHadWhopSource = sourcesState.phase === "loaded" && whopSources.length === 0;
   // The top empty-state box, by contrast, is about this project having NO
   // source at all — a project with video sources but no Whop course must
@@ -222,6 +225,29 @@ export function SourcesPage(props: SourcesPageProps) {
 
   function refreshAlaCarteWhopLessons() {
     if (props.backendUrl && props.knoveraToken && resolvedProjectId != null) void loadAlaCarteWhopLessons(props.backendUrl, props.knoveraToken, resolvedProjectId);
+  }
+
+  /**
+   * The Sources page is COLLECTION/GROUP-ONLY (see the JSX comment above the
+   * Collections section): the card the operator actually sees after adding
+   * a YouTube/Discord source almost always comes from `collections` (GET
+   * .../collections, which merges persisted source_collections rows AND
+   * DERIVED groups computed from project_source_origins — see the backend's
+   * derivedSourceGroupsRepo.ts doc comment), never from `sources` directly.
+   * A raw project_sources add — manual YouTube/Discord, batch import, or a
+   * Discord-channel-scan import — always lands as a DERIVED group (Manual
+   * YouTube / a channel's own card / Unclassified) with no source_collections
+   * row of its own, so refreshing `sources` alone leaves that card
+   * invisible until a hard reload re-runs both loads. `sources` itself
+   * still needs its own refresh too — it drives `confirmedNeverHadAnySource`
+   * (the top empty-state box) and ImportDiscordChannelDialog's
+   * existingYouTubeExternalIds dedup preview, neither of which `collections`
+   * covers. Every mutation that can add/remove a project_sources row calls
+   * this, not refreshSources() alone.
+   */
+  function refreshSourceCatalog() {
+    refreshSources();
+    refreshCollections();
   }
 
   return (
@@ -465,9 +491,9 @@ export function SourcesPage(props: SourcesPageProps) {
       {/* Phase 4C correction: these are Whop-specific utilities (single-lesson
           diagnostic, find-my-user-id) — legacy implementation UI that has no
           purpose on a project confirmed to have no Whop course. Hidden only
-          on that definitive signal, same as CourseTable above, so it never
-          disappears mid-load or pre-auth (where it's still the way to sign
-          in) — and never hidden for MasterMind, which does have a source.
+          on that definitive signal, same as the Whop Courses grid above, so
+          it never disappears mid-load or pre-auth (where it's still the way
+          to sign in) — and never hidden for MasterMind, which does have a source.
           Phase 4H-A/4I: this gate stays Whop-specific (confirmedNeverHadWhopSource,
           not confirmedNeverHadAnySource) — a project with only video
           sources (YouTube/Discord) still has no Whop course to run these
@@ -522,7 +548,7 @@ export function SourcesPage(props: SourcesPageProps) {
           onClose={() => setShowAddYouTubeDialog(false)}
           onAdded={() => {
             setShowAddYouTubeDialog(false);
-            refreshSources();
+            refreshSourceCatalog();
           }}
         />
       )}
@@ -535,7 +561,7 @@ export function SourcesPage(props: SourcesPageProps) {
           onClose={() => setShowAddDiscordDialog(false)}
           onAdded={() => {
             setShowAddDiscordDialog(false);
-            refreshSources();
+            refreshSourceCatalog();
           }}
         />
       )}
@@ -547,7 +573,7 @@ export function SourcesPage(props: SourcesPageProps) {
           projectId={resolvedProjectId}
           provider={batchImportProvider}
           onClose={() => setBatchImportProvider(null)}
-          onImported={batchImportProvider === "WHOP_LESSON" ? refreshAlaCarteWhopLessons : refreshSources}
+          onImported={batchImportProvider === "WHOP_LESSON" ? refreshAlaCarteWhopLessons : refreshSourceCatalog}
         />
       )}
 
@@ -559,8 +585,7 @@ export function SourcesPage(props: SourcesPageProps) {
           onClose={() => setShowAddYouTubeChannelDialog(false)}
           onAdded={() => {
             setShowAddYouTubeChannelDialog(false);
-            refreshCollections();
-            refreshSources();
+            refreshSourceCatalog();
           }}
         />
       )}
@@ -572,7 +597,7 @@ export function SourcesPage(props: SourcesPageProps) {
           projectId={resolvedProjectId}
           existingYouTubeExternalIds={existingYouTubeExternalIds}
           onClose={() => setShowImportDiscordChannelDialog(false)}
-          onImported={refreshSources}
+          onImported={refreshSourceCatalog}
         />
       )}
 

@@ -61,6 +61,28 @@ const COLLECTION = {
   hasMoreHistory: false,
 };
 
+/** The DERIVED group a manually-added YouTube video (MANUAL origin, no Discord-channel origin) is classified into — see the backend's derivedSourceGroupsRepo.ts doc comment (YOUTUBE_ALA_CARTE_GROUP_KEY / "Manual YouTube"). */
+function manualYouTubeCollection(itemCount = 1, analyzedCount = 0) {
+  return {
+    groupKey: "derived:youtube-ala-carte",
+    kind: "DERIVED",
+    id: null,
+    provider: "YOUTUBE",
+    sourceType: "A_LA_CARTE",
+    originProvider: "MANUAL",
+    originContainerId: null,
+    externalId: null,
+    title: "Manual YouTube",
+    sourceUrl: null,
+    status: null,
+    sanitizedError: null,
+    lastSyncedAt: null,
+    itemCount,
+    analyzedCount,
+    hasMoreHistory: false,
+  };
+}
+
 function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps {
   return {
     connected: true,
@@ -225,5 +247,115 @@ describe("SourcesPage — multi-course Whop + collections catalog (Phase 4K)", (
     await waitFor(() => expect(screen.getByRole("button", { name: "Bulk Import Lessons" })).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "Bulk Import Lessons" }));
     expect(screen.getByRole("heading", { name: "Bulk Import Whop Lessons" })).toBeInTheDocument();
+  });
+});
+
+describe("SourcesPage — stale collection UI after adding a source (regression)", () => {
+  it("Manual YouTube add: the new Collection card appears immediately after a successful add, with no reload/remount", async () => {
+    let collectionsCallCount = 0;
+    let sourcesCallCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/sources") && (!init || init.method === undefined)) {
+        sourcesCallCount += 1;
+        return jsonResponse(200, { projectId: 7, sources: [] });
+      }
+      if (url.endsWith("/sources/youtube") && init?.method === "POST") {
+        expect(JSON.parse(init.body as string)).toEqual({ url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" });
+        return jsonResponse(201, { source: { id: 101, provider: "YOUTUBE" }, duplicate: false });
+      }
+      if (url.endsWith("/collections") && (!init || init.method === undefined)) {
+        collectionsCallCount += 1;
+        // The first call (initial page load) reflects "nothing yet" — every
+        // call after the add reflects the backend's now-updated derived
+        // group classification (see derivedSourceGroupsRepo.ts).
+        return jsonResponse(200, { projectId: 7, collections: collectionsCallCount === 1 ? [] : [manualYouTubeCollection()] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSources();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument());
+    expect(screen.queryByRole("heading", { name: "YOUTUBE · À-LA-CARTE" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("YouTube URL"), { target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add Video" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Both the raw sources list AND the collection/group catalog must
+    // refresh — refreshing only `sources` (the original bug) left the new
+    // card invisible until a hard browser reload.
+    await waitFor(() => expect(sourcesCallCount).toBeGreaterThan(1));
+    await waitFor(() => expect(collectionsCallCount).toBeGreaterThan(1));
+
+    // The new Collection card is visible with no remount/reload required.
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · À-LA-CARTE" })).toBeInTheDocument());
+    expect(screen.getByText("Manual YouTube · 1 item · 0 analyzed")).toBeInTheDocument();
+  });
+
+  it("Duplicate manual YouTube add stays idempotent: refreshed collections still show exactly one card, never two", async () => {
+    let collectionsCallCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/sources") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, sources: [] });
+      // Backend reports the source already existed (idempotent re-add) —
+      // still a 200/success, never a second project_sources row.
+      if (url.endsWith("/sources/youtube") && init?.method === "POST") return jsonResponse(200, { source: { id: 101, provider: "YOUTUBE" }, duplicate: true });
+      if (url.endsWith("/collections") && (!init || init.method === undefined)) {
+        collectionsCallCount += 1;
+        return jsonResponse(200, { projectId: 7, collections: [manualYouTubeCollection(1, 0)] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSources();
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add YouTube Video" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Add YouTube Video" }));
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(within(dialog).getByLabelText("YouTube URL"), { target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add Video" }));
+
+    await waitFor(() => expect(collectionsCallCount).toBeGreaterThan(1));
+    expect(screen.getAllByRole("heading", { name: "YOUTUBE · À-LA-CARTE" })).toHaveLength(1);
+    expect(screen.getByText("Manual YouTube · 1 item · 0 analyzed")).toBeInTheDocument();
+  });
+
+  it("YouTube Bulk Import: a successful batch import refreshes both sources and the collections catalog", async () => {
+    let collectionsCallCount = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/api/projects")) return jsonResponse(200, { projects: [PROJECT] });
+      if (url.endsWith("/sources") && (!init || init.method === undefined)) return jsonResponse(200, { projectId: 7, sources: [] });
+      if (url.endsWith("/sources/youtube/batch") && init?.method === "POST") {
+        return jsonResponse(200, {
+          results: [{ url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", kind: "added" }],
+          addedCount: 1,
+          duplicateCount: 0,
+          invalidCount: 0,
+        });
+      }
+      if (url.endsWith("/collections") && (!init || init.method === undefined)) {
+        collectionsCallCount += 1;
+        return jsonResponse(200, { projectId: 7, collections: collectionsCallCount === 1 ? [] : [manualYouTubeCollection()] });
+      }
+      return jsonResponse(404, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    renderSources();
+
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Bulk Import" })[0]).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole("button", { name: "Bulk Import" })[0]);
+    const dialog = screen.getByRole("dialog");
+    fireEvent.change(dialog.querySelector("textarea") as HTMLTextAreaElement, { target: { value: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: /Import 1 URL/ }));
+
+    await waitFor(() => expect(screen.getByText(/1 added/)).toBeInTheDocument());
+    await waitFor(() => expect(collectionsCallCount).toBeGreaterThan(1));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Done" }));
+
+    await waitFor(() => expect(screen.getByRole("heading", { name: "YOUTUBE · À-LA-CARTE" })).toBeInTheDocument());
   });
 });
