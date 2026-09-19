@@ -2,11 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ProjectHeader } from "./ProjectHeader";
 import { WhopIcon, YouTubeIcon, DiscordIcon } from "../components/ProviderIcons";
-import { FindWhopUserId, type FindWhopUserIdState } from "../components/FindWhopUserId";
-import { ConfigForm } from "../components/ConfigForm";
-import { DiagnosticResult } from "../components/DiagnosticResult";
-import { ErrorResult } from "../components/ErrorResult";
-import { AnalyzeLesson } from "../components/AnalyzeLesson";
 import { AddYouTubeVideoDialog } from "../components/AddYouTubeVideoDialog";
 import { AddDiscordVideoDialog } from "../components/AddDiscordVideoDialog";
 import { DiscordLinkStatusPanel } from "../components/DiscordLinkStatusPanel";
@@ -14,8 +9,6 @@ import { BatchImportDialog } from "../components/BatchImportDialog";
 import { AddYouTubeChannelDialog } from "../components/AddYouTubeChannelDialog";
 import { ImportDiscordChannelDialog } from "../components/ImportDiscordChannelDialog";
 import { ConnectWhopCourseDialog } from "../components/ConnectWhopCourseDialog";
-import type { DiagnosticDisplayPayload } from "../lib/diagnosticPayload";
-import type { LessonFetchOutcome } from "../lib/whopApi";
 import { useResolvedProject } from "../lib/useResolvedProject";
 import { getProjectSources, type ProjectSource, type WhopProjectSource, type YouTubeProjectSource, type DiscordProjectSource } from "../lib/sourcesApi";
 import {
@@ -30,38 +23,17 @@ import {
 /** Phase 4I — every provider whose source is a single analyzable video. A future provider joins this union. */
 type VideoProjectSource = YouTubeProjectSource | DiscordProjectSource;
 
-/**
- * The single-lesson diagnostic flow's state (paste one Whop lesson URL,
- * sign in, inspect its raw media info) — unrelated to the course/synthesis
- * flow, but an existing working tool this phase must not lose. Mirrors
- * App.tsx's AppState exactly; relocated here unchanged.
- */
-export type DiagnosticFlowState =
-  | { phase: "config"; errorMessage: string | null; submitting: boolean }
-  | { phase: "exchanging" }
-  | { phase: "fetching" }
-  | { phase: "result"; payload: DiagnosticDisplayPayload; lessonUrl: string; accessToken: string }
-  | { phase: "api_error"; outcome: Exclude<LessonFetchOutcome, { kind: "success" }> }
-  | { phase: "fatal_error"; message: string };
-
 export interface SourcesPageProps {
   /** LIVE Whop provider-connection state (GET /api/auth/status) — distinct from whether this project has ever had a persisted source, see sourcesState below. Drives the provider card's Connected/Not Connected badge. */
   connected: boolean;
-  /** A Connect/Disconnect Whop action failed — provider-level only; a course's own sync/analyze errors surface on its dedicated Whop Course Detail page instead (see WhopCourseDetailPage.tsx). */
+  /** A Connect/Disconnect Whop action failed — provider-level only; a course's own sync/analyze errors surface on its dedicated Whop Course Detail page instead (see WhopCourseDetailPage.tsx). Also carries the "no pending sign-in found" OAuth-callback safety-net message (see App.tsx's callback effect). */
   providerErrorMessage: string | null;
   onSignIn: () => void;
   onDisconnect: () => void;
 
-  identifyState: FindWhopUserIdState;
-  onFindUserId: () => void;
-
   backendUrl: string | null;
-  /** The Knovera session token (Phase 4D) — never a Whop token. Everything on this page except the standalone diagnostic tool below (which keeps its own separately-obtained Whop token, see diagnosticState) reads/writes using this. */
+  /** The Knovera session token (Phase 4D) — never a Whop token. */
   knoveraToken: string | null;
-  diagnosticState: DiagnosticFlowState;
-  redirectUri: string;
-  onDiagnosticSubmit: (lessonUrl: string) => void;
-  onDiagnosticReset: () => void;
 }
 
 type SourcesLoadState =
@@ -74,19 +46,20 @@ type SourcesLoadState =
  * "/projects/:projectId/sources" — COLLECTION/GROUP-ONLY (Phase 4L taxonomy
  * correction, reaffirmed by the Phase 4K follow-up that moved the rich
  * per-course lesson UI onto its own WhopCourseDetailPage): provider cards
- * (Whop, YouTube, Discord), one card per connected Whop course, the
- * Collections/à-la-carte grid, and the two standalone Whop utility tools
- * (single-lesson diagnostic, find-my-user-id). No individual source or
- * lesson row, and no per-course management UI, ever renders on this page —
- * see the JSX comment above the Collections section for the full
- * PERSISTED-vs-DERIVED group model.
+ * (Whop, YouTube, Discord), one card per connected Whop course, and the
+ * Collections/à-la-carte grid. No individual source or lesson row, and no
+ * per-course management UI, ever renders on this page — see the JSX comment
+ * above the Collections section for the full PERSISTED-vs-DERIVED group
+ * model. The legacy single-lesson diagnostic and find-my-user-id utilities
+ * (previously a "Diagnostic Tools" disclosure here) were removed from this
+ * product surface — see App.tsx for what remains of their OAuth-callback
+ * plumbing.
  *
  * Loads this project's real connected sources from `GET
  * /api/projects/:projectId/sources` (via the same `useResolvedProject` hook
- * ProjectHeader uses) to keep the Whop Courses grid and Diagnostic Tools
- * section below from ever rendering for a project that has never owned a
- * Whop course — see `confirmedNeverHadWhopSource`/`confirmedNeverHadAnySource`
- * below.
+ * ProjectHeader uses) to keep the Whop Courses grid below from ever
+ * rendering for a project that has never owned a Whop course — see
+ * `confirmedNeverHadWhopSource`/`confirmedNeverHadAnySource` below.
  *
  * Phase 4D — critically, that "has a source ever been persisted" signal is
  * kept SEPARATE from `props.connected` (the LIVE Whop provider-connection
@@ -268,8 +241,7 @@ export function SourcesPage(props: SourcesPageProps) {
   // behavior below (the Whop provider card's own "Connect Whop" prompt),
   // so those states must never hide it. This is independent of live Whop
   // connection — see the component doc comment above. Gates the Whop
-  // Courses grid and Diagnostic Tools below — both are Whop utilities,
-  // unaffected by whether this project also has video sources.
+  // Courses grid, unaffected by whether this project also has video sources.
   const confirmedNeverHadWhopSource = sourcesState.phase === "loaded" && whopSources.length === 0;
   // The top empty-state box, by contrast, is about this project having NO
   // source at all — a project with video sources but no Whop course must
@@ -553,58 +525,6 @@ export function SourcesPage(props: SourcesPageProps) {
             )}
           </div>
         </>
-      )}
-
-      {/* Phase 4C correction: these are Whop-specific utilities (single-lesson
-          diagnostic, find-my-user-id) — legacy implementation UI that has no
-          purpose on a project confirmed to have no Whop course. Hidden only
-          on that definitive signal, same as the Whop Courses grid above, so
-          it never disappears mid-load or pre-auth (where it's still the way
-          to sign in) — and never hidden for MasterMind, which does have a source.
-          Phase 4H-A/4I: this gate stays Whop-specific (confirmedNeverHadWhopSource,
-          not confirmedNeverHadAnySource) — a project with only video
-          sources (YouTube/Discord) still has no Whop course to run these
-          Whop utilities against. */}
-      {!confirmedNeverHadWhopSource && (
-        <details className="knovera-diagnostic-tools">
-          <summary>Diagnostic Tools</summary>
-          <FindWhopUserId state={props.identifyState} onStart={props.onFindUserId} />
-
-          {props.diagnosticState.phase === "config" && (
-            <ConfigForm
-              redirectUri={props.redirectUri}
-              onSubmit={props.onDiagnosticSubmit}
-              submitting={props.diagnosticState.submitting}
-              errorMessage={props.diagnosticState.errorMessage}
-            />
-          )}
-          {props.diagnosticState.phase === "exchanging" && <p className="status-line">Exchanging authorization code for tokens…</p>}
-          {props.diagnosticState.phase === "fetching" && <p className="status-line">Fetching lesson from Whop…</p>}
-          {props.diagnosticState.phase === "result" && (
-            <>
-              <DiagnosticResult payload={props.diagnosticState.payload} />
-              {props.backendUrl && (
-                <AnalyzeLesson backendUrl={props.backendUrl} lessonUrl={props.diagnosticState.lessonUrl} accessToken={props.diagnosticState.accessToken} />
-              )}
-              <button onClick={props.onDiagnosticReset}>Start over</button>
-            </>
-          )}
-          {props.diagnosticState.phase === "api_error" && (
-            <>
-              <ErrorResult outcome={props.diagnosticState.outcome} />
-              <button onClick={props.onDiagnosticReset}>Start over</button>
-            </>
-          )}
-          {props.diagnosticState.phase === "fatal_error" && (
-            <>
-              <div className="error-panel" role="alert">
-                <h2>ERROR</h2>
-                <p>{props.diagnosticState.message}</p>
-              </div>
-              <button onClick={props.onDiagnosticReset}>Start over</button>
-            </>
-          )}
-        </details>
       )}
 
       {showAddYouTubeDialog && props.backendUrl && props.knoveraToken && resolvedProjectId != null && (

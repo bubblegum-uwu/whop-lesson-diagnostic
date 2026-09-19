@@ -19,14 +19,8 @@ function baseSourcesProps(): SourcesPageProps {
     providerErrorMessage: null,
     onSignIn: () => {},
     onDisconnect: () => {},
-    identifyState: { phase: "idle" },
-    onFindUserId: () => {},
     backendUrl: null,
     knoveraToken: null,
-    diagnosticState: { phase: "config", errorMessage: null, submitting: false },
-    redirectUri: "https://example.com/",
-    onDiagnosticSubmit: () => {},
-    onDiagnosticReset: () => {},
   };
 }
 

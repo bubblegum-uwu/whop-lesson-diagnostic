@@ -13,36 +13,18 @@ import { WhopAlaCarteDetailPage } from "./pages/WhopAlaCarteDetailPage";
 import { WhopCourseDetailPage } from "./pages/WhopCourseDetailPage";
 import { UsagePage } from "./pages/UsagePage";
 import { LinkDiscordPage } from "./pages/LinkDiscordPage";
-import type { FindWhopUserIdState } from "./components/FindWhopUserId";
 import {
   startWhopOAuth,
   exchangeCodeForTokens,
   parseCallbackParams,
 } from "./oauth/whopOAuth";
-import { parseWhopLessonUrl, WhopUrlParseError } from "./lib/whopUrl";
-import { fetchCourseLesson, type LessonFetchOutcome } from "./lib/whopApi";
-import { sanitizeLessonResponse } from "./lib/sanitize";
-import { buildDiagnosticDisplayPayload, type DiagnosticDisplayPayload } from "./lib/diagnosticPayload";
 import { saveConfig, loadConfig, clearConfig } from "./lib/sessionConfig";
 import { getBackendUrl } from "./lib/backendConfig";
 import { getWhopClientId } from "./lib/scarfaceCourseConfig";
-import { fetchWhopUserInfo } from "./lib/whopIdentify";
 import { knoveraLogin, knoveraLogout, getKnoveraMe, InvalidKnoveraCredentialsError } from "./lib/knoveraAuthApi";
 import { loadKnoveraToken, saveKnoveraToken, clearKnoveraToken } from "./lib/knoveraSession";
 import { takePendingDiscordLinkToken } from "./lib/discordLinkPending";
 import { establishAuthSession, getAuthStatus, disconnectAuthSession } from "./lib/courseApi";
-
-type AppState =
-  | { phase: "config"; errorMessage: string | null; submitting: boolean }
-  | { phase: "exchanging" }
-  | { phase: "fetching" }
-  // This one remains a genuinely separate, short-lived Whop access token —
-  // obtained by the standalone single-lesson diagnostic mini-flow, never
-  // the Knovera session and never the persistent Whop provider connection.
-  // Kept only in memory (no localStorage/sessionStorage), exactly as before.
-  | { phase: "result"; payload: DiagnosticDisplayPayload; lessonUrl: string; accessToken: string }
-  | { phase: "api_error"; outcome: Exclude<LessonFetchOutcome, { kind: "success" }> }
-  | { phase: "fatal_error"; message: string };
 
 type KnoveraLoginState = { phase: "idle" } | { phase: "submitting" } | { phase: "error"; message: string };
 
@@ -85,13 +67,7 @@ export default function App() {
   const backendUrl = useMemo(getBackendUrl, []);
   const navigate = useNavigate();
 
-  const [state, setState] = useState<AppState>({
-    phase: "config",
-    errorMessage: null,
-    submitting: false,
-  });
   const [courseState, setCourseState] = useState<CourseViewState>(INITIAL_COURSE_STATE);
-  const [identifyState, setIdentifyState] = useState<FindWhopUserIdState>({ phase: "idle" });
 
   // Phase 4D — the Knovera application session, entirely separate from Whop
   // (see KNOVERA_AUTH_VS_PROVIDER_AUTH in the Phase 4D PR description).
@@ -173,15 +149,14 @@ export default function App() {
 
     const config = loadConfig();
     if (!config) {
-      setState({
-        phase: "fatal_error",
-        message:
-          "Returned from Whop but no pending sign-in was found for this session. Please start again.",
-      });
-      // Phase 4A addition — see runIdentifyCallbackFlow's comment below: this
-      // state now renders on the Sources page (Diagnostic Tools), not inline
-      // on whatever route happened to be active, so it needs the same
-      // post-callback navigation the other three flows already get.
+      // Surfaced on the Whop provider card (see SourcesPage.tsx's
+      // providerErrorMessage prop) — the same place a failed Connect Whop
+      // attempt already shows an error, since this can legitimately happen
+      // for that flow too (e.g. sessionStorage cleared mid-redirect).
+      setCourseState((prev) => ({
+        ...prev,
+        errorMessage: "Returned from Whop but no pending sign-in was found for this session. Please start again.",
+      }));
       navigate("/projects/mastermind/sources");
       return;
     }
@@ -191,42 +166,19 @@ export default function App() {
 
     if (config.flow === "course") {
       void runCourseCallbackFlow(search);
-    } else if (config.flow === "identify") {
-      void runIdentifyCallbackFlow(search);
     } else {
-      void runDiagnosticCallbackFlow(config.lessonUrl, search);
+      // The single-lesson diagnostic and find-my-user-id flows were removed
+      // from the UI (no more Diagnostic Tools disclosure to resume into) —
+      // a stray "identify"/"diagnostic" config here could only be a
+      // leftover from a sign-in that was mid-flight when this change
+      // deployed. Nothing left to resume; just discard it and land
+      // somewhere real instead of stranding the operator on the bare
+      // callback URL.
+      clearConfig();
+      navigate("/projects/mastermind/sources");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  async function runIdentifyCallbackFlow(search: string) {
-    setIdentifyState({ phase: "running" });
-    try {
-      const callback = parseCallbackParams(search);
-      const tokens = await exchangeCodeForTokens(clientId!, redirectUri, callback);
-      // Deliberately never touches this app's backend — Whop tells us
-      // directly who just signed in.
-      const userInfo = await fetchWhopUserInfo(tokens.access_token);
-      setIdentifyState({ phase: "result", sub: userInfo.sub });
-    } catch (err) {
-      setIdentifyState({
-        phase: "error",
-        message: err instanceof Error ? err.message : "Could not determine your Whop user ID.",
-      });
-    } finally {
-      clearConfig();
-      // Phase 4A addition — a pure post-completion in-app navigation call, not
-      // part of the OAuth mechanics above (token exchange/parsing/session
-      // establishment are all untouched). Sends the user to the page that now
-      // displays this flow's result (see SourcesPage's "Diagnostic Tools"),
-      // since window.history.replaceState above clears the hash back to "/".
-      // Note (Phase 4D): the Sources route now requires a Knovera session —
-      // if this standalone tool is used while signed out of Knovera, this
-      // navigation lands on /login instead, a known, accepted limitation of
-      // this secondary tool (see the Phase 4D PR description).
-      navigate("/projects/mastermind/sources");
-    }
-  }
 
   async function runCourseCallbackFlow(search: string) {
     setCourseState((prev) => ({ ...prev, connecting: true, errorMessage: null }));
@@ -260,76 +212,13 @@ export default function App() {
     } finally {
       clearConfig();
       setCourseState((prev) => ({ ...prev, connecting: false }));
-      // Phase 4A addition — see runIdentifyCallbackFlow's comment above.
       navigate("/projects/mastermind/sources");
     }
-  }
-
-  async function runDiagnosticCallbackFlow(lessonUrl: string, search: string) {
-    setState({ phase: "exchanging" });
-    try {
-      const callback = parseCallbackParams(search);
-      const tokens = await exchangeCodeForTokens(clientId!, redirectUri, callback);
-
-      const urlIds = parseWhopLessonUrl(lessonUrl);
-
-      setState({ phase: "fetching" });
-      const outcome = await fetchCourseLesson(urlIds.lessonId, tokens.access_token);
-
-      if (outcome.kind === "success") {
-        const sanitized = sanitizeLessonResponse(outcome.data);
-        const payload = buildDiagnosticDisplayPayload(urlIds, sanitized);
-        setState({ phase: "result", payload, lessonUrl, accessToken: tokens.access_token });
-      } else {
-        setState({ phase: "api_error", outcome });
-      }
-      // Beyond being kept in the "result" state above (in-memory only), the
-      // local `tokens` variable is not stored anywhere else — no
-      // localStorage/sessionStorage/cookies, never logged.
-    } catch (err) {
-      setState({
-        phase: "fatal_error",
-        message: err instanceof Error ? err.message : "Unknown error during OAuth callback.",
-      });
-    } finally {
-      clearConfig();
-      // Phase 4A addition — see runIdentifyCallbackFlow's comment above.
-      navigate("/projects/mastermind/sources");
-    }
-  }
-
-  async function handleSubmit(lessonUrl: string) {
-    if (!clientId) return; // guarded by the "not configured" screen below
-    try {
-      parseWhopLessonUrl(lessonUrl);
-    } catch (err) {
-      setState({
-        phase: "config",
-        errorMessage:
-          err instanceof WhopUrlParseError
-            ? err.message
-            : "Could not parse that lesson URL.",
-        submitting: false,
-      });
-      return;
-    }
-
-    setState({ phase: "config", errorMessage: null, submitting: true });
-    saveConfig({ flow: "diagnostic", lessonUrl });
-    const authorizeUrl = await startWhopOAuth(clientId, redirectUri);
-    window.location.href = authorizeUrl;
   }
 
   async function handleCourseSignIn() {
     if (!clientId) return;
     saveConfig({ flow: "course" });
-    const authorizeUrl = await startWhopOAuth(clientId, redirectUri);
-    window.location.href = authorizeUrl;
-  }
-
-  async function handleFindUserId() {
-    if (!clientId) return;
-    saveConfig({ flow: "identify" });
     const authorizeUrl = await startWhopOAuth(clientId, redirectUri);
     window.location.href = authorizeUrl;
   }
@@ -345,11 +234,6 @@ export default function App() {
     if (!backendUrl || !knoveraToken) return;
     await disconnectAuthSession(backendUrl, knoveraToken);
     await refreshCourseState(knoveraToken);
-  }
-
-  function handleReset() {
-    clearConfig();
-    setState({ phase: "config", errorMessage: null, submitting: false });
   }
 
   async function handleKnoveraLogin(email: string, password: string) {
@@ -442,14 +326,8 @@ export default function App() {
               providerErrorMessage={courseState.errorMessage}
               onSignIn={handleCourseSignIn}
               onDisconnect={handleCourseDisconnect}
-              identifyState={identifyState}
-              onFindUserId={handleFindUserId}
               backendUrl={backendUrl}
               knoveraToken={knoveraToken}
-              diagnosticState={state}
-              redirectUri={redirectUri}
-              onDiagnosticSubmit={handleSubmit}
-              onDiagnosticReset={handleReset}
             />
           }
         />
