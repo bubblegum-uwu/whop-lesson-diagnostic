@@ -37,14 +37,8 @@ function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps 
     providerErrorMessage: null,
     onSignIn: () => {},
     onDisconnect: () => {},
-    identifyState: { phase: "idle" },
-    onFindUserId: () => {},
     backendUrl: "https://backend.example.com",
     knoveraToken: "token",
-    diagnosticState: { phase: "config", errorMessage: null, submitting: false },
-    redirectUri: "https://example.com/",
-    onDiagnosticSubmit: () => {},
-    onDiagnosticReset: () => {},
     ...overrides,
   };
 }

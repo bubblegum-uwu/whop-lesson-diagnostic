@@ -651,6 +651,115 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
 
   const latestCompletedRunId = runs.filter((r) => r.status === "COMPLETED").sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))[0]?.runId;
 
+  /**
+   * Historical failed legacy attempts (recovered pre-Synthesis-Set Whop
+   * course-synthesis runs, PR #34) do NOT compete for attention with
+   * current/native Runs — they're grouped into one collapsed disclosure
+   * below (see the "Run History" JSX). This is presentation-only: `runs`
+   * itself is untouched, nothing is deleted/filtered/mutated, and a native
+   * FAILED Run (an actual current operational failure) is deliberately
+   * NEVER part of this bucket — only `kind === "LEGACY_WHOP" && status ===
+   * "FAILED"` qualifies.
+   */
+  function isHistoricalFailedLegacyRun(run: SynthesisSetRunSummary): boolean {
+    return run.kind === "LEGACY_WHOP" && run.status === "FAILED";
+  }
+  const normalRuns = runs.filter((r) => !isHistoricalFailedLegacyRun(r));
+  const historicalFailedRuns = runs.filter(isHistoricalFailedLegacyRun);
+
+  /**
+   * One Run's row — identical for every Run regardless of where it renders
+   * (the normal list above, or the collapsed "Historical failed attempts"
+   * disclosure below), so a historical failed legacy Run stays exactly as
+   * individually inspectable (View Details -> RunSummaryPanel, frozen
+   * inputs/provenance, sanitized error, any recovered output) as any other
+   * Run. The ONE presentation difference: this specific Run's own
+   * top-level sanitized-error line — otherwise shown unconditionally for
+   * any failed Run — stays hidden until THIS Run is individually expanded,
+   * so the collapsed disclosure's own summary count is the only thing that
+   * "dumps" at a glance; the full technical error is still one click away,
+   * never destroyed or hidden permanently.
+   */
+  function renderRunItem(run: SynthesisSetRunSummary) {
+    const isLatestCompleted = run.runId === latestCompletedRunId;
+    const expanded = expandedRunId === run.runId;
+    const inputs = runInputsByRun.get(run.runId);
+    const output = runOutputByRun.get(run.runId);
+    const hideErrorUntilExpanded = isHistoricalFailedLegacyRun(run);
+    return (
+      <li key={run.runId} className="kv-card knovera-youtube-source-row" style={{ flexDirection: "column", alignItems: "stretch" }}>
+        <div className="knovera-youtube-source-main">
+          <span
+            className={`kv-badge ${
+              run.status === "COMPLETED" ? "kv-badge-success" : run.status === "FAILED" ? "kv-badge-danger" : run.status === "RUNNING" ? "kv-badge-accent" : "kv-badge-muted"
+            }`}
+          >
+            {run.status}
+          </span>
+          {isLatestCompleted && <span className="kv-badge kv-badge-accent">Latest</span>}
+          {run.kind === "LEGACY_WHOP" ? (
+            <span className="kv-badge kv-badge-muted">Legacy</span>
+          ) : (
+            <span className="kv-badge kv-badge-muted">Native</span>
+          )}
+          <span className="knovera-youtube-source-title">
+            Created {formatDate(run.createdAt)} · Completed {formatDate(run.completedAt)}
+          </span>
+        </div>
+        <p className="hint">
+          {run.readyCount} input{run.readyCount === 1 ? "" : "s"}
+          {run.skippedNotReadyCount > 0 ? ` · ${run.skippedNotReadyCount} skipped (not ready)` : ""}
+          {run.estimatedCost != null ? ` · $${run.estimatedCost.toFixed(2)}` : ""}
+          {run.model ? ` · Model: ${run.model}` : ""}
+        </p>
+        {run.kind === "LEGACY_WHOP" && (
+          <p className="hint">Recovered from this project&rsquo;s pre-Synthesis-Set course synthesis engine — historical, view-only.</p>
+        )}
+        {run.status === "FAILED" && (!hideErrorUntilExpanded || expanded) && (
+          <p className="hint" role="alert">
+            {run.errorType ? `${run.errorType}: ` : ""}
+            {run.sanitizedError ?? "This run failed."}
+          </p>
+        )}
+        {run.status === "FAILED" && hideErrorUntilExpanded && !expanded && (
+          <p className="hint">{run.errorType ?? "Permanent validation failure"} — View details for the full error.</p>
+        )}
+        <div className="knovera-synthesis-set-detail-actions">
+          <button type="button" className="link-button" onClick={() => void toggleViewRunDetail(run)}>
+            {expanded ? "Hide Details" : "View Details"}
+          </button>
+        </div>
+        {expanded && (
+          <div className="knovera-synthesis-run-detail">
+            <div className="kv-card knovera-empty-state">
+              <RunSummaryPanel run={run} />
+            </div>
+            {runDetailError && (
+              <p role="alert" className="hint">
+                {runDetailError}
+              </p>
+            )}
+            {run.status === "FAILED" ? null : !run.hasOutput ? (
+              <p className="hint">No output yet.</p>
+            ) : runDetailLoading && output == null ? (
+              <p className="hint">Loading run details…</p>
+            ) : output != null ? (
+              <>
+                <h3 className="knovera-section-title">Synthesis Result</h3>
+                <SynthesisResultViewer
+                  run={run}
+                  rawOutput={output}
+                  filenameBase={`${slugify(set.name)}-${(run.completedAt ?? run.createdAt).slice(0, 10)}-synthesis`}
+                />
+              </>
+            ) : null}
+            <FrozenInputsSection inputs={inputs} loading={runDetailLoading} />
+          </div>
+        )}
+      </li>
+    );
+  }
+
   return (
     <div className="knovera-page">
       <ProjectHeader backendUrl={backendUrl} knoveraToken={knoveraToken} />
@@ -923,83 +1032,19 @@ export function SynthesisSetDetailPage({ backendUrl, knoveraToken }: SynthesisSe
           <p>Use &ldquo;Run Synthesis&rdquo; above to create the first immutable Run from the current selection.</p>
         </div>
       ) : (
-        <ul className="knovera-youtube-source-list">
-          {runs.map((run) => {
-            const isLatestCompleted = run.runId === latestCompletedRunId;
-            const expanded = expandedRunId === run.runId;
-            const inputs = runInputsByRun.get(run.runId);
-            const output = runOutputByRun.get(run.runId);
-            return (
-              <li key={run.runId} className="kv-card knovera-youtube-source-row" style={{ flexDirection: "column", alignItems: "stretch" }}>
-                <div className="knovera-youtube-source-main">
-                  <span
-                    className={`kv-badge ${
-                      run.status === "COMPLETED" ? "kv-badge-success" : run.status === "FAILED" ? "kv-badge-danger" : run.status === "RUNNING" ? "kv-badge-accent" : "kv-badge-muted"
-                    }`}
-                  >
-                    {run.status}
-                  </span>
-                  {isLatestCompleted && <span className="kv-badge kv-badge-accent">Latest</span>}
-                  {run.kind === "LEGACY_WHOP" ? (
-                    <span className="kv-badge kv-badge-muted">Legacy</span>
-                  ) : (
-                    <span className="kv-badge kv-badge-muted">Native</span>
-                  )}
-                  <span className="knovera-youtube-source-title">
-                    Created {formatDate(run.createdAt)} · Completed {formatDate(run.completedAt)}
-                  </span>
-                </div>
-                <p className="hint">
-                  {run.readyCount} input{run.readyCount === 1 ? "" : "s"}
-                  {run.skippedNotReadyCount > 0 ? ` · ${run.skippedNotReadyCount} skipped (not ready)` : ""}
-                  {run.estimatedCost != null ? ` · $${run.estimatedCost.toFixed(2)}` : ""}
-                  {run.model ? ` · Model: ${run.model}` : ""}
-                </p>
-                {run.kind === "LEGACY_WHOP" && (
-                  <p className="hint">Recovered from this project&rsquo;s pre-Synthesis-Set course synthesis engine — historical, view-only.</p>
-                )}
-                {run.status === "FAILED" && (
-                  <p className="hint" role="alert">
-                    {run.errorType ? `${run.errorType}: ` : ""}
-                    {run.sanitizedError ?? "This run failed."}
-                  </p>
-                )}
-                <div className="knovera-synthesis-set-detail-actions">
-                  <button type="button" className="link-button" onClick={() => void toggleViewRunDetail(run)}>
-                    {expanded ? "Hide Details" : "View Details"}
-                  </button>
-                </div>
-                {expanded && (
-                  <div className="knovera-synthesis-run-detail">
-                    <div className="kv-card knovera-empty-state">
-                      <RunSummaryPanel run={run} />
-                    </div>
-                    {runDetailError && (
-                      <p role="alert" className="hint">
-                        {runDetailError}
-                      </p>
-                    )}
-                    {run.status === "FAILED" ? null : !run.hasOutput ? (
-                      <p className="hint">No output yet.</p>
-                    ) : runDetailLoading && output == null ? (
-                      <p className="hint">Loading run details…</p>
-                    ) : output != null ? (
-                      <>
-                        <h3 className="knovera-section-title">Synthesis Result</h3>
-                        <SynthesisResultViewer
-                          run={run}
-                          rawOutput={output}
-                          filenameBase={`${slugify(set.name)}-${(run.completedAt ?? run.createdAt).slice(0, 10)}-synthesis`}
-                        />
-                      </>
-                    ) : null}
-                    <FrozenInputsSection inputs={inputs} loading={runDetailLoading} />
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
+        <>
+          {normalRuns.length > 0 && <ul className="knovera-youtube-source-list">{normalRuns.map((run) => renderRunItem(run))}</ul>}
+          {historicalFailedRuns.length > 0 && (
+            <details className="knovera-diagnostic-tools">
+              <summary>Historical failed attempts ({historicalFailedRuns.length})</summary>
+              <p className="hint">
+                Recovered legacy Whop synthesis attempts that failed — kept as immutable audit history, collapsed here so they don&rsquo;t compete with
+                current Runs. Nothing here was deleted, re-run, or modified.
+              </p>
+              <ul className="knovera-youtube-source-list">{historicalFailedRuns.map((run) => renderRunItem(run))}</ul>
+            </details>
+          )}
+        </>
       )}
     </div>
   );

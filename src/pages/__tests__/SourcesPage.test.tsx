@@ -46,14 +46,8 @@ function baseProps(overrides: Partial<SourcesPageProps> = {}): SourcesPageProps 
     providerErrorMessage: null,
     onSignIn: () => {},
     onDisconnect: () => {},
-    identifyState: { phase: "idle" },
-    onFindUserId: () => {},
     backendUrl: "https://backend.example.com",
     knoveraToken: "token",
-    diagnosticState: { phase: "config", errorMessage: null, submitting: false },
-    redirectUri: "https://example.com/",
-    onDiagnosticSubmit: () => {},
-    onDiagnosticReset: () => {},
     ...overrides,
   };
 }
@@ -169,7 +163,7 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
   });
 
-  it("M/G: the Whop Courses card, provider-level Disconnect Whop, AND Diagnostic Tools remain visible for MasterMind (a project that does own a source) — no full lesson dashboard alongside them", async () => {
+  it("M/G: the Whop Courses card and provider-level Disconnect Whop remain visible for MasterMind (a project that does own a source) — no full lesson dashboard alongside them", async () => {
     stubFetch([WHOP_SOURCE]);
     renderSources("/projects/7/sources", { connected: true });
 
@@ -178,23 +172,30 @@ describe("SourcesPage — project-aware sources (Phase 4C)", () => {
     expect(screen.getByRole("heading", { name: "The Trading Accelerator" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Open" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Disconnect Whop" })).toBeInTheDocument();
-    expect(screen.getByText("Diagnostic Tools")).toBeInTheDocument();
     // No full lesson dashboard/table on this page anymore (Phase 4K follow-up).
     expect(screen.queryByRole("table")).not.toBeInTheDocument();
     expect(screen.queryByText("Analyze All Unanalyzed")).not.toBeInTheDocument();
   });
 
-  it("D: a confirmed-empty project hides Diagnostic Tools (legacy Whop-only utilities with nothing to operate on)", async () => {
-    stubFetch([]);
-    renderSources("/projects/7/sources");
+  it("never renders the legacy Diagnostic Tools disclosure (single-lesson diagnostic / find-my-user-id), for a project with sources, without sources, or pre-auth", async () => {
+    stubFetch([WHOP_SOURCE]);
+    renderSources("/projects/7/sources", { connected: true });
 
+    await waitFor(() => expect(screen.getByRole("heading", { name: "The Trading Accelerator" })).toBeInTheDocument());
+    expect(screen.queryByText("Diagnostic Tools")).not.toBeInTheDocument();
+    expect(screen.queryByText("First-time setup: find my Whop user ID")).not.toBeInTheDocument();
+    expect(screen.queryByText("Whop Lesson Media Diagnostic")).not.toBeInTheDocument();
+
+    // Same for a confirmed-empty project…
+    stubFetch([]);
+    const { unmount } = renderSources("/projects/7/sources");
     await waitFor(() => expect(screen.getByText("No sources connected yet.")).toBeInTheDocument());
     expect(screen.queryByText("Diagnostic Tools")).not.toBeInTheDocument();
-  });
+    unmount();
 
-  it("Diagnostic Tools stays visible pre-auth (it's still how a signed-out visitor can sign in / use the standalone diagnostic), not hidden by an unresolvable sources check", () => {
+    // …and pre-auth (signed out of Knovera never had a diagnostic-tools escape hatch to lose).
     renderSources("/projects/mastermind/sources", { backendUrl: "https://backend.example.com", knoveraToken: null });
-    expect(screen.getByText("Diagnostic Tools")).toBeInTheDocument();
+    expect(screen.queryByText("Diagnostic Tools")).not.toBeInTheDocument();
   });
 
   it("N: a project route does not leak another project's course into the Sources workspace", async () => {

@@ -94,20 +94,19 @@ describe("App — Phase 4A routing shell", () => {
   });
 
   /**
-   * Phase 4A — the Whop OAuth callback logic (App.tsx's useEffect reading
-   * window.location.search, parseCallbackParams, exchangeCodeForTokens,
-   * clearConfig) is completely untouched by routing. This exercises the
-   * "identify" flow (find-my-Whop-user-id) end to end through the REAL
-   * window.location.search — HashRouter/MemoryRouter never touch
-   * location.search, only location.hash, so this must keep working exactly
-   * as it did on the pre-Phase-4 single-page app.
-   *
-   * Phase 4D: the post-callback navigation lands on the Sources route,
-   * which now requires a Knovera session — so this test seeds one first,
-   * the same as any other already-logged-into-Knovera operator using this
-   * standalone tool.
+   * The legacy single-lesson diagnostic and find-my-Whop-user-id flows
+   * (and their "Diagnostic Tools" disclosure on the Sources page) were
+   * removed from the product surface — see SourcesPage.tsx. A callback
+   * config carrying either flow's old value can now only be a leftover
+   * from a sign-in that was mid-flight when this change deployed; the
+   * app must discard it and land cleanly on Sources, never crash or try
+   * to resume a flow that no longer has anywhere to render its result.
+   * The Whop OAuth callback mechanics themselves (window.location.search,
+   * parseCallbackParams, exchangeCodeForTokens, clearConfig) are otherwise
+   * untouched — see the "course" flow tests elsewhere in this file for
+   * that path still completing normally.
    */
-  it("OAuth callback: reads window.location.search, completes the identify flow, and resumes on the Sources page (Diagnostic Tools) where the result is now visible", async () => {
+  it("OAuth callback: a stray identify/diagnostic flow config (from before those tools were removed) is silently discarded, not a crash", async () => {
     seedKnoveraSession();
     sessionStorage.setItem("whop_oauth_pkce", JSON.stringify({ codeVerifier: "verifier123", state: "state123", nonce: "nonce123" }));
     sessionStorage.setItem("whop_diagnostic_config", JSON.stringify({ flow: "identify" }));
@@ -117,32 +116,15 @@ describe("App — Phase 4A routing shell", () => {
     // doesn't attempt to actually load a new page.
     window.history.pushState({}, "", "/?code=auth_code_abc&state=state123");
 
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url === "https://api.whop.com/oauth/token") {
-          return jsonResponse(200, { access_token: "whop_access_token", token_type: "bearer", expires_in: 3600 });
-        }
-        if (url === "https://api.whop.com/oauth/userinfo") {
-          return jsonResponse(200, { sub: "user_abc123" });
-        }
-        return jsonResponse(404, {});
-      }),
-    );
-
     renderApp("/");
 
-    // Confirms window.location.search was actually read: the identify flow
-    // only ever starts when isCallback is true, which requires exactly this.
-    await waitFor(() => expect(screen.getByText("user_abc123")).toBeInTheDocument());
-
-    // Confirms the app navigated somewhere the result is visible, rather
-    // than stranding it on the (now hash-less) landing route.
-    expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("heading", { name: "MasterMind" })).toBeInTheDocument());
     expect(screen.getByRole("heading", { name: "Whop" })).toBeInTheDocument();
+    // The stray config was consumed/discarded, not left pending forever.
+    expect(sessionStorage.getItem("whop_diagnostic_config")).toBeNull();
   });
 
-  it("OAuth callback: an invalid/missing pending sign-in shows the existing fatal_error message, not a crash", async () => {
+  it("OAuth callback: an invalid/missing pending sign-in shows a graceful error on the Whop provider card, not a crash", async () => {
     seedKnoveraSession();
     // No sessionConfig saved at all — loadConfig() returns null.
     window.history.pushState({}, "", "/?code=auth_code_abc&state=whatever");

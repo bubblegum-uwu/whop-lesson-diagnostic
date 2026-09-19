@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { SynthesisSetDetailPage } from "../SynthesisSetDetailPage";
 import type { SynthesisSetDetail } from "../../lib/synthesisSetsApi";
@@ -1228,7 +1228,7 @@ describe("SynthesisSetDetailPage — Pre-4M Whop lesson membership + legacy hist
     };
   }
 
-  it("25: recovered legacy Whop Runs render in the unified Run History, both COMPLETED and FAILED, never discarding failures", async () => {
+  it("25: recovered legacy Whop Runs render in the unified Run History, both COMPLETED and FAILED, never discarding failures — the FAILED one is grouped into the collapsed Historical failed attempts disclosure, never a full card by default", async () => {
     const runs: SynthesisSetRunSummary[] = [
       legacyRunSummary(),
       legacyRunSummary({
@@ -1245,9 +1245,15 @@ describe("SynthesisSetDetailPage — Pre-4M Whop lesson membership + legacy hist
     stubFetch({ set: makeSet(), runs });
     renderPage();
     await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+    // The completed legacy Run renders normally, outside the disclosure.
     expect(screen.getByText("COMPLETED")).toBeInTheDocument();
+    // The failed legacy Run still exists in Run History (never discarded) —
+    // its status badge and a short reason render, but the FULL sanitized
+    // error text is not dumped by default.
     expect(screen.getByText("FAILED")).toBeInTheDocument();
-    expect(screen.getByText(/Synthesis failed\./)).toBeInTheDocument();
+    expect(screen.getByText("Historical failed attempts (1)")).toBeInTheDocument();
+    expect(screen.queryByText(/Synthesis failed\./)).not.toBeInTheDocument();
+    expect(screen.getByText(/gemini_error — View details for the full error\./)).toBeInTheDocument();
     // Both are recovered legacy runs — labeled as such, never presented as a fresh native Run.
     expect(screen.getAllByText("Legacy")).toHaveLength(2);
   });
@@ -1330,6 +1336,165 @@ describe("SynthesisSetDetailPage — Pre-4M Whop lesson membership + legacy hist
     expect(screen.getByText("analysis #9002")).toBeInTheDocument();
     expect(screen.getByText("The Trading Accelerator")).toBeInTheDocument();
     expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/runs/run-native/inputs"))).toBe(true);
+  });
+});
+
+describe("SynthesisSetDetailPage — Historical failed legacy Run History grouping (Diagnostic Tools / Run History cleanup)", () => {
+  function makeLegacyRun(overrides: Partial<SynthesisSetRunSummary> = {}): SynthesisSetRunSummary {
+    return {
+      runId: "legacy-run",
+      kind: "LEGACY_WHOP",
+      status: "COMPLETED",
+      createdAt: "2026-09-01T00:00:00.000Z",
+      startedAt: "2026-09-01T00:01:00.000Z",
+      completedAt: "2026-09-01T01:00:00.000Z",
+      model: "gemini-3.8-flash",
+      promptVersion: "v1",
+      sourceCount: 28,
+      readyCount: 28,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: 0.33,
+      processingDurationSeconds: null,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: true,
+      ...overrides,
+    };
+  }
+
+  function makeNativeRun(overrides: Partial<SynthesisSetRunSummary> = {}): SynthesisSetRunSummary {
+    return {
+      runId: "native-run",
+      kind: "NATIVE",
+      status: "COMPLETED",
+      createdAt: "2026-09-10T00:00:00.000Z",
+      startedAt: "2026-09-10T00:01:00.000Z",
+      completedAt: "2026-09-10T01:00:00.000Z",
+      model: "gemini-3.8-flash",
+      promptVersion: "v2",
+      sourceCount: 3,
+      readyCount: 3,
+      skippedNotReadyCount: 0,
+      inputTokens: null,
+      outputTokens: null,
+      thinkingTokens: null,
+      estimatedCost: 0.12,
+      processingDurationSeconds: 30,
+      errorType: null,
+      sanitizedError: null,
+      hasOutput: true,
+      ...overrides,
+    };
+  }
+
+  function mixedRuns(): SynthesisSetRunSummary[] {
+    return [
+      makeNativeRun({ runId: "native-failed", status: "FAILED", createdAt: "2026-09-12T00:00:00.000Z", completedAt: "2026-09-12T00:05:00.000Z", errorType: "gemini_error", sanitizedError: "Gemini request failed after 3 retries.", hasOutput: false, estimatedCost: null }),
+      makeLegacyRun({ runId: "legacy-completed", createdAt: "2026-09-11T00:00:00.000Z", completedAt: "2026-09-11T01:00:00.000Z" }),
+      makeLegacyRun({
+        runId: "legacy-failed-1",
+        status: "FAILED",
+        createdAt: "2026-08-01T00:00:00.000Z",
+        completedAt: "2026-08-01T00:05:00.000Z",
+        errorType: "SynthesisInvariantError",
+        sanitizedError: "The validator rejected a rule marked VERIFIED_GLOBAL that had only one distinct lesson of support.",
+        hasOutput: false,
+        estimatedCost: null,
+      }),
+      makeNativeRun({ runId: "native-completed", createdAt: "2026-07-15T00:00:00.000Z", completedAt: "2026-07-15T01:00:00.000Z" }),
+      makeLegacyRun({
+        runId: "legacy-failed-2",
+        status: "FAILED",
+        createdAt: "2026-07-01T00:00:00.000Z",
+        completedAt: "2026-07-01T00:05:00.000Z",
+        errorType: "invalid_json",
+        sanitizedError: "Invalid JSON encountered while parsing canonical_strategy.",
+        hasOutput: false,
+        estimatedCost: null,
+      }),
+    ];
+  }
+
+  it("1-6: normal Runs (legacy completed, native completed, native failed) render as full cards; legacy failed Runs are grouped into one collapsed 'Historical failed attempts' disclosure with the correct count", async () => {
+    stubFetch({ set: makeSet(), runs: mixedRuns() });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+
+    const disclosure = screen.getByText("Historical failed attempts (2)").closest("details") as HTMLElement;
+    expect(disclosure).toBeInTheDocument();
+    // Collapsed by default.
+    expect(disclosure).not.toHaveAttribute("open");
+
+    const normalList = disclosure.parentElement!.querySelector("ul.knovera-youtube-source-list") as HTMLElement;
+    // Exactly 3 normal rows: legacy completed, native completed, native failed.
+    expect(within(normalList).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(normalList).getAllByText("COMPLETED")).toHaveLength(2);
+    expect(within(normalList).getByText("FAILED")).toBeInTheDocument();
+    // Native FAILED keeps its current normal behavior — full error visible unconditionally, never hidden/grouped.
+    expect(within(normalList).getByText(/Gemini request failed after 3 retries\./)).toBeInTheDocument();
+
+    const failedList = disclosure.querySelector("ul.knovera-youtube-source-list") as HTMLElement;
+    expect(within(failedList).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(failedList).getAllByText("Legacy")).toHaveLength(2);
+    expect(within(failedList).getAllByText("FAILED")).toHaveLength(2);
+    // The full technical errors are NOT dumped into the collapsed list by default.
+    expect(screen.queryByText(/VERIFIED_GLOBAL/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Invalid JSON encountered while parsing canonical_strategy/)).not.toBeInTheDocument();
+  });
+
+  it("7-10: each historical failed legacy Run remains individually inspectable — expanding one reveals its own full sanitized error and provenance without affecting the other", async () => {
+    stubFetch({ set: makeSet(), runs: mixedRuns(), runInputs: { "legacy-failed-1": { kind: "LEGACY_WHOP", inputs: [] } } });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Historical failed attempts (2)")).toBeInTheDocument());
+
+    const disclosure = screen.getByText("Historical failed attempts (2)").closest("details") as HTMLElement;
+    const failedList = disclosure.querySelector("ul.knovera-youtube-source-list") as HTMLElement;
+    const viewDetailsButtons = within(failedList).getAllByRole("button", { name: "View Details" });
+    expect(viewDetailsButtons).toHaveLength(2);
+
+    fireEvent.click(viewDetailsButtons[0]);
+    await waitFor(() => expect(screen.getByText(/VERIFIED_GLOBAL/)).toBeInTheDocument());
+    // The OTHER historical failed run stays collapsed — its error is not revealed.
+    expect(screen.queryByText(/Invalid JSON encountered while parsing canonical_strategy/)).not.toBeInTheDocument();
+    // Provenance/metadata (RunSummaryPanel) becomes available for the expanded one.
+    expect(screen.getByText("Prompt Version")).toBeInTheDocument();
+    expect(screen.getByText("v1")).toBeInTheDocument();
+  });
+
+  it("11-12: no Run is removed from the client data model, and normal-run ordering is preserved after filtering out historical failed legacy Runs", async () => {
+    stubFetch({ set: makeSet(), runs: mixedRuns() });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+
+    const disclosure = screen.getByText("Historical failed attempts (2)").closest("details") as HTMLElement;
+    const normalList = disclosure.parentElement!.querySelector("ul.knovera-youtube-source-list") as HTMLElement;
+    // mixedRuns() provides [native-failed, legacy-completed, legacy-failed-1, native-completed, legacy-failed-2] —
+    // filtering out the two legacy-failed entries must preserve the relative order of the rest.
+    const normalTitles = within(normalList)
+      .getAllByRole("listitem")
+      .map((li) => li.querySelector(".knovera-youtube-source-title")?.textContent);
+    expect(normalTitles).toEqual([
+      "Created Sep 12, 2026 · Completed Sep 12, 2026",
+      "Created Sep 11, 2026 · Completed Sep 11, 2026",
+      "Created Jul 15, 2026 · Completed Jul 15, 2026",
+    ]);
+
+    // Refresh re-fetches the identical full Run set — nothing was ever dropped client-side.
+    const fetchMock = vi.mocked(fetch) as unknown as ReturnType<typeof vi.fn>;
+    const callsBefore = fetchMock.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(fetchMock.mock.calls.length).toBeGreaterThan(callsBefore));
+    expect(screen.getByText("Historical failed attempts (2)")).toBeInTheDocument();
+  });
+
+  it("zero-case: no 'Historical failed attempts' disclosure renders when there are zero failed legacy Runs", async () => {
+    stubFetch({ set: makeSet(), runs: [makeLegacyRun(), makeNativeRun({ runId: "native-2" })] });
+    renderPage();
+    await waitFor(() => expect(screen.getByText("Run History")).toBeInTheDocument());
+    expect(screen.queryByText(/Historical failed attempts/)).not.toBeInTheDocument();
   });
 });
 
